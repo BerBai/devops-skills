@@ -1,0 +1,72 @@
+# Systemd service unit template — opinionated "fail loudly" defaults.
+#
+# Copy to /etc/systemd/system/<name>.service on the target host, adjust the
+# four [USER-FILL] lines, then `systemctl daemon-reload && systemctl enable --now <name>`.
+#
+# Why these defaults?
+#   - Restart=on-failure (not "always"): a crash-looping service should
+#     not be hidden by infinite restarts. RestartSec=10 gives ops a chance
+#     to spot the loop.
+#   - StartLimitBurst + StartLimitIntervalSec: 5 restarts in 5 minutes
+#     parks the service in "failed" so monitoring sees it.
+#   - StandardOutput=journal so `journalctl -u` Just Works.
+#   - Hardening flags below are conservative; widen as needed.
+
+[Unit]
+Description=[USER-FILL: short description]
+Documentation=[USER-FILL: URL or runbook path]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=[USER-FILL: dedicated service user, NOT root]
+Group=[USER-FILL: dedicated service group]
+WorkingDirectory=/srv/[USER-FILL]
+
+# Environment — prefer an EnvironmentFile so the unit itself has no secrets
+EnvironmentFile=-/etc/[USER-FILL]/env
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=[USER-FILL: absolute path, real argv, no shell]
+ExecReload=/bin/kill -HUP $MAINPID
+
+# --- Restart policy ---------------------------------------------------------
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# --- Logging ----------------------------------------------------------------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=[USER-FILL]
+
+# --- Resource limits (raise to match your workload) ------------------------
+LimitNOFILE=65536
+LimitNPROC=4096
+TasksMax=4096
+MemoryMax=infinity
+# Example cgroup cap:
+# MemoryMax=2G
+# CPUQuota=200%
+
+# --- Hardening (start conservative, widen if needed) -----------------------
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/srv/[USER-FILL] /var/log/[USER-FILL]
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

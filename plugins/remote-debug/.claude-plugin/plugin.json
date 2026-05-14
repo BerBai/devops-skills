@@ -1,0 +1,11 @@
+{
+  "name": "remote-debug",
+  "version": "0.1.0",
+  "description": "Cross-device debugging playbook for Claude Code. Use when the user reports a problem on a remote machine — slow service, high load, disk full, port unreachable, mystery OOM, log noise — and you need to figure out what's wrong. Provides symptom→root-cause decision trees, Linux/network diagnostics, incident response workflow (SEV1–SEV4), and runbook templates. Pairs with ssh-core (and optionally ssh-guarded) for transport.",
+  "author": {
+    "name": "devops-skills contributors"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/BerBai/devops-skills",
+  "keywords": ["debugging", "incident-response", "linux", "network", "observability", "playbook", "remote", "故障排查", "诊断", "应急响应"]
+}

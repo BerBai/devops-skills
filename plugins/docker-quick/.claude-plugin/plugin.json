@@ -1,0 +1,11 @@
+{
+  "name": "docker-quick",
+  "version": "0.1.0",
+  "description": "Docker / container diagnostic playbook. Use when the user reports container issues — Exited (137), OOM, restart loops, image bloat, layer cache misses, Compose service unhealthy, port already in use, mount failures. Read-only inspect via docker/podman/compose; remote hosts go through ssh-core. Skip for Kubernetes Pods (use k8s-debug) and skip for general host issues (use remote-debug).",
+  "author": {
+    "name": "devops-skills contributors"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/BerBai/devops-skills",
+  "keywords": ["docker", "container", "compose", "podman", "image", "layer", "dockerfile", "oom", "exited", "restart", "unhealthy", "容器", "镜像"]
+}

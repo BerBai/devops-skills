@@ -1,0 +1,11 @@
+{
+  "name": "k8s-debug",
+  "version": "0.1.0",
+  "description": "Kubernetes diagnostic playbook for Claude Code. Use when the user reports Pod/Deployment/Service/Namespace issues — CrashLoopBackOff, OOMKilled, ImagePullBackOff, Pending pods, failed Helm releases, broken Ingress, or unhealthy nodes. Diagnoses via kubectl/helm; runs locally when host alias is `local`, otherwise through ssh-core. Read-only — does not deploy, scale, or apply. Pair with ssh-guarded for write operations.",
+  "author": {
+    "name": "devops-skills contributors"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/BerBai/devops-skills",
+  "keywords": ["kubernetes", "k8s", "kubectl", "pod", "deployment", "crashloopbackoff", "oomkilled", "imagepullbackoff", "helm", "ingress", "集群", "故障", "诊断"]
+}

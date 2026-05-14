@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Runtime state — these are generated at use time, never committed
+plugins/ssh-guarded/skills/ssh-guarded/reports/requests/*.json
+plugins/ssh-guarded/skills/ssh-guarded/reports/jobs/*.json
+plugins/ssh-guarded/skills/ssh-guarded/server_list.local.json
+plugins/ssh-guarded/skills/ssh-guarded/project.local.json
+**/.bak.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Secrets — defense in depth, the code already refuses to read them
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+known_hosts
+authorized_keys
+.env
+.env.*
+!.env.example
+
+# Local dev tooling — personal state, not project conventions.
+# Keep .trellis/spec/, .trellis/scripts/, .trellis/config.yaml, .trellis/workflow.md
+# (those are shared development guidelines that collaborators need).
+.claude/
+.trellis/
+AGENTS.md

@@ -1,0 +1,69 @@
+{
+  "name": "devops-skills",
+  "owner": {
+    "name": "devops-skills contributors",
+    "url": "https://github.com/BerBai/devops-skills"
+  },
+  "metadata": {
+    "description": "Open-source DevOps & cross-device debugging skills for Claude Code. Eight composable plugins spanning SSH transport, safety-first audit, remote host debugging, Kubernetes, Docker, multi-source log aggregation, Terraform state, and CI/CD pipelines.",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "ssh-core",
+      "source": "./plugins/ssh-core",
+      "description": "SSH primitives — persistent daemon connections, cluster broadcast, port-forward tunnels, and direct server-to-server transfer. The fast lane.",
+      "category": "transport",
+      "tags": ["ssh", "scp", "rsync", "tunnel", "cluster", "remote-execution"]
+    },
+    {
+      "name": "ssh-guarded",
+      "source": "./plugins/ssh-guarded",
+      "description": "Safety-first SSH operations — request/execute two-phase writes, redacted output by default, workdir sandbox, detached long-running jobs. The slow lane.",
+      "category": "safety",
+      "tags": ["ssh", "audit", "safety", "request-execute", "redact", "sandbox"]
+    },
+    {
+      "name": "remote-debug",
+      "source": "./plugins/remote-debug",
+      "description": "Cross-device debugging playbook — symptom → root-cause decision trees, incident response workflow, Linux/network diagnostics, runbook templates.",
+      "category": "debug",
+      "tags": ["debugging", "incident-response", "linux", "network", "observability", "playbook"]
+    },
+    {
+      "name": "k8s-debug",
+      "source": "./plugins/k8s-debug",
+      "description": "Kubernetes diagnostic playbook — Pod/Deployment/Service/Namespace issues, CrashLoopBackOff, OOMKilled, ImagePullBackOff, Helm release health. Read-only.",
+      "category": "debug",
+      "tags": ["kubernetes", "k8s", "kubectl", "pod", "helm", "ingress"]
+    },
+    {
+      "name": "docker-quick",
+      "source": "./plugins/docker-quick",
+      "description": "Docker / container diagnostic playbook — exit codes, restart loops, image bloat, Compose stack health. Read-only inspect.",
+      "category": "debug",
+      "tags": ["docker", "container", "compose", "image", "podman"]
+    },
+    {
+      "name": "log-aggregator",
+      "source": "./plugins/log-aggregator",
+      "description": "Multi-source log aggregation and correlation across hosts, containers, Pods, and files. Tail, correlate by trace-id/time-window, grep across sources.",
+      "category": "debug",
+      "tags": ["log", "tail", "aggregate", "correlate", "journalctl", "observability"]
+    },
+    {
+      "name": "iac-state",
+      "source": "./plugins/iac-state",
+      "description": "Terraform / OpenTofu state diagnostic playbook — state lock, drift detection, module audit. Read-only.",
+      "category": "iac",
+      "tags": ["terraform", "opentofu", "iac", "drift", "state", "module"]
+    },
+    {
+      "name": "cicd-debug",
+      "source": "./plugins/cicd-debug",
+      "description": "CI/CD pipeline diagnostic playbook for GitHub Actions and GitLab CI — failed jobs, runner pool health, secret scope audit.",
+      "category": "ci",
+      "tags": ["ci", "cd", "github-actions", "gitlab-ci", "pipeline", "runner"]
+    }
+  ]
+}
