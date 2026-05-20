@@ -23,7 +23,7 @@ import argparse
 import json
 import sys
 
-UNIMPLEMENTED_NOTE = "docker-quick: 'inspect_container' is not implemented in v0.1.0 scaffolding."
+UNIMPLEMENTED_NOTE = "docker-quick: 'inspect_container' is not implemented in v0.2.0 scaffolding."
 
 
 def build_parser() -> argparse.ArgumentParser:

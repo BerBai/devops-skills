@@ -32,7 +32,7 @@ import sys
 
 
 UNIMPLEMENTED_NOTE = (
-    "ssh-guarded: 'scan_software' is not implemented in v0.1.0 scaffolding."
+    "ssh-guarded: 'scan_software' is not implemented in v0.2.0 scaffolding."
 )
 
 

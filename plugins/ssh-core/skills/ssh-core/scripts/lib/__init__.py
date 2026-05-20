@@ -76,11 +76,11 @@ def alias_state_path(alias: str, kind: str = "ssh_daemon") -> Path:
 
 
 def unimplemented(name: str) -> int:
-    """Stub used by every script in v0.1.0 scaffolding."""
+    """Stub used by every script in v0.2.0 scaffolding."""
     result = json_result(
         success=False,
         exit_code=2,
-        stderr=f"ssh-core: '{name}' is not implemented in v0.1.0 scaffolding.\n"
+        stderr=f"ssh-core: '{name}' is not implemented in v0.2.0 scaffolding.\n"
         "See CONTRIBUTING.md for the build-out roadmap.\n",
     )
     emit(result, as_json="--json" in sys.argv)

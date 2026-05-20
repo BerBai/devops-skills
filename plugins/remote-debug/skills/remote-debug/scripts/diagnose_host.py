@@ -43,7 +43,7 @@ import sys
 
 
 UNIMPLEMENTED_NOTE = (
-    "remote-debug: 'diagnose_host' is not implemented in v0.1.0 scaffolding. "
+    "remote-debug: 'diagnose_host' is not implemented in v0.2.0 scaffolding. "
     "See references/linux_diagnostics.md for the commands it will run."
 )
 

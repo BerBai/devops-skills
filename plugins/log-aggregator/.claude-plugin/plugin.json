@@ -1,6 +1,6 @@
 {
   "name": "log-aggregator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Multi-source log aggregation and correlation. Use when the user needs to follow logs across multiple hosts/containers/Pods simultaneously, correlate events across sources by time/trace-id/request-id, or hunt for the same error pattern across N machines. Aggregates from journalctl, docker logs, kubectl logs, plain files, and remote tails via ssh-core. Read-only.",
   "author": {
     "name": "devops-skills contributors"

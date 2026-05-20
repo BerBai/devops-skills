@@ -25,7 +25,7 @@ import sys
 
 
 UNIMPLEMENTED_NOTE = (
-    "ssh-guarded: 'request_upload' is not implemented in v0.1.0 scaffolding."
+    "ssh-guarded: 'request_upload' is not implemented in v0.2.0 scaffolding."
 )
 
 

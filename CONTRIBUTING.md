@@ -94,6 +94,16 @@ Each plugin is **self-contained** — its `skills/<name>/scripts/` reaches outsi
 - [ ] `secret_scope_audit.py` — secret visibility map + risk flags (fork-PR exposure, long-lived creds, etc.)
 - [ ] Provider auth via `gh auth status` / `glab auth status` — fail fast if not logged in
 
+## Setup
+
+This project uses [uv](https://github.com/astral-sh/uv) for dependency management. After cloning:
+
+```bash
+uv sync --all-extras
+```
+
+This creates `.venv/` with `pytest`, `ruff`, and `mypy` installed — the tools the test and lint sections below assume are on `PATH`.
+
 ## Testing
 
 ```bash

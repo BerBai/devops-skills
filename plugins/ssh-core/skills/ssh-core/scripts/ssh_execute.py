@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ssh_execute.py — run a command on a remote host (scaffold).
 
-v0.1.0 surface:
+v0.2.0 surface:
     python ssh_execute.py <alias> <command> [--timeout N] [--no-daemon] [--json]
 
 v1.0 behavior (planned):

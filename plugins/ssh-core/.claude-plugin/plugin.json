@@ -1,6 +1,6 @@
 {
   "name": "ssh-core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "SSH transport primitives — persistent daemon connections, cluster broadcast, port-forward tunnels, and direct server-to-server transfer. Use whenever the task touches ssh, scp, rsync, a remote host alias, user@host, an IP address (192.168.x.x, 10.0.x.x), or 跳板机/jumphost/bastion. Excludes localhost-only operations.",
   "author": {
     "name": "devops-skills contributors"

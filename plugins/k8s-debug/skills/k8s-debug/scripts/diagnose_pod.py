@@ -26,7 +26,7 @@ import argparse
 import json
 import sys
 
-UNIMPLEMENTED_NOTE = "k8s-debug: 'diagnose_pod' is not implemented in v0.1.0 scaffolding."
+UNIMPLEMENTED_NOTE = "k8s-debug: 'diagnose_pod' is not implemented in v0.2.0 scaffolding."
 
 
 def build_parser() -> argparse.ArgumentParser:

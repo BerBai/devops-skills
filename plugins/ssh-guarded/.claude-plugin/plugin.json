@@ -1,6 +1,6 @@
 {
   "name": "ssh-guarded",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Safety-first SSH operations on top of ssh-core. Use when working on production servers, customer environments, or any context where every write must be auditable. Implements request→review→execute two-phase writes, redacted output by default, workdir-sandboxed file operations, and detached long-running jobs. Skip for quick scratch work on personal machines.",
   "author": {
     "name": "devops-skills contributors"

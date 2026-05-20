@@ -94,6 +94,16 @@ devops-skills/
 - [ ] `secret_scope_audit.py` —— secret 可见性图 + 风险标记（fork-PR 暴露、长效凭据等）
 - [ ] Provider 鉴权检测：`gh auth status` / `glab auth status` 没登录直接 fail fast
 
+## 环境准备
+
+本项目使用 [uv](https://github.com/astral-sh/uv) 管理依赖。clone 之后执行：
+
+```bash
+uv sync --all-extras
+```
+
+这会创建 `.venv/`，并装好 `pytest`、`ruff`、`mypy` —— 也就是下面测试和 lint 章节假定能直接在 `PATH` 里找到的工具。
+
 ## 测试
 
 ```bash
