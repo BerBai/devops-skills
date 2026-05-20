@@ -36,9 +36,8 @@ authorized_keys
 .env.*
 !.env.example
 
-# Local dev tooling — personal state, not project conventions.
-# Keep .trellis/spec/, .trellis/scripts/, .trellis/config.yaml, .trellis/workflow.md
-# (those are shared development guidelines that collaborators need).
+# Local dev tooling — personal Trellis workspace, never committed.
+# Team conventions live in CONTRIBUTING.md and code, not in .trellis/.
 .claude/
 .trellis/
 AGENTS.md
