@@ -2,9 +2,11 @@
 
 Stable surface:
     json_result(success, exit_code, stdout, stderr, data) -> dict
-    emit(result, as_json: bool) -> None  # prints to stdout
-    msys_safe_env() -> dict              # adds MSYS_NO_PATHCONV=1 on Windows
+    emit(result, as_json: bool) -> None              # prints to stdout
+    msys_safe_env() -> dict                          # adds MSYS_NO_PATHCONV=1 on Windows
     alias_state_path(alias, kind) -> Path
+    filter_ssh_noise(stderr) -> tuple[str, list[str]]  # split known-hosts noise out
+    classify_failure(returncode, stderr) -> str | None # network|auth|remote_error|None
 
 Everything else is an implementation detail and may move between versions.
 """
@@ -14,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -73,6 +76,76 @@ def alias_state_path(alias: str, kind: str = "ssh_daemon") -> Path:
     base.mkdir(mode=0o700, exist_ok=True)
     digest = hashlib.md5(alias.encode("utf-8")).hexdigest()
     return base / f"{digest}.json"
+
+
+# Lines emitted by the ssh client itself that we want to keep out of the
+# top-level `stderr` field. Add patterns sparingly — when in doubt, leave a
+# line in real_stderr (fail-open). See ADR-001 D4 for the policy.
+SSH_NOISE_PATTERNS = (
+    re.compile(r"^Warning: Permanently added .* to the list of known hosts\.$"),
+)
+
+
+# Regex sets used by classify_failure. Both are deliberately scoped to
+# returncode == 255 by the classifier so they cannot false-positive on
+# remote commands that emit "Permission denied" in their own stderr.
+# (255 is ssh's own conventional exit code for client-side failure.)
+SSH_CLIENT_FAILURE_EXIT_CODE = 255
+
+NETWORK_PATTERN = re.compile(
+    r"Could not resolve hostname|Network is unreachable|"
+    r"No route to host|Connection refused|Connection timed out"
+)
+AUTH_PATTERN = re.compile(
+    r"Permission denied \(publickey|"
+    r"password authentication failed|Authentication failed"
+)
+
+
+def filter_ssh_noise(stderr: str) -> tuple[str, list[str]]:
+    """Split captured ssh stderr into (real_stderr, noise_lines).
+
+    Fail-open: any line that does NOT match a pattern in SSH_NOISE_PATTERNS
+    stays in real_stderr. The library of patterns is intentionally small;
+    missing a real error is worse than emitting an extra ssh warning to
+    the user.
+
+    Preserves a trailing newline iff the input had one and at least one
+    real line survived (fixes the spike's dropped-newline behavior).
+    """
+    real: list[str] = []
+    noise: list[str] = []
+    for line in stderr.splitlines():
+        if any(p.match(line) for p in SSH_NOISE_PATTERNS):
+            noise.append(line)
+        else:
+            real.append(line)
+    out = "\n".join(real)
+    if real and stderr.endswith("\n"):
+        out += "\n"
+    return out, noise
+
+
+def classify_failure(returncode: int, stderr: str) -> str | None:
+    """Map (returncode, stderr) to one of None / network / auth / remote_error.
+
+    Returns None for `returncode == 0` (success). For non-zero codes, the
+    ssh-client failure regexes only apply when `returncode == 255` (ssh's
+    own exit code for client-side problems); everything else is bucketed
+    as `remote_error`.
+
+    Note: this function does NOT return "timeout". The caller is the only
+    code path that knows whether `subprocess.TimeoutExpired` was raised,
+    so timeout classification belongs there, not here.
+    """
+    if returncode == 0:
+        return None
+    if returncode == SSH_CLIENT_FAILURE_EXIT_CODE:
+        if NETWORK_PATTERN.search(stderr):
+            return "network"
+        if AUTH_PATTERN.search(stderr):
+            return "auth"
+    return "remote_error"
 
 
 def unimplemented(name: str) -> int:
