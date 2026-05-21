@@ -42,6 +42,9 @@ ignore = ["E501", "PLR0913"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -q"
+markers = [
+    "live_ssh: integration tests that ssh to a real host (default alias 'pai'). Skipped by default; run with `pytest -m live_ssh`. See tests/README.md for prerequisites.",
+]
 
 [build-system]
 requires = ["hatchling>=1.20"]
