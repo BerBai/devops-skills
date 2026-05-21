@@ -46,6 +46,8 @@ Each plugin is **self-contained** — its `skills/<name>/scripts/` reaches outsi
 - [ ] `ssh_cluster.py` — ThreadPoolExecutor broadcast, tag/environment filters
 - [ ] `ssh_server_transfer.py` — direct/stream/hybrid/auto modes
 - [ ] `ssh_config_manager.py` — CRUD on `~/.ssh/config` with comment-line metadata
+- [ ] `ssh_upload.py` / `ssh_download.py` — per-file SFTP transfer with progress and resume
+- [ ] `deploy_pubkey.py` — idempotent public-key push to remote `authorized_keys`
 - [ ] Windows `MSYS_NO_PATHCONV=1` plumbing in every transfer path
 
 ### `ssh-guarded`
@@ -53,7 +55,7 @@ Each plugin is **self-contained** — its `skills/<name>/scripts/` reaches outsi
 - [ ] `run_request.py` — review-then-execute; refuses to run without `--execute`
 - [ ] `exec_detached.py` — nohup + local job manifest, `status` and `tail-log` subcommands
 - [ ] `scan_software.py` — cache `python/cuda/gcc/cmake/kubectl/terraform/docker/...` per host
-- [ ] Redact module — default-on for all string output paths
+- [ ] `redact_check.py` — sanity-check CLI for the redact module, which is default-on for all string output paths
 
 ### `remote-debug`
 - [ ] `diagnose_host.py` — uptime/load/disk/mem/net/zombie checks, severity scoring
@@ -79,8 +81,8 @@ Each plugin is **self-contained** — its `skills/<name>/scripts/` reaches outsi
 - [ ] `tail_multi.py` — multi-source tail with normalized timestamps + noise filter + level filter + suppression
 - [ ] `correlate.py` — anchor + window correlation across sources, with root-cause hint
 - [ ] `grep_across_sources.py` — pattern hunt across N sources, summary / raw / json output modes
-- [ ] Source spec parser supporting `journal://`, `docker://`, `kube://`, `file://` with brace/glob expansion
-- [ ] Clock-skew probe at startup; emit `clock_skew_ms` metadata per source
+- [ ] Source spec parser supporting `journal://`, `docker://`, `kube://`, `file://` with brace/glob expansion (embedded in `tail_multi.py`)
+- [ ] Clock-skew probe at startup; emit `clock_skew_ms` metadata per source (embedded in `tail_multi.py`)
 
 ### `iac-state`
 - [ ] `state_inspect.py` — backend + size + lock status + workspace list

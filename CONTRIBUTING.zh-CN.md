@@ -46,6 +46,8 @@ devops-skills/
 - [ ] `ssh_cluster.py` —— ThreadPoolExecutor 广播，支持 tag / environment 过滤
 - [ ] `ssh_server_transfer.py` —— direct / stream / hybrid / auto 四种模式
 - [ ] `ssh_config_manager.py` —— `~/.ssh/config` 的 CRUD（带注释行元数据）
+- [ ] `ssh_upload.py` / `ssh_download.py` —— 单文件 SFTP 传输，含进度与续传
+- [ ] `deploy_pubkey.py` —— 幂等地把本地公钥推到远端 `authorized_keys`
 - [ ] 所有传输路径 Windows 端强制 `MSYS_NO_PATHCONV=1`
 
 ### `ssh-guarded`
@@ -53,7 +55,7 @@ devops-skills/
 - [ ] `run_request.py` —— 审核后执行，无 `--execute` 时只校验
 - [ ] `exec_detached.py` —— nohup + 本地 job 清单，含 `status` / `tail-log` 子命令
 - [ ] `scan_software.py` —— 缓存 `python/cuda/gcc/cmake/kubectl/terraform/docker/...` 各主机的安装版本
-- [ ] Redact 模块 —— 所有字符串输出路径默认脱敏
+- [ ] `redact_check.py` —— redact 模块的体检 CLI；模块本身在所有字符串输出路径上默认脱敏
 
 ### `remote-debug`
 - [ ] `diagnose_host.py` —— uptime / load / disk / mem / net / 僵尸进程检查，附严重度打分
@@ -79,8 +81,8 @@ devops-skills/
 - [ ] `tail_multi.py` —— 多源 tail，含时间归一化 + 噪音过滤 + level 过滤 + 速率抑制
 - [ ] `correlate.py` —— anchor + window 跨源关联，含 root-cause hint
 - [ ] `grep_across_sources.py` —— N 源 pattern 搜索，summary / raw / json 三种输出
-- [ ] Source spec 解析器（支持 `journal://`、`docker://`、`kube://`、`file://` 及 brace/glob 展开）
-- [ ] 启动时时钟漂移探测；每源输出 `clock_skew_ms` 元数据
+- [ ] Source spec 解析器（支持 `journal://`、`docker://`、`kube://`、`file://` 及 brace/glob 展开）（内嵌于 `tail_multi.py`）
+- [ ] 启动时时钟漂移探测；每源输出 `clock_skew_ms` 元数据（内嵌于 `tail_multi.py`）
 
 ### `iac-state`
 - [ ] `state_inspect.py` —— backend + size + lock 状态 + workspace 列表
