@@ -130,8 +130,10 @@ def test_tail_log_single_host_path() -> None:
     assert isinstance(lines, list)
     expected_max_lines = 3
     assert 0 < len(lines) <= expected_max_lines
-    # /etc/hosts contains at least one mention of localhost on a healthy host.
-    assert any("localhost" in ln or "127" in ln for ln in lines)
+    # Each returned line is a non-empty string. We intentionally do NOT
+    # assert content (e.g. "localhost" / "127"): some hosts have heavy
+    # IPv6 entries that push the loopback lines past the tail window.
+    assert all(isinstance(ln, str) and ln for ln in lines)
 
 
 def test_tail_log_grep_filters_locally() -> None:
