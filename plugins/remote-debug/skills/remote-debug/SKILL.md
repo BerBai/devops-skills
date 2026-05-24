@@ -71,16 +71,18 @@ Output is a side-by-side diff, with a `summary` field listing every domain that 
 
 ```
 tail_log.py <alias> /var/log/nginx/error.log --since 15min --grep "5[0-9][0-9]"
-tail_log.py <alias> /var/log/syslog --follow --since 5min
+tail_log.py <alias> --unit nginx --since "5min ago" --lines 200
 ```
 
-When you need to watch multiple hosts at once:
+When you need to pull from multiple hosts at once:
 
 ```
-tail_log.py --hosts web-1,web-2,web-3 /var/log/myapp/app.log --follow
+tail_log.py --hosts web-1,web-2,web-3 /var/log/myapp/app.log --lines 200
 ```
 
 Prefixes each line with the host alias so you don't lose track.
+
+Path mode reads the file directly — use it for application logs that don't go through journald (nginx error.log, your app's log file). `--unit` shells out to `journalctl -u`, which is required for systemd-managed services and is the only option on modern distros (Debian 12+, RHEL 9+, Ubuntu 22.04+) where `/var/log/syslog` no longer exists because journald replaced it.
 
 ## Port and reachability
 
