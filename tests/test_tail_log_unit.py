@@ -548,3 +548,180 @@ def test_main_non_json_writes_prefixed_lines(
     out = capsys.readouterr().out
     assert "pai| alpha-1" in out
     assert "local| bravo-1" in out
+
+
+# -----------------------------------------------------------------------------
+# main(): remote_stderr surfacing on failure (Finding #2 fix)
+# -----------------------------------------------------------------------------
+
+
+def test_main_single_host_failure_surfaces_remote_stderr_to_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Non-JSON single-host failure writes the remote stderr first line to local stderr."""
+    payload = _envelope_json(
+        success=False,
+        exit_code=1,
+        stderr="tail: cannot open '/missing': No such file or directory",
+        data={"failure_class": "remote_error"},
+    )
+    monkeypatch.setattr(
+        tail_log.subprocess, "run",
+        lambda *_a, **_k: _completed(1, stdout=payload, stderr=""),
+    )
+
+    rc = tail_log.main(["pai", "/missing"])
+    assert rc == EXIT_FAIL
+    cap = capsys.readouterr()
+    assert (
+        "tail_log: pai: tail: cannot open '/missing': No such file or directory"
+        in cap.err
+    )
+
+
+def test_main_single_host_failure_envelope_stderr_in_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Same failure under --json: envelope.stderr carries the same message."""
+    payload = _envelope_json(
+        success=False,
+        exit_code=1,
+        stderr="tail: cannot open '/missing': No such file or directory",
+        data={"failure_class": "remote_error"},
+    )
+    monkeypatch.setattr(
+        tail_log.subprocess, "run",
+        lambda *_a, **_k: _completed(1, stdout=payload, stderr=""),
+    )
+
+    rc = tail_log.main(["pai", "/missing", "--json"])
+    assert rc == EXIT_FAIL
+    parsed = json.loads(capsys.readouterr().out)
+    assert (
+        "tail_log: pai: tail: cannot open '/missing': No such file or directory"
+        in parsed["stderr"]
+    )
+    # data payload shape stays intact (regression guard).
+    assert parsed["data"]["remote_stderr"] == (
+        "tail: cannot open '/missing': No such file or directory"
+    )
+
+
+def test_main_multi_host_one_failure_only_failing_alias_in_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Multi-host with 1 ok + 1 failing host: only the failing alias appears in stderr."""
+    payload_ok = _envelope_json(success=True, exit_code=0, stdout="ok\n")
+    payload_bad = _envelope_json(
+        success=False,
+        exit_code=1,
+        stderr="permission denied",
+        data={"failure_class": "remote_error"},
+    )
+    payloads = {"pai": payload_ok, "local": payload_bad}
+
+    def fake_run(argv, **_kwargs):
+        alias = argv[2]
+        rc = 0 if alias == "pai" else 1
+        return _completed(rc, stdout=payloads[alias], stderr="")
+
+    monkeypatch.setattr(tail_log.subprocess, "run", fake_run)
+
+    rc = tail_log.main(["--hosts", "pai,local", "/etc/hosts", "--json"])
+    assert rc == EXIT_FAIL
+    parsed = json.loads(capsys.readouterr().out)
+    assert "tail_log: local: permission denied" in parsed["stderr"]
+    assert "tail_log: pai:" not in parsed["stderr"]
+
+
+def test_main_multi_line_remote_stderr_keeps_only_first_line(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Multi-line remote stderr: only the first non-empty line is surfaced."""
+    payload = _envelope_json(
+        success=False,
+        exit_code=1,
+        stderr="line1\nline2\nline3",
+        data={"failure_class": "remote_error"},
+    )
+    monkeypatch.setattr(
+        tail_log.subprocess, "run",
+        lambda *_a, **_k: _completed(1, stdout=payload, stderr=""),
+    )
+
+    tail_log.main(["pai", "/missing", "--json"])
+    parsed = json.loads(capsys.readouterr().out)
+    assert "line1" in parsed["stderr"]
+    assert "line2" not in parsed["stderr"]
+    assert "line3" not in parsed["stderr"]
+
+
+def test_main_long_remote_stderr_truncated_to_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """remote_stderr > _STDERR_HEAD_CAP chars is truncated with '...' suffix."""
+    long_err = "x" * 300
+    payload = _envelope_json(
+        success=False,
+        exit_code=1,
+        stderr=long_err,
+        data={"failure_class": "remote_error"},
+    )
+    monkeypatch.setattr(
+        tail_log.subprocess, "run",
+        lambda *_a, **_k: _completed(1, stdout=payload, stderr=""),
+    )
+
+    tail_log.main(["pai", "/missing", "--json"])
+    parsed = json.loads(capsys.readouterr().out)
+    stderr_lines = parsed["stderr"].splitlines()
+    assert len(stderr_lines) == 1
+    line = stderr_lines[0]
+    assert line.endswith("...")
+    prefix = "tail_log: pai: "
+    expected_max = len(prefix) + tail_log._STDERR_HEAD_CAP + len("...")
+    assert len(line) <= expected_max
+
+
+def test_main_happy_path_leaves_envelope_stderr_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Successful single-host run leaves envelope.stderr empty (regression guard)."""
+    payload = _envelope_json(success=True, exit_code=0, stdout="line1\n")
+    monkeypatch.setattr(
+        tail_log.subprocess, "run",
+        lambda *_a, **_k: _completed(0, stdout=payload, stderr=""),
+    )
+
+    tail_log.main(["pai", "/etc/hosts", "--json"])
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["stderr"] == ""
+
+
+def test_main_empty_remote_stderr_falls_back_to_failure_class(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Failure with empty remote_stderr still surfaces an alias + failure_class line."""
+    payload = _envelope_json(
+        success=False,
+        exit_code=1,
+        stderr="",
+        data={"failure_class": "remote_error"},
+    )
+    monkeypatch.setattr(
+        tail_log.subprocess, "run",
+        lambda *_a, **_k: _completed(1, stdout=payload, stderr=""),
+    )
+
+    tail_log.main(["pai", "/missing", "--json"])
+    parsed = json.loads(capsys.readouterr().out)
+    assert "tail_log: pai:" in parsed["stderr"]
+    assert "failure_class=remote_error" in parsed["stderr"]
+    assert "remote_exit=1" in parsed["stderr"]

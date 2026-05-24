@@ -82,6 +82,12 @@ DEFAULT_CONNECT_TIMEOUT_S = 8
 # file descriptors or local CPU.
 MAX_CONCURRENCY = 8
 
+# Cap for the first-line remote_stderr we surface on local stderr when a host
+# fails. Mirrors ssh_cluster.py's _STDERR_HEAD_CAP (commit f4c072b): same name,
+# same value, same "first non-empty line + '...'-suffix" semantics so users get
+# a consistent failure clue without having to re-run with --json.
+_STDERR_HEAD_CAP = 200
+
 # Exit codes (subset listed in error-handling.md).
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -423,6 +429,40 @@ def _compose_human_stdout(
     return "".join(out_chunks)
 
 
+def _compose_human_stderr(
+    per_host: dict[str, dict[str, Any]],
+) -> str:
+    """Surface the first line of each failing host's remote_stderr.
+
+    Mirrors the ssh_cluster.py stderr-surfacing pattern (commit f4c072b) so
+    non-JSON callers see *why* a host failed instead of an empty stderr +
+    exit 1. Successful hosts contribute nothing. The same string is also
+    placed on the envelope so --json consumers receive it via
+    ``envelope["stderr"]``. The structured ``data.remote_stderr`` /
+    ``data.hosts[<alias>].remote_stderr`` payload is left untouched.
+    """
+    lines: list[str] = []
+    # Stable alias order for determinism (mirrors _compose_human_stdout).
+    for alias in sorted(per_host.keys()):
+        rec = per_host[alias]
+        if rec.get("success") is True:
+            continue
+        message = ""
+        for raw_line in (rec.get("remote_stderr") or "").split("\n"):
+            stripped = raw_line.strip()
+            if stripped:
+                message = stripped
+                break
+        if not message:
+            fc = rec.get("failure_class") or "unknown"
+            rexit = rec.get("remote_exit_code")
+            message = f"failure_class={fc}, remote_exit={rexit}"
+        if len(message) > _STDERR_HEAD_CAP:
+            message = message[:_STDERR_HEAD_CAP] + "..."
+        lines.append(f"tail_log: {alias}: {message}\n")
+    return "".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -532,6 +572,7 @@ def main(argv: list[str] | None = None) -> int:
         all_success,
         overall_exit,
         stdout=_compose_human_stdout(per_host),
+        stderr=_compose_human_stderr(per_host),
         data=data,
     )
     _emit(result, args.json)
