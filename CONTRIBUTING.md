@@ -36,6 +36,7 @@ Each plugin is **self-contained** — its `skills/<name>/scripts/` reaches outsi
 4. **JSON output contract.** Every script must support `--json` and emit `{"success": bool, "exit_code": int, "stdout": "...", "stderr": "...", "data": {...}}`. This is what lets Claude Code chain calls without parsing prose.
 5. **`subprocess.run(list, ...)`, never shell strings.** No exceptions, even for "trusted" input. Test commands include `;`, `&&`, and ``` ` ``` deliberately.
 6. **No emoji in skill output** unless the user explicitly asks. Skill markdown should also stay emoji-free.
+7. **Docs examples must show shipped behavior only.** `SKILL.md` and `references/*.md` must not present deferred, not-yet-implemented, or future-version flags as positive examples. If a flag prints a "deferred to vX.Y" notice at runtime, it must not appear in docs without an explicit "not yet implemented" annotation. Same rule for paths or files that don't exist on supported distros (e.g. `/var/log/syslog` on systemd-only Debian 12+ / RHEL 9+ / Ubuntu 22.04+) — annotate or replace.
 
 ## Roadmap from scaffold to v1.0
 
