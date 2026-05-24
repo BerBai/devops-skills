@@ -657,3 +657,101 @@ def test_main_whitespace_in_hosts(
     sc.main(["uptime", "--hosts", "  pai , local  ", "--json"])
     payload = json.loads(capsys.readouterr().out)
     assert list(payload["data"]["results"].keys()) == ["pai", "local"]
+
+
+# -----------------------------------------------------------------------------
+# _format_human stderr continuation on FAIL host
+# -----------------------------------------------------------------------------
+
+
+def _human_data(results: dict[str, dict]) -> dict:
+    """Build a minimal `data` dict accepted by _format_human()."""
+    ok = sum(1 for env in results.values() if env.get("success"))
+    fail = sum(
+        1 for env in results.values()
+        if not env.get("success") and not env.get("skipped")
+    )
+    skipped = sum(1 for env in results.values() if env.get("skipped"))
+    return {
+        "command": "hostname && uname -s",
+        "hosts": list(results.keys()),
+        "summary": {
+            "total": len(results), "ok": ok, "fail": fail,
+            "skipped": skipped, "elapsed_ms": 12,
+        },
+        "results": results,
+        "failure_class": None if fail == 0 and skipped == 0 else "partial_failure",
+        "fail_fast": False,
+        "health_check": False,
+    }
+
+
+def test_format_human_includes_stderr_on_fail() -> None:
+    # 1. FAIL host + non-empty stderr -> stderr: line present with first line.
+    msg = "local route does not support shell metacharacter '&&'"
+    results = {
+        "local": sc._per_host_env(
+            False, 1, "local", elapsed_ms=5,
+            stderr=msg, failure_class="argv_unsafe",
+        ),
+    }
+    out = sc._format_human(_human_data(results))
+    assert "stderr: " + msg in out
+    # Indent is 10 spaces to align under "[FAIL] " content.
+    assert "          stderr: " + msg in out
+
+    # 2. FAIL host + empty stderr -> no stderr: continuation.
+    results = {
+        "x": sc._per_host_env(
+            False, 1, "x", elapsed_ms=5, stderr="", failure_class="remote_error",
+        ),
+    }
+    out = sc._format_human(_human_data(results))
+    assert "stderr:" not in out
+
+    # 3. FAIL host + whitespace-only stderr -> no stderr: continuation.
+    results = {
+        "x": sc._per_host_env(
+            False, 1, "x", elapsed_ms=5, stderr="   \n  \t",
+            failure_class="remote_error",
+        ),
+    }
+    out = sc._format_human(_human_data(results))
+    assert "stderr:" not in out
+
+    # 4. FAIL host + >200 char stderr -> first line truncated with trailing "...".
+    long_msg = "E" * 250
+    results = {
+        "x": sc._per_host_env(
+            False, 1, "x", elapsed_ms=5, stderr=long_msg,
+            failure_class="remote_error",
+        ),
+    }
+    out = sc._format_human(_human_data(results))
+    expected = "          stderr: " + ("E" * sc._STDERR_HEAD_CAP) + "..."
+    assert expected in out
+    # The full 250-char string must not be present verbatim.
+    assert ("E" * 250) not in out
+
+    # 5. ok host + non-empty stderr (motd-like noise) -> no stderr: continuation.
+    results = {
+        "pai": sc._per_host_env(
+            True, 0, "pai", elapsed_ms=5,
+            stdout="pai-host", stderr="welcome banner", failure_class=None,
+        ),
+    }
+    out = sc._format_human(_human_data(results))
+    assert "stderr:" not in out
+
+    # 6. FAIL host + multi-line stderr -> only first line shown.
+    multi = "first line of failure\nsecond line should not appear\nthird"
+    results = {
+        "x": sc._per_host_env(
+            False, 1, "x", elapsed_ms=5, stderr=multi,
+            failure_class="remote_error",
+        ),
+    }
+    out = sc._format_human(_human_data(results))
+    assert "stderr: first line of failure" in out
+    assert "second line should not appear" not in out
+    assert "third" not in out

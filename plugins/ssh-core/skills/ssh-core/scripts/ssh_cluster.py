@@ -414,6 +414,7 @@ def _summarize(
 
 
 _STDOUT_HEAD_CAP = 80
+_STDERR_HEAD_CAP = 200
 
 
 def _format_human(data: dict[str, Any]) -> str:
@@ -439,6 +440,15 @@ def _format_human(data: dict[str, Any]) -> str:
             f"elapsed={env.get('elapsed_ms', 0):>5}ms  "
             f"fc={fc:<22s} {head}"
         )
+        # Surface sub-host stderr on failure so users don't have to re-run with
+        # --json just to read the reason. Only the first line, capped, for FAIL.
+        if not env.get("success"):
+            stderr_raw = env.get("stderr") or ""
+            if stderr_raw.strip():
+                first_line = stderr_raw.splitlines()[0]
+                if len(first_line) > _STDERR_HEAD_CAP:
+                    first_line = first_line[:_STDERR_HEAD_CAP] + "..."
+                lines.append(f"          stderr: {first_line}")
     if data.get("failure_class"):
         lines.append("")
         lines.append(f"failure_class: {data['failure_class']}")
