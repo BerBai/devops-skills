@@ -10,11 +10,11 @@ caller (Claude Code)
    ▼
 ssh_execute.py <alias> "<cmd>"
    │
-   ├─ key auth?  ──► native ssh (ControlMaster, ProxyJump, ForwardAgent)
-   └─ password ?  ──► daemon present?
-                       ├─ YES → send length-prefixed JSON
-                       └─ NO  → spawn daemon, retry
+   └─ native ssh -o BatchMode=yes -o ConnectTimeout=N (key auth only in v1.0)
+      (ControlMaster / ProxyJump / ForwardAgent are inherited from ~/.ssh/config)
 ```
+
+Password / keyboard-interactive auth and connection-reuse daemon are **v1.1** (ADR-001 D1 + A2). For first-touch bootstrap on a password-only host, use `deploy_pubkey.py <alias>` from an interactive terminal.
 
 **Output contract** (all scripts share this):
 ```json
@@ -82,18 +82,18 @@ Reads (`list`, `find`) are O(file size) and never write.
 
 The wrapper inspects what's in `~/.ssh/config` for the alias:
 
-| Config | Path |
-|---|---|
-| `IdentityFile` set, key exists, no passphrase | native ssh (fastest) |
-| `IdentityFile` set, key has a passphrase | native ssh + `ssh-agent` (if loaded), else fallback |
-| `IdentityFile` missing, password recorded in our managed comment block | paramiko + daemon |
-| Neither | refuse, ask user |
+| Config | Path | v1.0 |
+|---|---|---|
+| `IdentityFile` set, key exists, no passphrase | native ssh (fastest) | ✓ |
+| `IdentityFile` set, key has a passphrase + `ssh-agent` loaded | native ssh + agent | ✓ |
+| `IdentityFile` missing, password recorded in `# password:` comment | paramiko + daemon | **v1.1 deferred** (ADR-001 A2) |
+| Neither | refuse, ask user | ✓ |
 
 Passwords in comments are opt-in and discouraged. The preferred flow is `deploy_pubkey.py <alias>` (v1.0 ships), which delegates to system `ssh-copy-id` and inherits your controlling tty for the one-time password prompt. The `--strip-password` companion behavior (auto-remove the comment after bootstrap) is **v1.1 deferred** — it requires `ssh_config_manager` to first learn the `# password:` metadata key, which is itself deferred until the paramiko + daemon path returns. For now, edit `~/.ssh/config` by hand to remove the comment after a successful `deploy_pubkey` run.
 
 ## 7. Failure modes worth knowing
 
-- **Daemon stuck.** State file present, port unresponsive. Recovery: `ssh_daemon.py stop <alias>` removes the state file and kills any process holding the recorded PID.
+- **Daemon stuck.** ~~State file present, port unresponsive.~~ N/A in v1.0 — no daemon ships (ADR-001 D1). Recovery instructions will reappear when v1.1 lands the daemon (or ControlMaster equivalent).
 - **Host key changed.** `StrictHostKeyChecking` fails. Don't auto-accept. Ask the user; if confirmed, the user (not us) edits `~/.ssh/known_hosts`.
 - **MSYS path mangling.** Symptom: `/srv/x` becomes `C:/Program Files/Git/srv/x`. We set `MSYS_NO_PATHCONV=1` on every spawn. If you ever see a Windows drive prefix in a remote path argument, the wrapper has a bug.
 - **`ProxyJump` chain breaks.** Usually a key auth issue on the bastion. The wrapper retries once, then surfaces the chain it tried so the user can debug.

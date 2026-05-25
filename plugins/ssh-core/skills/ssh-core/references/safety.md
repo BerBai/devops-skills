@@ -19,7 +19,7 @@ Things `ssh-core` does to avoid the obvious foot-guns. Read this if you're addin
 ## Soft conventions
 
 - Stdout / stderr captured into memory have a 10 MB cap per stream. Over the cap, we truncate and append `\n... [truncated, N bytes elided]\n`.
-- Daemon state files live under `$TMPDIR/ssh_daemon/` with mode `0o600`. The state file *path* is `md5(alias)`, not the alias itself, so casual `ls /tmp` doesn't reveal which hosts you talk to.
+- Per-alias state files (daemons, tunnels) live under `$TMPDIR/ssh_<kind>/` with mode `0o600`. The state file *path* is `md5(alias)` (or `md5("<alias>-<port>")` for tunnels), not the alias itself, so casual `ls /tmp` doesn't reveal which hosts you talk to. v1.0 has no daemon, so the only active producer of these is `ssh_tunnel` (when it ships its v1.0); the convention is reserved for the v1.1 daemon revival.
 - Backup files for `~/.ssh/config` use `.bak.<unix-ts>`. We never delete old backups automatically; that's the user's call.
 - Every script accepts `--json` and emits the shared output contract. Human mode (no `--json`) is for terminal use, not for parsing.
 

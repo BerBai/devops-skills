@@ -1,11 +1,11 @@
 ---
 name: ssh-core
-description: SSH transport primitives — persistent daemon connections, cluster broadcast, port-forward tunnels, and direct server-to-server transfer. Use whenever the task touches ssh/scp/rsync, a remote host alias, user@host, an IP (192.168.x.x, 10.0.x.x), or 跳板机/jumphost/bastion. Skip for localhost-only operations.
+description: SSH transport primitives — command execution, cluster broadcast, port-forward tunnels, SFTP upload/download, direct server-to-server transfer, and `~/.ssh/config` CRUD. Use whenever the task touches ssh/scp/rsync, a remote host alias, user@host, an IP (192.168.x.x, 10.0.x.x), or 跳板机/jumphost/bastion. Skip for localhost-only operations.
 ---
 
 # ssh-core
 
-**CRITICAL:** This skill handles ALL SSH/SCP/RSYNC operations. Do **not** call `ssh`, `scp`, or `rsync` directly from Bash — use the scripts in this skill. Direct calls bypass the persistent daemon, lose connection pooling, leak credentials into shell history, and break on Windows MSYS path translation.
+**CRITICAL:** This skill handles ALL SSH/SCP/RSYNC operations. Do **not** call `ssh`, `scp`, or `rsync` directly from Bash — use the scripts in this skill. Direct calls leak credentials into shell history, miss the shared `~/.ssh/config` resolution layer, and break on Windows MSYS path translation.
 
 ## When to use
 
@@ -52,7 +52,7 @@ Is the target a remote host?
 ## Workflow (every operation)
 
 1. **Discover.** If the user names a host you haven't seen, run `ssh_config_manager.py list` to confirm it exists in `~/.ssh/config`. If it doesn't, ask the user — do not invent connection details.
-2. **Choose transport.** Key auth → native `ssh` (gets ControlMaster, ProxyJump, ForwardAgent). Password auth → daemon-backed paramiko. The wrapper decides; you just call `ssh_execute.py`.
+2. **Choose transport.** v1.0: key auth only via native `ssh` (BatchMode + ConnectTimeout; gets ControlMaster, ProxyJump, ForwardAgent for free). Password / keyboard-interactive auth is v1.1 (see ## Daemon model below). For first-touch bootstrap on a password-only host, use `deploy_pubkey.py <alias>` from an interactive terminal.
 3. **Execute.** Pass the alias and the command. Read the JSON result. If `success` is false, read `stderr` before retrying.
 4. **Report.** Show the user the command, the host, the exit code, and the last few lines of stdout/stderr. Never show keys, passwords, or `IdentityFile` paths.
 
@@ -61,7 +61,7 @@ See `references/workflows.md` for the long form.
 ## Quick reference
 
 ```bash
-# Run a command (daemon kicks in automatically for password auth)
+# Run a command (key auth only in v1.0; BatchMode + ConnectTimeout)
 python scripts/ssh_execute.py prod-web-01 "systemctl status nginx" --json
 
 # Upload with resume
@@ -105,14 +105,9 @@ No proprietary database. No lock-in. `ssh prod-web-01` from any terminal still w
 
 ## Daemon model
 
-For password auth — and only for password auth — `ssh_execute.py` boots a per-alias local TCP daemon on `127.0.0.1:<random>`. State lives at `$TMPDIR/ssh_daemon/<md5(alias)>.json`. The daemon:
-- Holds one paramiko connection open
-- Length-prefixed JSON protocol (4-byte big-endian length + payload)
-- 60 s heartbeat via `transport.send_ignore()`
-- Auto-exits after 30 min idle
-- Is shared across multiple Claude Code processes — first one wins, others connect
+**v1.0: no daemon.** Each `ssh_execute` call is a fresh `ssh` subprocess (ADR-001 D1) with `BatchMode=yes` — key auth only. No paramiko, no custom socket protocol, no connection pool. Per-call cost is one SSH handshake (~200-300 ms).
 
-Latency drop measured on the reference design: **~0.45 s/cmd direct → ~0.12 s/cmd via daemon**.
+Connection pooling and password / keyboard-interactive auth are planned for v1.1, likely via OpenSSH `ControlMaster` rather than a custom Python daemon (ADR-001 A2). The `ssh_daemon.py` stub in the scripts directory retains its v0.2 design intent in the source docstring for the v1.1 revival task.
 
 ## Safety baseline
 
@@ -124,4 +119,4 @@ Latency drop measured on the reference design: **~0.45 s/cmd direct → ~0.12 s/
 
 ## When something goes wrong
 
-`references/troubleshooting.md` covers the common failures: daemon stuck, `ProxyJump` chain broken, `IdentityFile` permissions, Windows path mangling, host key drift after a reinstall. Read it before guessing.
+`references/troubleshooting.md` covers the common failures: `Permission denied (publickey)`, host-key drift, `ProxyJump` chain broken, `IdentityFile` permissions, Windows path mangling, `deploy_pubkey` ssh-copy-id quirks. Read it before guessing.

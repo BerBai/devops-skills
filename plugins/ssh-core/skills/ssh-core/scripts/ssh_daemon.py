@@ -1,7 +1,22 @@
 #!/usr/bin/env python3
 """ssh_daemon.py — long-lived connection pool for one alias (scaffold).
 
-v1.0 design:
+**Status: Deferred to v1.1 per ADR-001 A2.** v1.0 ships no daemon code.
+The block below is the v0.2 design intent, preserved for the v1.1 revival
+task to reuse. ssh_execute v1.0 is BatchMode-only and does NOT spawn this
+daemon (ADR-001 D1). No other v1.0 script imports ssh_daemon either.
+
+v1.1 will revisit, likely via OpenSSH ControlMaster rather than a custom
+Python daemon. Re-open this task when:
+  - ssh_execute v1.1 needs password / keyboard-interactive auth AND
+    ControlMaster is benchmarked insufficient; or
+  - ssh_cluster v1.x hits the documented "~200-300 ms/call handshake"
+    performance ceiling on real workload AND ControlMaster is
+    benchmarked insufficient; or
+  - a new caller emerges that needs a Python-controlled long-lived
+    SSH connection (e.g. streaming RPC) that ControlMaster cannot model.
+
+v1.0 design intent (preserved for v1.1 revival):
     - Each alias gets ONE local daemon process listening on 127.0.0.1:<random>.
     - Wire protocol: 4-byte big-endian length prefix + UTF-8 JSON body.
     - Heartbeat: paramiko transport.send_ignore() every 60 s.
@@ -18,7 +33,7 @@ Subcommands (planned):
     stop <alias>              -> remove state file + SIGTERM recorded PID
     list                      -> all daemons known to this user
 
-Today: argparse skeleton only.
+Today: argparse skeleton only; main() returns unimplemented(). --help still works.
 """
 
 from __future__ import annotations

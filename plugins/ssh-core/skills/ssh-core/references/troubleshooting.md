@@ -23,17 +23,7 @@ Do **not** auto-clear `~/.ssh/known_hosts`. Show the user the offending line num
 
 ## Daemon won't start
 
-```
-ssh_daemon.py status <alias>
-```
-
-Look for `state_file_present: true, port_responsive: false`. That's a zombie daemon. Recovery:
-
-```
-ssh_daemon.py stop <alias>     # removes state file + kills recorded PID if alive
-```
-
-If `port_responsive: true` but commands time out, the SSH transport is wedged (network change, suspend/resume). Same recovery — stop and let it respawn.
+**v1.0: there is no daemon.** `ssh_execute` is BatchMode-only and spawns one `ssh` subprocess per call (ADR-001 D1). The `ssh_daemon.py` stub returns `unimplemented()` and is deferred to v1.1 (likely OpenSSH ControlMaster rather than a custom Python daemon). If a future v1.1 ships the daemon, this section will document recovery for zombie daemons (state file present, port unresponsive) via `ssh_daemon.py stop <alias>`.
 
 ## Tunnel claims it's up but `nc localhost <port>` refuses
 
@@ -85,7 +75,7 @@ Host <alias>
 
 ## Daemon log location
 
-`$TMPDIR/ssh_daemon/<md5(alias)>.log` — keeps the last 1 MB, rotates in place. If `ssh_daemon.py status` is unhelpful, the log usually isn't.
+**v1.0: there is no daemon, so no daemon log.** Deferred to v1.1 (see "Daemon won't start" above). When the daemon ships, logs will land at `$TMPDIR/ssh_daemon/<md5(alias)>.log` (1 MB rotating).
 
 ## `deploy_pubkey` quirks
 
