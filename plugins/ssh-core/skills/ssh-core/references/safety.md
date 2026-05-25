@@ -25,7 +25,7 @@ Things `ssh-core` does to avoid the obvious foot-guns. Read this if you're addin
 
 ## Things we deliberately don't do
 
-- **No auto-`ssh-copy-id`.** Public key deployment requires human intent. There is a planned `deploy_pubkey.py` that you have to invoke explicitly.
+- **No auto-`ssh-copy-id`.** Public key deployment requires human intent. Use `deploy_pubkey.py <alias>` to install your pubkey explicitly; the first-touch password prompt is interactive (inherits the controlling tty, no headless mode in v1.0).
 - **No auto-accept of new host keys.** Even on first connect.
 - **No password storage in our own files.** If the user records one in a comment in `~/.ssh/config`, that's their decision; we read it but never write it.
 - **No telemetry.** Nothing leaves the local machine except SSH traffic to the hosts you asked us to talk to.

@@ -44,6 +44,9 @@ Is the target a remote host?
     │
     └─ Manage hosts → ssh_config_manager.py
                         create | update | delete | list | find
+
+    Bootstrap pubkey on a new host → deploy_pubkey.py <alias>
+                                       [--accept-new-hostkey]
 ```
 
 ## Workflow (every operation)
@@ -76,6 +79,9 @@ python scripts/ssh_tunnel.py start prod-db --remote-port 3306 --local-port 13306
 # Inspect / edit hosts
 python scripts/ssh_config_manager.py list --environment production
 python scripts/ssh_config_manager.py create --alias prod-web-02 --host 10.0.1.12 --user deploy --key ~/.ssh/id_ed25519 --environment production --tags web,nginx
+
+# Bootstrap your pubkey on a fresh host (interactive password prompt)
+python scripts/deploy_pubkey.py prod-web-02 --accept-new-hostkey
 ```
 
 ## Storage model

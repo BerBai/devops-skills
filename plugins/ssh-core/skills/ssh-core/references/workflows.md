@@ -89,7 +89,7 @@ The wrapper inspects what's in `~/.ssh/config` for the alias:
 | `IdentityFile` missing, password recorded in our managed comment block | paramiko + daemon |
 | Neither | refuse, ask user |
 
-Passwords in comments are opt-in and discouraged. The preferred flow is `deploy_pubkey` (planned for v0.2) which runs `ssh-copy-id` and then strips the password.
+Passwords in comments are opt-in and discouraged. The preferred flow is `deploy_pubkey.py <alias>` (v1.0 ships), which delegates to system `ssh-copy-id` and inherits your controlling tty for the one-time password prompt. The `--strip-password` companion behavior (auto-remove the comment after bootstrap) is **v1.1 deferred** — it requires `ssh_config_manager` to first learn the `# password:` metadata key, which is itself deferred until the paramiko + daemon path returns. For now, edit `~/.ssh/config` by hand to remove the comment after a successful `deploy_pubkey` run.
 
 ## 7. Failure modes worth knowing
 

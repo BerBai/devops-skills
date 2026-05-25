@@ -9,7 +9,7 @@ Symptom → likely cause → fix. Ordered by frequency.
 | Wrong `IdentityFile` for this host | `ssh_config_manager.py find <alias>` | Update `IdentityFile` |
 | Key file mode too open | `ls -l ~/.ssh/id_*` should be `600` | `chmod 600` |
 | Key not loaded in `ssh-agent` (passphrase keys) | `ssh-add -l` | `ssh-add ~/.ssh/<key>` |
-| Public key not installed on remote | login interactively once | `deploy_pubkey.py <alias>` (planned v0.2) |
+| Public key not installed on remote | login interactively once | `deploy_pubkey.py <alias>` (interactive password prompt) |
 | User mismatch | `User` field in config | Update `User` |
 
 ## "Host key verification failed"
@@ -86,6 +86,14 @@ Host <alias>
 ## Daemon log location
 
 `$TMPDIR/ssh_daemon/<md5(alias)>.log` — keeps the last 1 MB, rotates in place. If `ssh_daemon.py status` is unhelpful, the log usually isn't.
+
+## `deploy_pubkey` quirks
+
+Two `ssh-copy-id` integration gotchas worth knowing:
+
+**Idempotency override.** Some OpenSSH builds (notably older ones) make `ssh-copy-id` exit non-zero when *every* key in the pubkey file is already installed, accompanied by stderr `WARNING: All keys were skipped because they already exist on the remote system.` `deploy_pubkey.py` reclassifies that case as success with `data.outcome="already_installed"` — it's an idempotent operation, not a failure. If you write your own ssh-copy-id wrapper, mirror this; otherwise re-runs of a successful deploy will misreport as broken.
+
+**Pubkey first-line sanity check.** `deploy_pubkey.py` preflight refuses any `--key` whose first line does NOT start with one of `ssh-rsa / ssh-ed25519 / ecdsa-sha2-* / ssh-dss / sk-ssh-ed25519 / sk-ecdsa-sha2-`. Reason: a user who passes `~/.ssh/id_ed25519` (the **private** key) instead of `~/.ssh/id_ed25519.pub` would otherwise have their private key written into the remote `authorized_keys` file. The preflight catches it with `failure_class="key_file_missing"` before any subprocess spawns.
 
 ## Last resort
 
