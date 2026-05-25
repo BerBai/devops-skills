@@ -62,6 +62,14 @@ Unit tests (always-on, added v0.3.0):
   fast path + resume + sha256 verify, `upload_tree` continue-on-error +
   `failed_files` aggregation, posixpath joining, and 5%-bucket progress
   callback bucketing (paramiko fully mocked).
+- `test_ssh_download_unit.py` — 17 tests mirroring the upload unit
+  layout for `ssh_download.py` + `download_file` / `download_tree`:
+  CLI surface (no `--chmod`), 3 guard branches (remote not found /
+  remote is dir / local is dir without `--recursive`), fast-path
+  no-verify, resume state machine (missing local / equal size /
+  partial / local-larger refuse / sha256 mismatch → exit 9), and
+  recursive walk + posixpath + continue-on-error aggregation
+  (paramiko fully mocked).
 
 Integration tests (opt-in via `-m live_ssh`):
 
@@ -74,6 +82,13 @@ Integration tests (opt-in via `-m live_ssh`):
   resume (partial-then-complete + sha256 mismatch → exit 9), recursive
   (simple tree + partial failure with `failed_files`), `--bwlimit`
   wall-clock check, and `--no-progress` stderr suppression.
+- `test_ssh_download_integration.py` — 10 tests against `POC_HOST`:
+  single-file happy path (`/etc/hostname` content match), resume
+  (partial-then-complete + sha256 mismatch → exit 9), recursive
+  (simple tree + partial failure with `failed_files`, latter skips
+  when remote user is root), `--bwlimit` wall-clock check,
+  `--no-progress` stderr suppression, and three guard branches
+  (remote not found / remote-is-dir-without-recursive / local-is-dir-without-recursive).
 
 ## What's missing (v1.0 roadmap)
 

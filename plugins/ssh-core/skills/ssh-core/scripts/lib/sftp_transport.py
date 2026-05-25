@@ -45,6 +45,7 @@ import errno
 import hashlib
 import os
 import posixpath
+import stat as stat_mod
 import sys
 import time
 from collections.abc import Callable
@@ -772,11 +773,161 @@ def download_file(
 ) -> TransferResult:
     """Single-file download — mirror of ``upload_file``.
 
-    Placeholder — implemented in the ssh_download v1.0 sibling task.
+    Behaviour:
+
+    * ``resume=False`` (fast path): transfer ``remote`` from offset 0 to
+      ``local`` (overwriting any existing file at ``local``), then return
+      success. sha256 verify is **skipped** on the fast path, mirroring
+      ``upload_file`` (PRD D2).
+    * ``resume=True``: stat the local file first; choose a continuation
+      offset (0 if missing, ``local_size`` if smaller than remote,
+      ``remote_size`` if equal, refuse if larger than remote), transfer
+      the remaining bytes, then **always** sha256-verify both ends. If
+      the hashes mismatch, return exit_code=9 (transfer_verify_failed).
+
+    Defensive validation: this function returns a failure
+    ``TransferResult`` instead of raising when ``remote`` is missing or
+    is a directory. The CLI shell (``ssh_download.py``) doesn't pre-flight
+    these (they require a network round-trip), so the guards live here.
     """
-    raise NotImplementedError(
-        "download_file is implemented in the ssh_download v1.0 sibling task; "
-        "the Phase D transport skeleton intentionally ships this body empty"
+    # ------------------------------------------------------------------
+    # 1) Validate remote path
+    # ------------------------------------------------------------------
+    remote_attr = session.stat(remote)
+    if remote_attr is None:
+        return TransferResult(
+            success=False,
+            exit_code=1,
+            failure_class="remote_error",
+            stderr=f"remote path not found: {remote}",
+        )
+    if stat_mod.S_ISDIR(remote_attr.st_mode or 0):
+        return TransferResult(
+            success=False,
+            exit_code=1,
+            failure_class="remote_error",
+            stderr=f"remote '{remote}' is a directory; pass --recursive",
+        )
+
+    remote_size = int(remote_attr.st_size or 0)
+
+    # Ensure parent directory exists locally.
+    local_path = Path(local)
+    if local_path.parent and not local_path.parent.exists():
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cb = make_pct_callback(
+        filename=posixpath.basename(remote),
+        total=remote_size,
+        no_progress=not progress,
+        verb="Downloading",
+    )
+
+    start = time.monotonic()
+
+    # ------------------------------------------------------------------
+    # 2) Fast path (no resume): always transfer from offset 0.
+    # ------------------------------------------------------------------
+    if not resume:
+        session.get_chunked(
+            remote,
+            local,
+            offset=0,
+            block_size=block_size,
+            bwlimit_kbs=bwlimit_kbs,
+            progress=cb,
+        )
+        return TransferResult(
+            success=True,
+            exit_code=0,
+            bytes_transferred=remote_size,
+            elapsed_s=round(time.monotonic() - start, 3),
+            sha256_verified=False,
+            sha256_local=None,
+            sha256_remote=None,
+            bytes_resumed_from=None,
+            failed_files=None,
+            failure_class=None,
+            stderr="",
+        )
+
+    # ------------------------------------------------------------------
+    # 3) Resume path: classify local state, choose offset, transfer,
+    #    verify sha256 on both ends.
+    # ------------------------------------------------------------------
+    local_size = local_path.stat().st_size if local_path.exists() else 0
+    resume_offset = 0  # bytes already present locally at entry
+
+    if not local_path.exists():
+        resume_offset = 0
+        session.get_chunked(
+            remote,
+            local,
+            offset=0,
+            block_size=block_size,
+            bwlimit_kbs=bwlimit_kbs,
+            progress=cb,
+        )
+    elif local_size == remote_size:
+        # Already complete in size — skip transfer, only verify.
+        resume_offset = local_size
+        # No get_chunked call here.
+    elif local_size < remote_size:
+        # Partial — continue from local_size.
+        resume_offset = local_size
+        session.get_chunked(
+            remote,
+            local,
+            offset=local_size,
+            block_size=block_size,
+            bwlimit_kbs=bwlimit_kbs,
+            progress=cb,
+        )
+    else:
+        # local_size > remote_size → refuse to truncate.
+        return TransferResult(
+            success=False,
+            exit_code=1,
+            failure_class="remote_error",
+            stderr=(
+                f"local ({local_size}B) larger than remote ({remote_size}B); "
+                "refuse to truncate"
+            ),
+        )
+
+    # sha256 verify (resume path always verifies, even when nothing was sent).
+    sha_local = sha256_streaming_local(local)
+    sha_remote = sha256_streaming_remote(session, remote)
+
+    if sha_local != sha_remote:
+        return TransferResult(
+            success=False,
+            exit_code=9,
+            bytes_transferred=remote_size - resume_offset,
+            elapsed_s=round(time.monotonic() - start, 3),
+            sha256_verified=False,
+            sha256_local=sha_local,
+            sha256_remote=sha_remote,
+            bytes_resumed_from=resume_offset,
+            failed_files=None,
+            failure_class="transfer_verify_failed",
+            stderr=(
+                f"sha256 verification failed: local={sha_local} remote={sha_remote}"
+            ),
+        )
+
+    return TransferResult(
+        success=True,
+        exit_code=0,
+        bytes_transferred=remote_size - resume_offset,
+        elapsed_s=round(time.monotonic() - start, 3),
+        sha256_verified=True,
+        sha256_local=sha_local,
+        sha256_remote=sha_remote,
+        bytes_resumed_from=resume_offset,
+        failed_files=None,
+        failure_class=None,
+        stderr="",
     )
 
 
@@ -792,11 +943,131 @@ def download_tree(
 ) -> TransferResult:
     """Recursive directory download — mirror of ``upload_tree``.
 
-    Placeholder — implemented in the ssh_download v1.0 sibling task.
+    Walk strategy: ``session.sftp.listdir_attr`` recursively materialized
+    into a list of ``(remote_path, local_path)`` pairs **once** before
+    transferring — same single-pass-materialize strategy as
+    ``upload_tree`` so the per-file progress separator can show ``i/N``.
+
+    Error policy: continue-on-error. Per-file failures are caught and
+    accumulated into ``failed_files``; the call still returns and the
+    caller can decide whether non-empty ``failed_files`` is a problem
+    (it always maps to exit_code=1 + failure_class="remote_error").
+
+    Path joining: remote paths always use ``posixpath.join``; local paths
+    use ``os.path.join`` (native separator). The CLI surface guarantees
+    the remote is POSIX even when the script runs on Windows.
     """
-    raise NotImplementedError(
-        "download_tree is implemented in the ssh_download v1.0 sibling task; "
-        "the Phase D transport skeleton intentionally ships this body empty"
+    assert session.sftp is not None
+
+    # ------------------------------------------------------------------
+    # 1) Validate remote_dir
+    # ------------------------------------------------------------------
+    rs = session.stat(remote_dir)
+    if rs is None:
+        return TransferResult(
+            success=False,
+            exit_code=1,
+            failure_class="remote_error",
+            stderr=f"remote path not found: {remote_dir}",
+        )
+    if not stat_mod.S_ISDIR(rs.st_mode or 0):
+        return TransferResult(
+            success=False,
+            exit_code=1,
+            failure_class="remote_error",
+            stderr=f"remote '{remote_dir}' is a file; omit --recursive",
+        )
+
+    # Ensure local root exists.
+    Path(local_dir).mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # 2) Walk remote and materialize (remote_file, local_target) pairs.
+    # ------------------------------------------------------------------
+    failed_files: list[dict[str, Any]] = []
+    file_pairs: list[tuple[str, str]] = []
+
+    def _walk(rd: str, local_rd: Path) -> None:
+        try:
+            entries = session.sftp.listdir_attr(rd)  # type: ignore[union-attr]
+        except Exception as e:  # noqa: BLE001 — continue-on-error policy
+            failed_files.append({"path": rd, "error": f"listdir failed: {e}"})
+            return
+        for entry in entries:
+            full_remote = posixpath.join(rd, entry.filename)
+            full_local = local_rd / entry.filename
+            if stat_mod.S_ISDIR(entry.st_mode or 0):
+                try:
+                    full_local.mkdir(parents=True, exist_ok=True)
+                except Exception as e:  # noqa: BLE001
+                    failed_files.append(
+                        {"path": full_remote, "error": f"mkdir failed: {e}"}
+                    )
+                    continue
+                _walk(full_remote, full_local)
+            else:
+                file_pairs.append((full_remote, str(full_local)))
+
+    _walk(remote_dir, Path(local_dir))
+
+    total_files = len(file_pairs)
+    start = time.monotonic()
+    total_bytes = 0
+
+    # ------------------------------------------------------------------
+    # 3) Transfer each file.
+    # ------------------------------------------------------------------
+    for i, (remote_file, local_target) in enumerate(file_pairs, start=1):
+        if progress:
+            print(
+                f"--- file {i}/{total_files}: {remote_file} ---",
+                file=sys.stderr,
+            )
+        try:
+            tr = download_file(
+                session,
+                remote_file,
+                local_target,
+                resume=resume,
+                block_size=block_size,
+                bwlimit_kbs=bwlimit_kbs,
+                progress=progress,
+            )
+            if tr.success:
+                total_bytes += tr.bytes_transferred
+            else:
+                failed_files.append(
+                    {"path": remote_file, "error": tr.stderr or "download failed"}
+                )
+        except Exception as e:  # noqa: BLE001 — continue-on-error
+            failed_files.append({"path": remote_file, "error": str(e)})
+
+    elapsed = round(time.monotonic() - start, 3)
+
+    # ------------------------------------------------------------------
+    # 4) Aggregate result.
+    # ------------------------------------------------------------------
+    if not failed_files:
+        return TransferResult(
+            success=True,
+            exit_code=0,
+            bytes_transferred=total_bytes,
+            elapsed_s=elapsed,
+            sha256_verified=False,
+            failed_files=None,
+            failure_class=None,
+            stderr="",
+        )
+
+    return TransferResult(
+        success=False,
+        exit_code=1,
+        bytes_transferred=total_bytes,
+        elapsed_s=elapsed,
+        sha256_verified=False,
+        failed_files=failed_files,
+        failure_class="remote_error",
+        stderr=f"{len(failed_files)} of {total_files} files failed to download",
     )
 
 
