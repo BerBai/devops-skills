@@ -38,6 +38,9 @@ Is the target a remote host?
     │   ├─ Remote → Local → ssh_download.py
     │   └─ Remote → Remote → ssh_server_transfer.py
     │                          --mode auto|direct|stream|hybrid
+    │                          # v1.0 ships --mode stream only.
+    │                          # auto / hybrid route to stream;
+    │                          # direct refuses with mode_deferred (v1.1).
     │
     ├─ Forward a port → ssh_tunnel.py start <alias>
     │                     --remote-port 3306 --local-port 13306
@@ -68,6 +71,8 @@ python scripts/ssh_execute.py prod-web-01 "systemctl status nginx" --json
 python scripts/ssh_upload.py prod-web-01 ./release.tar.gz /srv/releases/ --resume
 
 # Server-to-server transfer (e.g., snapshot prod → backup, no local staging)
+# v1.0 ships stream mode only; --mode auto here routes to stream and logs
+# data.auto_resolved_to="stream". --mode direct refuses with mode_deferred.
 python scripts/ssh_server_transfer.py prod-db /var/backup/db.dump backup-host /restore/ --mode auto
 
 # Broadcast to a tagged fleet

@@ -61,6 +61,8 @@ If you find a path that *doesn't* set this, that's the bug.
 
 Probably `BatchMode` plus a server-side `MaxSessions` limit. `direct` mode on `ssh_server_transfer.py` opens *three* sessions on the source machine (control + data + the spawned `scp`). Lower the parallelism or use `stream` mode.
 
+**v1.0 note**: only `stream` ships, so this scenario only applies once v1.1 lights up `direct`. In v1.0, `--mode direct` refuses with `failure_class=mode_deferred` (exit 20) before any session is opened.
+
 ## "Too many authentication failures"
 
 You have more keys in `ssh-agent` than the server allows attempts. Pin the key:

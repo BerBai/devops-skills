@@ -43,14 +43,16 @@ Default `max-workers` is 8. Above that, SSH MaxStartups on the bastion bites.
 
 Four modes:
 
-| Mode | Path | When |
-|---|---|---|
-| `direct` | source machine runs `scp`/`rsync` → target machine | source can reach target directly |
-| `stream` | local process bridges two open SFTP sessions | source can't egress, but local can reach both |
-| `hybrid` | try `direct`; fall back to `stream` on failure | unknown egress rules |
-| `auto` | pick `direct` for files > 100 MB and reachable; `stream` for small + uncertain | default |
+| Mode | Path | When | v1.0 status |
+|---|---|---|---|
+| `direct` | source machine runs `scp`/`rsync` → target machine | source can reach target directly | refused with `failure_class=mode_deferred` (v1.1) |
+| `stream` | local process bridges two open SFTP sessions | source can't egress, but local can reach both | **shipped** |
+| `hybrid` | try `direct`; fall back to `stream` on failure | unknown egress rules | routes to stream (fallback semantics deferred to v1.1) |
+| `auto` | pick `direct` for files > 100 MB and reachable; `stream` for small + uncertain | default | routes to stream (auto decision logic deferred to v1.1) |
 
-`--use-rsync` swaps `scp` for `rsync` in the `direct` path (gets you `--partial`, `--checksum`, `--delete`).
+`--use-rsync` swaps `scp` for `rsync` in the `direct` path (gets you `--partial`, `--checksum`, `--delete`). In v1.0 it is refused with `failure_class=flag_deferred` because it requires `--mode direct`.
+
+**v1.0 status**: only `stream` is fully implemented. `auto` / `hybrid` route to stream and log `data.{auto,hybrid}_resolved_to="stream"`; `direct` and `--use-rsync` refuse with structured envelopes (exit codes 20 and 21). The CLI surface is preserved so v1.1 can light up `direct` additively without breaking callers. See `.trellis/tasks/05-24-ssh-core-ssh-server-transfer/prd.md` for the full deferral rationale.
 
 ## 4. Port-forward tunnel
 
