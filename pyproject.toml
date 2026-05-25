@@ -17,7 +17,9 @@ classifiers = [
 # Runtime dependencies live in each plugin's own future requirements.txt; the
 # top-level project ships only manifests, markdown, and Python stubs, so the
 # wheel itself has no runtime deps.
-dependencies = []
+# Exception: paramiko is required by lib/sftp_transport.py (see ADR-003) for
+# ssh_upload / ssh_download chunk-level SFTP with resume + progress.
+dependencies = ["paramiko>=3.0,<4"]
 
 [project.optional-dependencies]
 dev = [

@@ -58,10 +58,22 @@ Unit tests (always-on, added v0.3.0):
 
 - `test_ssh_core_lib.py` — `filter_ssh_noise` and `classify_failure`
   helpers in `plugins/ssh-core/.../lib/__init__.py`
+- `test_ssh_upload_unit.py` — ~22 tests covering CLI guards, `upload_file`
+  fast path + resume + sha256 verify, `upload_tree` continue-on-error +
+  `failed_files` aggregation, posixpath joining, and 5%-bucket progress
+  callback bucketing (paramiko fully mocked).
 
 Integration tests (opt-in via `-m live_ssh`):
 
-- (added incrementally as v1.0 scripts land)
+- `test_ssh_execute_integration.py` — replays PoC hypotheses H1–H6
+  against `POC_HOST` (default `pai`): exit code propagation, known-hosts
+  noise filtering, alias resolution, failure classification, timeout,
+  local route.
+- `test_ssh_upload_integration.py` — 10 tests against `POC_HOST`: single
+  file happy path, local-missing / dir-without-recursive guards, `--chmod`,
+  resume (partial-then-complete + sha256 mismatch → exit 9), recursive
+  (simple tree + partial failure with `failed_files`), `--bwlimit`
+  wall-clock check, and `--no-progress` stderr suppression.
 
 ## What's missing (v1.0 roadmap)
 
