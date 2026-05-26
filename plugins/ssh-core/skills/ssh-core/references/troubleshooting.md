@@ -31,7 +31,7 @@ Three possibilities:
 
 1. The forward is bound to `127.0.0.1` and you're trying to hit it from another container. Use `--bind-address 0.0.0.0` explicitly (and only if you know what you're doing).
 2. The remote service is listening on `127.0.0.1` only, so the tunnel reaches the host but the host refuses. Use `--remote-host` to name the actual interface, e.g. `--remote-host 10.0.0.5`.
-3. The daemon died after starting the listener. Check `ssh_tunnel.py status`.
+3. The forwarder ssh process died after binding the listener. Check `ssh_tunnel.py status <alias>` — `running: false` means the detached ssh exited; the state file lingers until `stop` is called. ssh-side server-alive probes (`ServerAliveInterval=60` / `ServerAliveCountMax=3` baked into v1.0) detect a dead master but **do not** auto-reconnect; the tunnel exits if SSH drops.
 
 ## `ProxyJump` failures
 

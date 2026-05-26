@@ -70,6 +70,16 @@ Unit tests (always-on, added v0.3.0):
   partial / local-larger refuse / sha256 mismatch → exit 9), and
   recursive walk + posixpath + continue-on-error aggregation
   (paramiko fully mocked).
+- `test_ssh_tunnel_unit.py` — 71 tests covering CLI surface, state-file
+  primitives (write/read roundtrip, corrupt-skip, missing-field-skip,
+  scan ordering), port allocator (explicit busy / pool first-attempt /
+  pool exhausted), `_kill_with_grace` outcomes (stale / SIGTERM-killed /
+  SIGKILL-killed / SIGKILL-permission / both-failed / dies-between-checks),
+  every per-script failure_class (30-39 + remote_error catch-all), and
+  the `--no-detach` foreground path (`start_new_session` not set, port-busy
+  refusal, OSError spawn, KeyboardInterrupt -> exit 130). ssh subprocess is
+  fully faked via a `_FakePopen` helper; state IO uses `tmp_path` via a
+  monkeypatched `tempfile.gettempdir`.
 
 Integration tests (opt-in via `-m live_ssh`):
 
@@ -89,6 +99,12 @@ Integration tests (opt-in via `-m live_ssh`):
   when remote user is root), `--bwlimit` wall-clock check,
   `--no-progress` stderr suppression, and three guard branches
   (remote not found / remote-is-dir-without-recursive / local-is-dir-without-recursive).
+- `test_ssh_tunnel_integration.py` — 5 tests against `POC_HOST`:
+  start->stop roundtrip with local-port LISTEN probe + state-file cleanup,
+  `--no-detach` lifecycle (foreground spawn, SIGINT reap), empty-status,
+  `stop` with no forward → exit 36 `tunnel_not_found`, and the
+  `--idle-timeout` no-op assertion (tunnel survives past the value;
+  `flag_deferred=["--idle-timeout"]` marker present).
 
 ## What's missing (v1.0 roadmap)
 

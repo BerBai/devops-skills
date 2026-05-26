@@ -60,7 +60,7 @@ Four modes:
 ssh_tunnel.py start prod-db --remote-port 3306 --local-port 13306
 ```
 
-Same daemon shape as `ssh_execute`: a local supervisor process holds the forward open, writes state to `$TMPDIR/ssh_tunnel/<md5(alias-port)>.json`, exits after `--idle-timeout` (default 30 min).
+v1.0 ships a single detached forward per invocation: a Python `subprocess.Popen(start_new_session=True)` detach (POSIX-only) launches `ssh -N -L ...` which inherits a fresh session and is reaped by init after the parent exits. The forward's `(alias, local_port)` state lives at `$TMPDIR/ssh_tunnel/<md5(alias-port)>.json` (mode `0o600`, directory `0o700`). `Popen.pid` is the detached ssh PID directly — no `lsof` / `pgrep` lookup is needed to recover it.
 
 Local ports come from pool `10000–20000` when `--local-port` is omitted. The state file records the chosen port so Claude can answer "where's the tunnel?".
 
@@ -69,6 +69,8 @@ ssh_tunnel.py list                  # all active forwards
 ssh_tunnel.py status prod-db        # this alias's forwards
 ssh_tunnel.py stop prod-db --port 13306
 ```
+
+**v1.0 status**: `--idle-timeout` is accepted (surface-stable) but is a no-op; the tunnel runs until you call `stop` or kill its PID. The script emits `data.flag_deferred=["--idle-timeout"]` + a stderr warning so callers can notice. v1.1 will reintroduce idle exit, most likely via `ControlMaster` integration alongside the v1.1 `ssh_daemon` revival. Windows support is also v1.1 (the `start_new_session=True` detach is POSIX-only; Windows starts refuse with `failure_class=posix_only`, exit 30). Until then, callers should clean up explicitly. See `.trellis/tasks/05-24-ssh-core-ssh-tunnel/prd.md` for the full deferral rationale.
 
 ## 5. Manage `~/.ssh/config`
 

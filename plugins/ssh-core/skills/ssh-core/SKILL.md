@@ -44,6 +44,9 @@ Is the target a remote host?
     │
     ├─ Forward a port → ssh_tunnel.py start <alias>
     │                     --remote-port 3306 --local-port 13306
+    │                     # v1.0 ships POSIX-only detach via
+    │                     # Popen(start_new_session=True).
+    │                     # --idle-timeout accepted but no-op (v1.1 deferred).
     │
     └─ Manage hosts → ssh_config_manager.py
                         create | update | delete | list | find
@@ -78,7 +81,7 @@ python scripts/ssh_server_transfer.py prod-db /var/backup/db.dump backup-host /r
 # Broadcast to a tagged fleet
 python scripts/ssh_cluster.py "uptime" --tags web,prod --parallel --max-workers 8
 
-# Open a tunnel: local 13306 → prod-db:3306
+# Open a tunnel: local 13306 → prod-db:3306 (POSIX-only; --idle-timeout v1.1 deferred)
 python scripts/ssh_tunnel.py start prod-db --remote-port 3306 --local-port 13306
 
 # Inspect / edit hosts

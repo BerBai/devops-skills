@@ -8,6 +8,7 @@ venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
 
 # Runtime state — these are generated at use time, never committed
 plugins/ssh-guarded/skills/ssh-guarded/reports/requests/*.json
@@ -41,3 +42,4 @@ authorized_keys
 .claude/
 .trellis/
 AGENTS.md
+CLAUDE.md
