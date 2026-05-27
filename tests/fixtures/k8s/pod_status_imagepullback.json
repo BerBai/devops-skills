@@ -1,0 +1,42 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "imagepull-pod",
+    "namespace": "default",
+    "uid": "88888888-8888-8888-8888-888888888888"
+  },
+  "spec": {
+    "containers": [
+      {
+        "name": "app",
+        "image": "nonexistent.example.com/missing:v1"
+      }
+    ]
+  },
+  "status": {
+    "phase": "Pending",
+    "conditions": [
+      {"type": "Initialized", "status": "True"},
+      {"type": "Ready", "status": "False"},
+      {"type": "ContainersReady", "status": "False"},
+      {"type": "PodScheduled", "status": "True"}
+    ],
+    "containerStatuses": [
+      {
+        "name": "app",
+        "ready": false,
+        "restartCount": 0,
+        "image": "nonexistent.example.com/missing:v1",
+        "imageID": "",
+        "state": {
+          "waiting": {
+            "reason": "ImagePullBackOff",
+            "message": "Back-off pulling image \"nonexistent.example.com/missing:v1\""
+          }
+        },
+        "started": false
+      }
+    ]
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "creating-pod",
+    "namespace": "default",
+    "uid": "22222222-2222-2222-2222-222222222222"
+  },
+  "spec": {
+    "containers": [
+      {
+        "name": "app",
+        "image": "busybox:1.36",
+        "volumeMounts": [
+          {"name": "data", "mountPath": "/data"}
+        ]
+      }
+    ],
+    "volumes": [
+      {
+        "name": "data",
+        "persistentVolumeClaim": {"claimName": "missing-pvc"}
+      }
+    ]
+  },
+  "status": {
+    "phase": "Pending",
+    "conditions": [
+      {"type": "Initialized", "status": "True"},
+      {"type": "Ready", "status": "False", "reason": "ContainersNotReady"},
+      {"type": "ContainersReady", "status": "False", "reason": "ContainersNotReady"},
+      {"type": "PodScheduled", "status": "True"}
+    ],
+    "containerStatuses": [
+      {
+        "name": "app",
+        "ready": false,
+        "restartCount": 0,
+        "image": "busybox:1.36",
+        "imageID": "",
+        "state": {
+          "waiting": {
+            "reason": "ContainerCreating",
+            "message": "MountVolume.SetUp failed for volume \"data\" : persistentvolumeclaims \"missing-pvc\" not found"
+          }
+        },
+        "started": false
+      }
+    ]
+  }
+}

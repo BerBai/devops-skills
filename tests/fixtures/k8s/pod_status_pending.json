@@ -1,0 +1,33 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "pending-pod",
+    "namespace": "default",
+    "uid": "11111111-1111-1111-1111-111111111111"
+  },
+  "spec": {
+    "containers": [
+      {
+        "name": "app",
+        "image": "busybox:1.36"
+      }
+    ],
+    "nodeSelector": {
+      "nonexistent": "true"
+    }
+  },
+  "status": {
+    "phase": "Pending",
+    "conditions": [
+      {
+        "type": "PodScheduled",
+        "status": "False",
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-05-27T10:00:00Z",
+        "reason": "Unschedulable",
+        "message": "0/3 nodes are available: 3 node(s) didn't match Pod's node affinity/selector."
+      }
+    ]
+  }
+}

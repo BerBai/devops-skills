@@ -1,0 +1,17 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Event",
+      "metadata": {"name": "pending-pod.evt1", "namespace": "default"},
+      "involvedObject": {"kind": "Pod", "name": "pending-pod", "namespace": "default"},
+      "type": "Warning",
+      "reason": "FailedScheduling",
+      "message": "0/3 nodes are available: 3 node(s) didn't match Pod's node affinity/selector.",
+      "firstTimestamp": "2026-05-27T09:55:00Z",
+      "lastTimestamp": "2026-05-27T09:59:30Z"
+    }
+  ]
+}

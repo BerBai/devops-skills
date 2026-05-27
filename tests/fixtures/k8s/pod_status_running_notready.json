@@ -1,0 +1,44 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "notready-pod",
+    "namespace": "default",
+    "uid": "33333333-3333-3333-3333-333333333333"
+  },
+  "spec": {
+    "containers": [
+      {
+        "name": "app",
+        "image": "nginx:1.27",
+        "readinessProbe": {
+          "httpGet": {"path": "/healthz", "port": 8080},
+          "initialDelaySeconds": 5,
+          "periodSeconds": 5
+        }
+      }
+    ]
+  },
+  "status": {
+    "phase": "Running",
+    "conditions": [
+      {"type": "Initialized", "status": "True"},
+      {"type": "Ready", "status": "False", "reason": "ContainersNotReady"},
+      {"type": "ContainersReady", "status": "False"},
+      {"type": "PodScheduled", "status": "True"}
+    ],
+    "containerStatuses": [
+      {
+        "name": "app",
+        "ready": false,
+        "restartCount": 0,
+        "image": "nginx:1.27",
+        "imageID": "docker.io/library/nginx@sha256:deadbeef",
+        "state": {
+          "running": {"startedAt": "2026-05-27T10:00:00Z"}
+        },
+        "started": true
+      }
+    ]
+  }
+}

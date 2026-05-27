@@ -1,0 +1,48 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "oom-pod",
+    "namespace": "default",
+    "uid": "99999999-9999-9999-9999-999999999999"
+  },
+  "spec": {
+    "containers": [
+      {
+        "name": "app",
+        "image": "busybox:1.36",
+        "resources": {"limits": {"memory": "10Mi"}}
+      }
+    ]
+  },
+  "status": {
+    "phase": "Running",
+    "conditions": [
+      {"type": "Initialized", "status": "True"},
+      {"type": "Ready", "status": "True"},
+      {"type": "ContainersReady", "status": "True"},
+      {"type": "PodScheduled", "status": "True"}
+    ],
+    "containerStatuses": [
+      {
+        "name": "app",
+        "ready": true,
+        "restartCount": 2,
+        "image": "busybox:1.36",
+        "imageID": "docker.io/library/busybox@sha256:beefbeef",
+        "state": {
+          "running": {"startedAt": "2026-05-27T10:00:00Z"}
+        },
+        "lastState": {
+          "terminated": {
+            "exitCode": 137,
+            "reason": "OOMKilled",
+            "startedAt": "2026-05-27T09:50:00Z",
+            "finishedAt": "2026-05-27T09:58:00Z"
+          }
+        },
+        "started": true
+      }
+    ]
+  }
+}

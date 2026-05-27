@@ -1,0 +1,47 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "restarting-pod",
+    "namespace": "default",
+    "uid": "44444444-4444-4444-4444-444444444444"
+  },
+  "spec": {
+    "containers": [
+      {
+        "name": "app",
+        "image": "nginx:1.27"
+      }
+    ]
+  },
+  "status": {
+    "phase": "Running",
+    "conditions": [
+      {"type": "Initialized", "status": "True"},
+      {"type": "Ready", "status": "True"},
+      {"type": "ContainersReady", "status": "True"},
+      {"type": "PodScheduled", "status": "True"}
+    ],
+    "containerStatuses": [
+      {
+        "name": "app",
+        "ready": true,
+        "restartCount": 3,
+        "image": "nginx:1.27",
+        "imageID": "docker.io/library/nginx@sha256:deadbeef",
+        "state": {
+          "running": {"startedAt": "2026-05-27T10:00:00Z"}
+        },
+        "lastState": {
+          "terminated": {
+            "exitCode": 1,
+            "reason": "Error",
+            "startedAt": "2026-05-27T09:55:00Z",
+            "finishedAt": "2026-05-27T09:59:00Z"
+          }
+        },
+        "started": true
+      }
+    ]
+  }
+}

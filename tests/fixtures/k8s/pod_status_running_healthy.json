@@ -1,0 +1,39 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "healthy-pod",
+    "namespace": "default",
+    "uid": "55555555-5555-5555-5555-555555555555"
+  },
+  "spec": {
+    "containers": [
+      {
+        "name": "app",
+        "image": "nginx:1.27"
+      }
+    ]
+  },
+  "status": {
+    "phase": "Running",
+    "conditions": [
+      {"type": "Initialized", "status": "True"},
+      {"type": "Ready", "status": "True"},
+      {"type": "ContainersReady", "status": "True"},
+      {"type": "PodScheduled", "status": "True"}
+    ],
+    "containerStatuses": [
+      {
+        "name": "app",
+        "ready": true,
+        "restartCount": 0,
+        "image": "nginx:1.27",
+        "imageID": "docker.io/library/nginx@sha256:deadbeef",
+        "state": {
+          "running": {"startedAt": "2026-05-27T10:00:00Z"}
+        },
+        "started": true
+      }
+    ]
+  }
+}

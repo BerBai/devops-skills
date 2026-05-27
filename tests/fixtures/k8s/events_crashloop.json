@@ -1,0 +1,28 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Event",
+      "metadata": {"name": "crashloop-pod.evt1", "namespace": "default"},
+      "involvedObject": {"kind": "Pod", "name": "crashloop-pod", "namespace": "default"},
+      "type": "Normal",
+      "reason": "Pulled",
+      "message": "Successfully pulled image \"busybox:1.36\"",
+      "firstTimestamp": "2026-05-27T09:55:00Z",
+      "lastTimestamp": "2026-05-27T09:55:00Z"
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Event",
+      "metadata": {"name": "crashloop-pod.evt2", "namespace": "default"},
+      "involvedObject": {"kind": "Pod", "name": "crashloop-pod", "namespace": "default"},
+      "type": "Warning",
+      "reason": "BackOff",
+      "message": "Back-off restarting failed container app in pod crashloop-pod",
+      "firstTimestamp": "2026-05-27T09:55:00Z",
+      "lastTimestamp": "2026-05-27T09:59:30Z"
+    }
+  ]
+}

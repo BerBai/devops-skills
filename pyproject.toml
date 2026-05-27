@@ -46,6 +46,7 @@ testpaths = ["tests"]
 addopts = "-ra -q"
 markers = [
     "live_ssh: integration tests that ssh to a real host (default alias 'pai'). Skipped by default; run with `pytest -m live_ssh`. See tests/README.md for prerequisites.",
+    "live_k8s: integration tests that need a kind cluster + kubectl. Skipped by default; run with `pytest -m live_k8s`.",
 ]
 
 [build-system]

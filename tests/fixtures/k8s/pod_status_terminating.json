@@ -1,0 +1,41 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "terminating-pod",
+    "namespace": "default",
+    "uid": "66666666-6666-6666-6666-666666666666",
+    "deletionTimestamp": "2026-05-27T10:00:00Z",
+    "deletionGracePeriodSeconds": 30
+  },
+  "spec": {
+    "containers": [
+      {
+        "name": "app",
+        "image": "nginx:1.27"
+      }
+    ]
+  },
+  "status": {
+    "phase": "Running",
+    "conditions": [
+      {"type": "Initialized", "status": "True"},
+      {"type": "Ready", "status": "False"},
+      {"type": "ContainersReady", "status": "False"},
+      {"type": "PodScheduled", "status": "True"}
+    ],
+    "containerStatuses": [
+      {
+        "name": "app",
+        "ready": false,
+        "restartCount": 0,
+        "image": "nginx:1.27",
+        "imageID": "docker.io/library/nginx@sha256:deadbeef",
+        "state": {
+          "running": {"startedAt": "2026-05-27T09:50:00Z"}
+        },
+        "started": true
+      }
+    ]
+  }
+}

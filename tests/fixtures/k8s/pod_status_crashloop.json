@@ -1,0 +1,51 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "crashloop-pod",
+    "namespace": "default",
+    "uid": "77777777-7777-7777-7777-777777777777"
+  },
+  "spec": {
+    "containers": [
+      {
+        "name": "app",
+        "image": "busybox:1.36",
+        "command": ["sh", "-c", "exit 1"]
+      }
+    ]
+  },
+  "status": {
+    "phase": "Running",
+    "conditions": [
+      {"type": "Initialized", "status": "True"},
+      {"type": "Ready", "status": "False", "reason": "ContainersNotReady"},
+      {"type": "ContainersReady", "status": "False"},
+      {"type": "PodScheduled", "status": "True"}
+    ],
+    "containerStatuses": [
+      {
+        "name": "app",
+        "ready": false,
+        "restartCount": 7,
+        "image": "busybox:1.36",
+        "imageID": "docker.io/library/busybox@sha256:beefbeef",
+        "state": {
+          "waiting": {
+            "reason": "CrashLoopBackOff",
+            "message": "back-off 5m0s restarting failed container=app pod=crashloop-pod"
+          }
+        },
+        "lastState": {
+          "terminated": {
+            "exitCode": 1,
+            "reason": "Error",
+            "startedAt": "2026-05-27T09:55:00Z",
+            "finishedAt": "2026-05-27T09:55:01Z"
+          }
+        },
+        "started": false
+      }
+    ]
+  }
+}
