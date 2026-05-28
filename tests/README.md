@@ -80,6 +80,26 @@ Unit tests (always-on, added v0.3.0):
   refusal, OSError spawn, KeyboardInterrupt -> exit 130). ssh subprocess is
   fully faked via a `_FakePopen` helper; state IO uses `tmp_path` via a
   monkeypatched `tempfile.gettempdir`.
+- `test_ssh_guarded_lib_*_unit.py` — 82 tests covering the 4 shared libs
+  in `plugins/ssh-guarded/.../scripts/lib/`: `sandbox` (project-id
+  resolution, normalize, sandbox + denylist match), `redact` (default
+  catalog + custom catalog + missing/corrupt fallback + per-pattern
+  compile-fail skip), `lockfile` (POSIX `fcntl.flock` + Windows degraded
+  `.lock` sentinel + holder-pid lookup + cleanup-on-exception), and
+  `request_artifact` (schema v1 load/save atomic, `validate` chain
+  with denylist-before-sandbox order, `allocate_request_id` O_EXCL
+  retry, `parse_expires_in` D11 bounds, `compute_risk` per-op D4 table,
+  `save_result` redaction bypass).
+- `test_ssh_guarded_request_*_unit.py` + `test_ssh_guarded_run_request_unit.py`
+  — 87 tests across the 4 drafters and `run_request` executor: argparse
+  SUPPRESS pattern (D10), per-script `_EXIT_CODES` taxonomy (30-49 for
+  drafters, 50-59 for executor), drafter happy-path artifact write,
+  sandbox warn-but-write (C3 pedagogical), denylist warn-but-write,
+  SHA-256 streaming + drift detection (exit 56), executor 7-step
+  validation order (D7, denylist before sandbox), lockfile contention
+  (exit 54), confirm-delete gate (exit 59), transport routing (D8 argv
+  table), `_resolve_remote_home` + `~/` transport-time expansion (D7a),
+  result.json schema (C9 / D9), redaction toggling.
 
 Integration tests (opt-in via `-m live_ssh`):
 
@@ -105,9 +125,24 @@ Integration tests (opt-in via `-m live_ssh`):
   `stop` with no forward → exit 36 `tunnel_not_found`, and the
   `--idle-timeout` no-op assertion (tunnel survives past the value;
   `flag_deferred=["--idle-timeout"]` marker present).
+- `test_ssh_guarded_pipeline_live.py` — 6 tests against `POC_HOST` exercising
+  the full draft → review → execute pipeline: command happy path
+  (`echo hello` round-trip, result.json `stdout_redacted` carries the
+  output), upload happy path (random 1 KiB blob, remote sha256 matches
+  local), mkdir happy path (`--parents`, `test -d` verify), delete happy
+  path (mkdir via direct ssh, then `request_delete --recursive` +
+  `run_request --execute --confirm-delete`, `test ! -e` verify), denylist
+  refusal (`request_delete ~/.ssh/authorized_keys` → drafter warns +
+  writes artifact, executor exits 51 `path_in_denylist` without ssh),
+  sandbox refusal (`request_command --workdir /etc` → drafter warns +
+  writes, executor exits 50 `workdir_outside_sandbox`). All cases pin
+  `--project-id devops-skills`, use uuid4-keyed remote paths under
+  `~/workspace/devops-skills/`, and clean up remote + local artifacts +
+  result.json in `finally`.
 
 ## What's missing (v1.0 roadmap)
 
-- Sandbox-escape attempts on `ssh-guarded` (the path rules table in `workdir-sandbox.md`)
-- Redact-catalog regression: feed known secrets, assert they're scrubbed
-- Workflow tests: `request_command → run_request --execute` round-trip
+- Sandbox-escape attempts on `ssh-guarded` beyond the two pedagogical
+  refusal cases (the full path rules table in `workdir-sandbox.md`)
+- Redact-catalog regression suite for `redact_check.py` (sibling task)
+- `exec_detached.py` / `scan_software.py` live tests (sibling tasks)
