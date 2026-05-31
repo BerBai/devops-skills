@@ -10,7 +10,7 @@ CLI args ────────▶ build_parser() ──▶ args
               ┌────────────────────────────────┐
               │ window_seconds = _parse_window │
               │   (args.window)                │
-              │  failure → exit 51             │
+              │  failure → exit 91             │
               └────────┬───────────────────────┘
                        │
                        ▼
@@ -40,8 +40,8 @@ CLI args ────────▶ build_parser() ──▶ args
               ┌────────────────────────────────┐
               │ find_anchor(all_lines,         │
               │   args.anchor, args.pair_mode) │
-              │  None → exit 50                │
-              │  pair_unmatched → exit 52      │
+              │  None → exit 90                │
+              │  pair_unmatched → exit 92      │
               └────────┬───────────────────────┘
                        │
                        ▼
@@ -346,10 +346,10 @@ duration: 243ms
 | 1 | generic | 未预期异常 |
 | 40 | source_spec_invalid | 透传 lib.source_spec |
 | 44 | no_sources_resolved | 透传 |
-| 50 | anchor_not_found | 全部源扫描无 anchor 命中 |
-| 51 | window_invalid | _parse_window 失败 |
-| 52 | pair_unmatched | pair_mode 仅 1 命中 |
-| 53-59 | reserved | 未来扩展 |
+| 90 | anchor_not_found | 全部源扫描无 anchor 命中 |
+| 91 | window_invalid | _parse_window 失败 |
+| 92 | pair_unmatched | pair_mode 仅 1 命中 |
+| 93-99 | reserved | 未来扩展 |
 | 124 | (透传) | ssh timeout |
 
 **warning 路径**：当 `≥1` fetcher 失败但 anchor 仍能找到 → success=true,
@@ -388,7 +388,7 @@ def test_correlate_remote_pai_journal():
            "--since", "30min",
            "--json"]
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if out.returncode == 50:
+    if out.returncode == 90:
         pytest.skip("no 'Accepted' login in last 30min on pai; expected on quiet host")
     assert out.returncode == 0
     env = json.loads(out.stdout)

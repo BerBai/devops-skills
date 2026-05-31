@@ -52,10 +52,10 @@ v1.0：在一组异构源里**找因果链**——以 anchor regex 定位时间�
    clock skew —— 全部 `from lib.X import Y` 调用。如果 ship 时发现 lib 接口
    不便，升级到父 prd 评估 refactor，不在本 child 修 lib。
 
-5. **Failure_class namespace 50-59**（父 prd.md X2）：
+5. **Failure_class namespace 90-99**（父 prd.md X2；50-59 已由 ssh-guarded `run_request` 占用）：
    `anchor_not_found / window_invalid / pair_unmatched` + 透传
    `fetcher_failed` / `source_spec_invalid`。Spec 同步：本任务 ship commit
-   追加 50-59 段到 `error-handling.md`。
+   追加 90-99 段到 `error-handling.md`。
 
 6. **JSON envelope** 沿用全仓契约；`--json` 模式下三段式以 `data` 字段嵌套，
    不再做 NDJSON 流式输出（与 tail_multi 不同：correlate 是一次性查询，
@@ -103,13 +103,13 @@ v1.0：在一组异构源里**找因果链**——以 anchor regex 定位时间�
 - 不区分大小写？**默认区分**（与 grep 默认一致），用户自己加 `(?i)`。
 - 多源都有命中 → 取**全局最早**那个（按 norm_time）；`--pair-mode` 取最早 +
   最晚。
-- 0 命中 → `failure_class=anchor_not_found` + `exit 50`。
-- `--pair-mode` 但仅 1 个命中 → `failure_class=pair_unmatched` + `exit 52`。
+- 0 命中 → `failure_class=anchor_not_found` + `exit 90`。
+- `--pair-mode` 但仅 1 个命中 → `failure_class=pair_unmatched` + `exit 92`。
 
 ### R4 — Window 解析
 - `--window 30s` / `--window 2m` / `--window 1h` —— 支持 `s/m/h/d` 后缀。
 - 解析失败（如 `--window abc` 或负值）→ `failure_class=window_invalid` +
-  `exit 51`。
+  `exit 91`。
 - Window 应用：anchor `T` ± window，**含端点**。`--pair-mode` 模式下 window
   应用于两个 anchor 各自的 ±window（即整个区间 = pair 跨度 + 两端 window
   扩展）。
@@ -151,10 +151,10 @@ v1.0：在一组异构源里**找因果链**——以 anchor regex 定位时间�
 
 | Code | failure_class | 触发 |
 |---|---|---|
-| 50 | `anchor_not_found` | 全部源扫描无 anchor 命中 |
-| 51 | `window_invalid` | `--window` 解析失败 |
-| 52 | `pair_unmatched` | `--pair-mode` 仅命中 1 次 |
-| 53-59 | reserved | 未来扩展 |
+| 90 | `anchor_not_found` | 全部源扫描无 anchor 命中 |
+| 91 | `window_invalid` | `--window` 解析失败 |
+| 92 | `pair_unmatched` | `--pair-mode` 仅命中 1 次 |
+| 93-99 | reserved | 未来扩展 |
 | 40 | `source_spec_invalid` | 透传自 lib.source_spec |
 | 44 | `no_sources_resolved` | 透传 |
 | 41 | `fetcher_failed` | 透传：本任务即使所有 fetcher 失败也 try anchor 搜索（可能从 partial 数据找）；全部 fetcher 失败 + anchor 在剩余 0 行内未找到 → 主因是 `fetcher_failed` 还是 `anchor_not_found`？v1.0 规则：**优先报 anchor_not_found**（用户层更直观），fetcher 失败信息放 `data.failed_fetchers`。|
@@ -203,10 +203,10 @@ v1.0：在一组异构源里**找因果链**——以 anchor regex 定位时间�
 - [ ] `correlate.py --sources journal://pai/sshd --anchor "Accepted" --window 60s
       --since 30min --json` 在 pai 跑通；envelope `success=true,
       data.anchor.source` 存在，`data.window_lines.length >= 1`。
-- [ ] `--anchor "PATTERN-NEVER-MATCH-ZZZZ"` → exit 50, failure_class =
+- [ ] `--anchor "PATTERN-NEVER-MATCH-ZZZZ"` → exit 90, failure_class =
       `anchor_not_found`。
-- [ ] `--window "garbage"` → exit 51, failure_class = `window_invalid`。
-- [ ] `--pair-mode` 但只命中 1 次 → exit 52, failure_class = `pair_unmatched`。
+- [ ] `--window "garbage"` → exit 91, failure_class = `window_invalid`。
+- [ ] `--pair-mode` 但只命中 1 次 → exit 92, failure_class = `pair_unmatched`。
 - [ ] `--json` 输出 envelope 单 JSON object（**不是** NDJSON）：
       `data = {anchor: {...}, window_lines: [...], summary: {...}}`。
 - [ ] Human mode 输出三段 separator `=== Anchor ===` / `=== Within window ===` /
@@ -215,7 +215,7 @@ v1.0：在一组异构源里**找因果链**——以 anchor regex 定位时间�
 - [ ] Anchor 在 window 内**不被任何 filter 跑掉**（即使本任务用了 user
       keep_always/drop 配置也强制忽略），符合 noise_reduction.md "不要默认
       丢什么"节。
-- [ ] `.trellis/spec/backend/error-handling.md` 追加 50-59 段。
+- [ ] `.trellis/spec/backend/error-handling.md` 追加 90-99 段。
 - [ ] `pytest tests/` 默认套件全绿，不破坏已 ship 的 tail_multi 测试。
 - [ ] `lib/source_spec.py` / `lib/fetchers.py` / `lib/time_norm.py` /
       `lib/clock_skew.py` **保持原状**（correlate ship 不改 lib，如必须改 → 升

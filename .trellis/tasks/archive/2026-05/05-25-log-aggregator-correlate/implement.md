@@ -33,9 +33,9 @@
       - design D2 倾向选项 B；但本 phase 决定时需读 tail_multi shipped 代码
         再定。若选 B，需要 1 个跨 child 的 minor commit 仅做 rename，**不**
         改语义。
-- [ ] **0.5** Spec slot：`.trellis/spec/backend/error-handling.md` 50-59
-      区间应**未被占用**（tail_multi 用了 40-49）。如已被占→不能直接用本
-      区间，需升级父 prd。
+- [x] **0.5** Spec slot：`.trellis/spec/backend/error-handling.md` 50-59
+      已由 ssh-guarded `run_request` 占用，不能复用；本任务改用 90-99，
+      并同步更新父/子 PRD 与 backend error-handling 规范。
 
 ## Phase 1 — Foundation (CLI shell + envelopes)
 
@@ -43,8 +43,8 @@
       block；`See:` block 加 PRD/design 路径 + 父 prd.md X1-X7 引用）。
 - [ ] **1.2** 保留 stub 的 `build_parser()`（6 flag 不动）。增加常量：
       ```python
-      _EXIT_CODES = {None: 0, "anchor_not_found": 50, "window_invalid": 51,
-                     "pair_unmatched": 52, "source_spec_invalid": 40,
+      _EXIT_CODES = {None: 0, "anchor_not_found": 90, "window_invalid": 91,
+                     "pair_unmatched": 92, "source_spec_invalid": 40,
                      "no_sources_resolved": 44, "_generic": 1, "_timeout": 124}
       _HUMAN_HINTS = {
           "anchor_not_found": "No line matched --anchor in --since window. "
@@ -64,7 +64,7 @@
 python3 .../correlate.py --help  # 6 flag
 python3 .../correlate.py --sources file://local/tmp/x.log --anchor "X" \
   --window "garbage" --json
-# Expect: exit 51, failure_class=window_invalid
+# Expect: exit 91, failure_class=window_invalid
 ```
 
 ## Phase 2 — `_parse_window`
@@ -106,8 +106,8 @@ def test_collect_mocked(mock_iter):
 - [ ] **5.1** 实现 `Anchor` dataclass + `_find_anchor` + `PairUnmatchedError`
       per design D3。
 - [ ] **5.2** main 中 try-except 处理：
-      - `find_anchor` 返回 None → `_emit_failure("anchor_not_found", 50, ...)`
-      - 抛 `PairUnmatchedError` → `_emit_failure("pair_unmatched", 52, ...)`
+      - `find_anchor` 返回 None → `_emit_failure("anchor_not_found", 90, ...)`
+      - 抛 `PairUnmatchedError` → `_emit_failure("pair_unmatched", 92, ...)`
 
 ## Phase 6 — `_filter_window` + `_compute_hint`
 
@@ -161,7 +161,7 @@ python3 .../correlate.py --sources "file://local/tmp/test.log?ts_regex=...&ts_fo
       def test_anchor_not_found(mock_probe, mock_iter, tmp_path):
           mock_probe.return_value = {}
           mock_iter.return_value = iter([])  # no lines
-          # ... run subprocess and assert exit 50
+          # ... run subprocess and assert exit 90
       ```
 
 **Validation 8**:
@@ -206,15 +206,14 @@ pytest tests/test_correlate_unit.py -v
       uv run pytest tests/ -m live_ssh -v
       ```
 - [ ] **11.2** `git restore uv.lock`。
-- [ ] **11.3** 编辑 `.trellis/spec/backend/error-handling.md`：在 `40-49`
-      行之后插入：
+- [ ] **11.3** 编辑 `.trellis/spec/backend/error-handling.md`：插入：
       ```markdown
-      | `50`–`59` | `correlate` per-script failure classes. `50`
-      `anchor_not_found`, `51` `window_invalid`, `52` `pair_unmatched`.
+      | `90`–`99` | `correlate` per-script failure classes. `90`
+      `anchor_not_found`, `91` `window_invalid`, `92` `pair_unmatched`.
       Introduced by `correlate` v1.0 (see
       `.trellis/tasks/05-25-log-aggregator-correlate/prd.md` R8). |
       ```
-      在「Do not invent new exit codes」段加入 `50`–`59`。
+      在「Do not invent new exit codes」段加入 `90`–`99`。
 
 ## Phase 12 — Commit & wrap-up
 
@@ -222,7 +221,7 @@ pytest tests/test_correlate_unit.py -v
       - `plugins/log-aggregator/skills/log-aggregator/scripts/correlate.py`（重写）
       - `tests/test_correlate_unit.py`（新）
       - `tests/test_correlate_integration.py`（新）
-      - `.trellis/spec/backend/error-handling.md`（追加 50-59 段）
+      - `.trellis/spec/backend/error-handling.md`（追加 90-99 段）
       - `lib/*.py`（若 Phase 0.4 选项 B —— _infer_level rename 公开，加这一项）
       - **不** commit：`.trellis/tasks/**` / `uv.lock`
 - [ ] **12.2** Commit message：
@@ -234,11 +233,11 @@ pytest tests/test_correlate_unit.py -v
       - three-section output (Anchor / Within window / Summary)
       - likely_root_cause_hint: earliest critical event in window
       - --pair-mode for span start/end duration
-      - 3 per-script failure classes / exit codes 50-59
+      - 3 per-script failure classes / exit codes 90-99
       - Reuses lib/ shipped by tail_multi (no lib changes in this commit
         unless _infer_level rename, see Phase 0.4)
       - ~25 unit + 2 live_ssh integration tests
-      - spec update: error-handling.md gains 50-59 range
+      - spec update: error-handling.md gains 90-99 range
 
       Refs: .trellis/tasks/05-25-log-aggregator-correlate/
       Parent: .trellis/tasks/05-25-log-aggregator-v1/ (Phase 2)
