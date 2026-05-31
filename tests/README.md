@@ -100,6 +100,13 @@ Unit tests (always-on, added v0.3.0):
   (exit 54), confirm-delete gate (exit 59), transport routing (D8 argv
   table), `_resolve_remote_home` + `~/` transport-time expansion (D7a),
   result.json schema (C9 / D9), redaction toggling.
+- `test_exec_detached_unit.py` — 21 tests covering `exec_detached.py`
+  v1.0 without SSH: CLI help, non-command artifact refusal, lock-held and
+  duplicate-run subclasses, nohup wrapper escaping, PID parsing, atomic
+  job-state writes, command excerpt truncation, status state machine
+  (running / exited / vanished / corrupt / log-unreachable), tail-log
+  redaction toggles, wait timeout, list offline/probe, and malformed
+  ssh_execute child envelopes.
 
 Integration tests (opt-in via `-m live_ssh`):
 
@@ -139,10 +146,17 @@ Integration tests (opt-in via `-m live_ssh`):
   `--project-id devops-skills`, use uuid4-keyed remote paths under
   `~/workspace/devops-skills/`, and clean up remote + local artifacts +
   result.json in `finally`.
+- `test_exec_detached_live.py` — 3 tests against `POC_HOST` covering
+  detached command launch (`sleep 5; echo done`), status running → wait
+  exited with the real exit code, tail-log fetching captured output, and
+  duplicate `run --request` refusal with exit 60
+  `request_already_executed`. Tests pin `--project-id exec-detached-it`,
+  use uuid4-keyed remote workdirs under `~/workspace/exec-detached-it/`,
+  and clean up remote workdirs plus local `reports/jobs/<job_id>.json`.
 
 ## What's missing (v1.0 roadmap)
 
 - Sandbox-escape attempts on `ssh-guarded` beyond the two pedagogical
   refusal cases (the full path rules table in `workdir-sandbox.md`)
 - Redact-catalog regression suite for `redact_check.py` (sibling task)
-- `exec_detached.py` / `scan_software.py` live tests (sibling tasks)
+- `scan_software.py` live tests (sibling task)
