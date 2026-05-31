@@ -194,9 +194,11 @@ Inherits from pipeline_analyzer D8; no changes.
 
 ## Open questions blocking planning
 
-None. Awaiting user review of locked decisions, then `design.md` (adapter method signatures, aggregate computation, fixture catalog) + `implement.md` (sequence: extend lib_cicd → write runner_check → unit → integration → SKILL/references sync).
+None. `design.md` and `implement.md` were added on 2026-05-31 from the locked PRD decisions. User asked to continue implementation by priority and approved Trellis task work this turn.
 
 ## Notes
 
 - 2026-05-26 PRD drafted alongside pipeline_analyzer + secret_scope_audit sibling PRDs.
 - Surface correction over stub: `last_heartbeat` was unconditional in stub; v1.0 splits provider-specific (gh=null, glab=populated). `machine_info` reduced to `{os}` to match available API.
+- 2026-05-31 planning completed: added `design.md` and `implement.md`; next step is `task.py start` and implementation.
+- 2026-05-31 implementation completed: `runner_check.py` v1.0, `lib_cicd.py` runner/queue provider methods, unit + integration tests, SKILL.md and runner_debug reference sync. Local verification: ruff clean, mypy clean, 98% runner_check coverage, default `pytest tests/ -q` pass with environment-gated skips.
