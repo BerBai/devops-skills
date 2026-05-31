@@ -336,3 +336,36 @@ Shipped cicd-debug pipeline_analyzer v1.0 with gh/glab provider analysis, log ca
 ### Next Steps
 
 - None - task complete
+
+
+## Session 11: Ship log-aggregator correlate v1.0
+
+**Date**: 2026-05-31
+**Task**: Ship log-aggregator correlate v1.0
+**Branch**: `main`
+
+### Summary
+
+Implemented correlate v1.0 with anchor/window correlation, pair-mode duration, JSON/human output, tests, and error-handling spec updates.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6b63529` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

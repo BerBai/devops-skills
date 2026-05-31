@@ -61,12 +61,12 @@ correlate 和 grep_across_sources 的 design.md 只调 `from lib.fetchers import
 | Script | Exit code range | 预留 failure_class（最终在各 child design.md D8 锁定）|
 |---|---|---|
 | tail_multi | 40-49 | source_spec_invalid / fetcher_failed / clock_skew_failed / normalize_failed / no_sources_resolved / partial_fetch (warning, exit 0) |
-| correlate | 50-59 | anchor_not_found / window_invalid / pair_unmatched / 与 tail_multi 共享的 fetcher_failed 等透传 |
+| correlate | 90-99 | anchor_not_found / window_invalid / pair_unmatched / 与 tail_multi 共享的 fetcher_failed 等透传 |
 | grep_across_sources | 60-69 | pattern_invalid / 与 tail_multi 共享的 fetcher_failed 等透传 |
 
 通用：`0` success / `1` generic / `124` ssh timeout（ssh-core 透传）。
 
-**Spec update 时机**：参照 ssh_server_transfer 的做法（`.trellis/tasks/archive/2026-05/05-24-ssh-core-ssh-server-transfer/implement.md` Phase 0.2「Exit codes 20–29 are now documented in `.trellis/spec/backend/error-handling.md` (spec updated 2026-05-25 alongside this task)」），**每个 child 在自己的 ship commit 里同步追加自己那一段到 `.trellis/spec/backend/error-handling.md`** —— 即 tail_multi ship 时加 40-49 行、correlate ship 时加 50-59 行、grep_across_sources ship 时加 60-69 行。本规则把 spec update 与 ship 强绑定，避免 spec drift。
+**Spec update 时机**：参照 ssh_server_transfer 的做法（`.trellis/tasks/archive/2026-05/05-24-ssh-core-ssh-server-transfer/implement.md` Phase 0.2「Exit codes 20–29 are now documented in `.trellis/spec/backend/error-handling.md` (spec updated 2026-05-25 alongside this task)」），**每个 child 在自己的 ship commit 里同步追加自己那一段到 `.trellis/spec/backend/error-handling.md`** —— 即 tail_multi ship 时加 40-49 行、correlate ship 时加 90-99 行、grep_across_sources ship 时加 60-69 行。本规则把 spec update 与 ship 强绑定，避免 spec drift。
 
 **X3 — JSON envelope 契约**
 沿用 ssh-core/ssh-guarded 统一契约 `{success, exit_code, stdout, stderr, data, error?}`。3 脚本均支持 `--json`；其中 `grep_across_sources` 额外有 `--format json` 别名（v1.0 让两者等价，互不冲突）。
@@ -139,7 +139,7 @@ ship 时各 child 在自己的 commit 里仅同步**已变化的事实**：
 - [ ] `plugins/log-aggregator/skills/log-aggregator/scripts/lib/` 含 5 个共享模块（X1），correlate 和 grep_across_sources 复用、不复制 fetcher 实现
 - [ ] e2e validation 报告（独立 child task 形式）落仓：3 脚本在 pai + 本地 docker fixture 真机跑通
 - [ ] SKILL.md frontmatter + decision tree + quick reference 与实际 CLI 一致；3 references/ 不需要重写（已是 v1.0 描述）；若 ship 中发现偏差，对应 child 同步 commit 修订
-- [ ] `.trellis/spec/backend/error-handling.md` 追加 40–49 / 50–59 / 60–69 三段 per-script exit code range（每个 child ship 时同步追加自己那一段，参 X2 节 Spec update 时机）
+- [ ] `.trellis/spec/backend/error-handling.md` 追加 40–49 / 90–99 / 60–69 三段 per-script exit code range（每个 child ship 时同步追加自己那一段，参 X2 节 Spec update 时机）
 
 ## Tracking
 
@@ -155,4 +155,4 @@ ship 时各 child 在自己的 commit 里仅同步**已变化的事实**：
   - 共享 argparse 父 parser 用 `default=argparse.SUPPRESS` + `main()` `getattr` 兜底，避免 subparser default 覆盖（`05-24-devops-skills-v1-rollout/prd.md:84`）
   - `uv run` 副作用：commit 前 `git restore uv.lock` 隔离意外依赖升级（`prd.md:87`）
   - Sub-agent dispatch 适合 ~500 LOC 实现 + 30+ unit 单次完成 Phase 1-5；本 plugin 估算 tail_multi ~550 LOC、correlate ~400 LOC、grep_across_sources ~300 LOC，均适合 trellis-implement 单次 dispatch
-  - Per-script failure_class namespace 已是项目惯例（5 个先例）；本 plugin 沿用，区间 40-49/50-59/60-69 已在 X2 锁定
+  - Per-script failure_class namespace 已是项目惯例（5 个先例）；本 plugin 沿用，区间 40-49/90-99/60-69 已在 X2 锁定
