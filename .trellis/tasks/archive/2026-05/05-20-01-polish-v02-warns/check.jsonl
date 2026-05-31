@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify the 7-item code review checklist still holds after string-only edits; confirm test_manifests parametric tests pass for all 8 plugins"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify exit code 2 unchanged, JSON output contract unchanged, no new exit codes introduced"}

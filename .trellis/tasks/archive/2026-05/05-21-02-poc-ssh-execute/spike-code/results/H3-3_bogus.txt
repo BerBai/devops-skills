@@ -1,0 +1,29 @@
+### H3-3_bogus : unknown alias
+ARGV: bogus-not-defined true --ssh-config /tmp/poc-ssh-config
+----- BEGIN RUN -----
+{
+  "success": false,
+  "exit_code": 255,
+  "stdout": "",
+  "stderr": "ssh: Could not resolve hostname bogus-not-defined: nodename nor servname provided, or not known",
+  "data": {
+    "route": "remote",
+    "ssh_argv": [
+      "ssh",
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "ConnectTimeout=8",
+      "-F",
+      "/tmp/poc-ssh-config",
+      "bogus-not-defined",
+      "true"
+    ],
+    "elapsed_s": 0.01,
+    "ssh_noise_lines": [],
+    "failure_class": "network",
+    "raw_stderr": "ssh: Could not resolve hostname bogus-not-defined: nodename nor servname provided, or not known\n"
+  }
+}
+----- END RUN -----
+shell_rc=255

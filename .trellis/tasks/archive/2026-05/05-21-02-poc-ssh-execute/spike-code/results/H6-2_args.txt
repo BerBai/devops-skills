@@ -1,0 +1,20 @@
+### H6-2_args : local: ls -la /tmp
+ARGV: local ls -la /tmp
+----- BEGIN RUN -----
+{
+  "success": true,
+  "exit_code": 0,
+  "stdout": "lrwxr-xr-x@ 1 root  wheel  11 Oct 29  2025 /tmp -> private/tmp\n",
+  "stderr": "",
+  "data": {
+    "route": "local",
+    "shlex_argv": [
+      "ls",
+      "-la",
+      "/tmp"
+    ],
+    "elapsed_s": 0.0
+  }
+}
+----- END RUN -----
+shell_rc=0

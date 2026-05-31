@@ -1,0 +1,7 @@
+{"file": ".trellis/tasks/05-24-ssh-core-ssh-config-manager/prd.md", "reason": "Acceptance criteria checklist — every item must verify-able post-implement"}
+{"file": ".trellis/tasks/05-24-ssh-core-ssh-config-manager/design.md", "reason": "Invariants to verify: parser round-trip byte-equal, atomic write atomicity, IdentitiesOnly rule, metadata comment format"}
+{"file": "plugins/ssh-core/skills/ssh-core/scripts/ssh_config_manager.py", "reason": "Final implementation to audit against design.md + prd.md"}
+{"file": "tests/test_ssh_config_manager_unit.py", "reason": "Unit test file to be created — verify ≥ 38 case, covers parser/render/subcommand happy+failure"}
+{"file": "tests/test_ssh_config_manager_integration.py", "reason": "Integration test file to be created — verify 3 live_ssh case on real ~/.ssh/config (read-only)"}
+{"file": "plugins/ssh-core/skills/ssh-core/SKILL.md", "reason": "Lines 77-78 command examples must match final v1.0 signature; verify no drift"}
+{"file": "plugins/ssh-core/skills/ssh-core/references/workflows.md", "reason": "§5 description must match implementation invariants post-ship"}

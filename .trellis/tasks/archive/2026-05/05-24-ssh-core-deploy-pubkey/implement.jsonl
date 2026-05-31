@@ -1,0 +1,20 @@
+{"file": ".trellis/tasks/05-24-ssh-core-deploy-pubkey/prd.md", "reason": "Requirements (D1-D7 locked), acceptance criteria, scope boundaries for deploy_pubkey v1.0"}
+{"file": ".trellis/tasks/05-24-ssh-core-deploy-pubkey/design.md", "reason": "Architecture (preflight -> argv builder -> subprocess -> classify -> envelope), regex tables, exit-code pin, test strategy"}
+{"file": ".trellis/tasks/05-24-ssh-core-deploy-pubkey/implement.md", "reason": "Phase-by-phase execution plan with validation commands and review gates"}
+{"file": "plugins/ssh-core/skills/ssh-core/scripts/deploy_pubkey.py", "reason": "Current 42-LOC stub — argparse skeleton + unimplemented() body to replace; docstring v1.0 surface block is authoritative for flag set"}
+{"file": "plugins/ssh-core/skills/ssh-core/scripts/lib/__init__.py", "reason": "Stable surface helpers — json_result / emit / msys_safe_env / classify_failure / filter_ssh_noise — reuse, do NOT duplicate. Note: deploy_pubkey defines its own failure_class strings, does NOT use lib.classify_failure's 4-class set (per-script namespace pattern)"}
+{"file": "plugins/ssh-core/skills/ssh-core/scripts/ssh_execute.py", "reason": "v1.0 reference implementation (257 LOC) — module docstring style with See: block, argparse pattern, JSON envelope wiring, emit() usage, regex compilation conventions"}
+{"file": "plugins/ssh-core/skills/ssh-core/scripts/ssh_config_manager.py", "reason": "Per-script failure_class namespace precedent (not_found/already_exists/config_missing/parse_error/permission/internal, exit 4-8). deploy_pubkey follows this pattern with its own 9 strings + exit 10-15. Also: argparse-with-subparsers shape if needed"}
+{"file": "plugins/ssh-core/skills/ssh-core/SKILL.md", "reason": "Decision tree (line 26-47) shows ssh-core surface conventions; quick reference section to be extended with deploy_pubkey one-liner"}
+{"file": "plugins/ssh-core/skills/ssh-core/references/safety.md", "reason": "Hard rules (no shell strings / no credentials in argv / MSYS_NO_PATHCONV / no auto-ssh-copy-id philosophy). Line 28 specifically mentions deploy_pubkey philosophy"}
+{"file": "plugins/ssh-core/skills/ssh-core/references/workflows.md", "reason": "§6 documents the (currently v1.1-deferred) password-auth path that deploy_pubkey's --strip-password flag was meant to clean up. Section needs minor wording update in Phase 6"}
+{"file": ".trellis/spec/backend/adr-001-ssh-execute.md", "reason": "Defines BatchMode-only ssh_execute v1.0 (D1, A1, A2) — this is WHY deploy_pubkey cannot delegate first-touch auth to ssh_execute and must own its own ssh-copy-id spawn"}
+{"file": ".trellis/spec/backend/adr-003-sftp-transport.md", "reason": "Sibling v1.0 ADR — establishes that paramiko is a project runtime dep, but deploy_pubkey deliberately does NOT use it (stays on native OpenSSH like ssh_execute / ssh_cluster / ssh_config_manager)"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Exit-code allocation table — Phase 0.2 must verify 10-15 don't collide. Currently allocated: 0/1/2 (universal), 4-8 (ssh_config_manager), 9 (sftp_transport), 124 (timeout). 10+ is free"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "ruff/mypy/manifest test conventions; argv-as-list-never-shell rule"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Plugin/skill/scripts layout conventions"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "No logging module / no emoji / never log secrets — stdout/stderr only"}
+{"file": "tests/README.md", "reason": "Defines pytest -m live_ssh marker semantics and POC_HOST=pai convention"}
+{"file": "tests/test_ssh_execute_unit.py", "reason": "Unit test reference style — subprocess mock patterns, json envelope assertion helpers"}
+{"file": "tests/test_ssh_config_manager_unit.py", "reason": "Unit test reference style — fixture composition, failure_class case organization, parametrized happy/edge case tables"}
+{"file": "tests/test_ssh_execute_integration.py", "reason": "Integration test reference style — POC_HOST=pai skip-pattern, live_ssh marker placement, ssh -G validation helper"}

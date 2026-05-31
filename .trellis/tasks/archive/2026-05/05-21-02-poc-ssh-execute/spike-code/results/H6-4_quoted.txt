@@ -1,0 +1,19 @@
+### H6-4_quoted : local: quoted echo
+ARGV: local echo "hello world"
+----- BEGIN RUN -----
+{
+  "success": true,
+  "exit_code": 0,
+  "stdout": "hello world\n",
+  "stderr": "",
+  "data": {
+    "route": "local",
+    "shlex_argv": [
+      "echo",
+      "hello world"
+    ],
+    "elapsed_s": 0.0
+  }
+}
+----- END RUN -----
+shell_rc=0

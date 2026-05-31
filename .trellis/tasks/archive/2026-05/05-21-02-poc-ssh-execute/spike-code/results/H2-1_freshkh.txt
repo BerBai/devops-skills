@@ -1,0 +1,29 @@
+### H2-1_freshkh : no known_hosts entry
+ARGV: pai echo clean_run --ssh-config /tmp/poc-ssh-config
+----- BEGIN RUN -----
+{
+  "success": true,
+  "exit_code": 0,
+  "stdout": "clean_run\n",
+  "stderr": "",
+  "data": {
+    "route": "remote",
+    "ssh_argv": [
+      "ssh",
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "ConnectTimeout=8",
+      "-F",
+      "/tmp/poc-ssh-config",
+      "pai",
+      "echo clean_run"
+    ],
+    "elapsed_s": 0.29,
+    "ssh_noise_lines": [],
+    "failure_class": null,
+    "raw_stderr": ""
+  }
+}
+----- END RUN -----
+shell_rc=0

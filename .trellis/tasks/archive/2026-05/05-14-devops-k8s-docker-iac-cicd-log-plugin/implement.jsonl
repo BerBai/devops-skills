@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "新 plugin 与既有 ssh-core/ssh-guarded/remote-debug 是否复用形态（marketplace + 两层文档 + 桩脚本）"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "新 plugin 与 ssh-core 之间的依赖边界（shell-out 调 CLI，不直接 import）"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "新 plugin 的目录布局必须与 v0.1 三 plugin 完全一致"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "脚本桩需遵守 --help / --json / subprocess list 等既定约定"}
+{"file": ".trellis/tasks/05-14-devops-k8s-docker-iac-cicd-log-plugin/prd.md", "reason": "本任务 PRD，含五个 plugin 的描述触发词、脚本清单、ADR-lite 决策"}

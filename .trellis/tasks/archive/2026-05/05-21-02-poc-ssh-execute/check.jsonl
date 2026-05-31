@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify spike code obeys subprocess safety (list argv, no shell=True), JSON envelope schema, exit code semantics — even in throwaway code"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Spike code is throwaway but must NOT introduce patterns that contradict the v0.2 review checklist; flag anything the eventual v1.0 implementation would have to undo"}
+{"file": ".trellis/tasks/05-21-02-poc-ssh-execute/prd.md", "reason": "Success criteria checklist — each hypothesis verdict, each question answer, ADR existence, follow-up gaps section"}
+{"file": ".trellis/tasks/05-21-02-poc-ssh-execute/design.md", "reason": "Abort criteria check — confirm none of the foundational failure modes (H1 inconsistency, H5 orphan processes) actually triggered without being documented"}

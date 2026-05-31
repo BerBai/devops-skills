@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "JSON envelope contract (Pillar 1) + exit-code 表 — ssh_tunnel 引入新 30–39 区段，须确认与已有 0/1/2/4-9/10-15/20-29/124 不冲突，并在 spec 表中追加一行"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "确认 lib import 路径与脚本位置约定（sys.path.insert + lib/__init__.py 公共 surface）"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "test entrypoint (pytest tests/)、ruff + mypy 通行标准、test_manifests.py 自动覆盖项"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "stderr / stdout 分流与 SSH 噪声过滤策略（filter_ssh_noise 如何使用）"}
+{"file": "plugins/ssh-core/skills/ssh-core/references/workflows.md", "reason": "§4 Port-forward tunnel 整段重写目标 — drop 'Same daemon shape', drop 'exits after --idle-timeout', 加 v1.0/v1.1 status 段"}
+{"file": "plugins/ssh-core/skills/ssh-core/references/safety.md", "reason": "L22 Per-alias state files (daemons, tunnels) 约定 — 确认 $TMPDIR/ssh_tunnel/ + 0o700 dir + 0o600 file 与既有契约一致"}
+{"file": "plugins/ssh-core/skills/ssh-core/references/troubleshooting.md", "reason": "L33-34 tunnel/daemon 措辞更新（v1.0 没有 daemon，只有 detached ssh）"}
+{"file": "plugins/ssh-core/skills/ssh-core/SKILL.md", "reason": "decision tree (L42-46) + quick reference (L81-82) ssh_tunnel 示例 — 补 v1.0 注释 '--idle-timeout is v1.1 deferred'"}

@@ -1,0 +1,30 @@
+{
+  "id": "e2e-validate-skills-on-pai",
+  "name": "e2e-validate-skills-on-pai",
+  "title": "E2E validate all skills on pai",
+  "description": "在远程测试机 pai 上对 8 个 plugin/skill 进行端到端验证，确认各脚本能正确连通真实环境、产出符合预期的结果",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "jason",
+  "assignee": "jason",
+  "createdAt": "2026-05-24",
+  "completedAt": "2026-05-25",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "05-24-ssh-cluster-default-output-stderr",
+    "05-24-tail-log-path-mode-failure-stderr",
+    "05-24-remote-debug-docs-systemd"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

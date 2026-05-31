@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "JSON output contract envelope schema, exit code semantics (0/1/2), subprocess safety rules that the spike MUST preserve even in throwaway code"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Confirms where ssh-core/scripts/lib lives and its role; spike will reuse json_result/emit helpers rather than reinventing them"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "stdout/stderr discipline, no `import logging`, no emoji — spike code follows the same rules to keep the eventual promotion path clean"}
+{"file": "plugins/ssh-core/skills/ssh-core/SKILL.md", "reason": "Canonical user-facing surface of ssh_execute — argparse signature, decision tree, when to skip — the PoC must produce behavior consistent with what SKILL.md already promises"}
+{"file": "plugins/ssh-core/skills/ssh-core/scripts/ssh_execute.py", "reason": "Current stub — its docstring at lines 4-17 describes the planned v1.0 behavior; the PoC validates or refines these assumptions"}
+{"file": "plugins/ssh-core/skills/ssh-core/scripts/lib/__init__.py", "reason": "The shared helpers (json_result, emit, msys_safe_env, alias_state_path) the spike code imports — read to confirm signature expectations"}
+{"file": "CONTRIBUTING.md", "reason": "Roadmap lines 42-50 (ssh-core section) describe planned ssh_execute behavior — PoC hypotheses trace back to these claims"}

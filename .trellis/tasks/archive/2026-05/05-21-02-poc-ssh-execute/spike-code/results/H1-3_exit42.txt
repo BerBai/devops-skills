@@ -1,0 +1,29 @@
+### H1-3_exit42 : exit 42 via bash -c
+ARGV: pai bash -c "exit 42" --ssh-config /tmp/poc-ssh-config
+----- BEGIN RUN -----
+{
+  "success": false,
+  "exit_code": 42,
+  "stdout": "",
+  "stderr": "",
+  "data": {
+    "route": "remote",
+    "ssh_argv": [
+      "ssh",
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "ConnectTimeout=8",
+      "-F",
+      "/tmp/poc-ssh-config",
+      "pai",
+      "bash -c \"exit 42\""
+    ],
+    "elapsed_s": 0.26,
+    "ssh_noise_lines": [],
+    "failure_class": "remote_error",
+    "raw_stderr": ""
+  }
+}
+----- END RUN -----
+shell_rc=42

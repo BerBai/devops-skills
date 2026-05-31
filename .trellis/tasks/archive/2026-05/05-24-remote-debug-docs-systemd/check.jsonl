@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "review checklist 第 3、6 条：no emoji、cross-plugin 不引代码改 docs；frontmatter 测试 test_skill_md_has_frontmatter"}
+{"file": ".trellis/tasks/05-24-remote-debug-docs-systemd/prd.md", "reason": "8 条 acceptance criteria，逐条验收"}

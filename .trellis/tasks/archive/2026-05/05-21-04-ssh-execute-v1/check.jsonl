@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/adr-001-ssh-execute.md", "reason": "Verify ssh_execute v1.0 honors D1-D8 verbatim; flag any decision deviation"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify JSON envelope schema, exit codes (0/1/2/124), no shell=True, hard checkpoints policy"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "7-item review checklist: JSON contract / argv list / no emoji / no secrets / state files / cross-plugin contract / tests pass"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "stdout/stderr channels, no logging module, no emoji, never log secrets — applies to all new code"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Where files belong; cross-plugin SHELL-OUT (not import) verification; lib subpackage rules"}
+{"file": ".trellis/tasks/05-21-04-ssh-execute-v1/prd.md", "reason": "Acceptance criteria checklist — every behavioral/test/quality/contract item must pass"}
+{"file": ".trellis/tasks/05-21-04-ssh-execute-v1/design.md", "reason": "Decisions in design must hold; if implementation diverged, flag it for user"}
