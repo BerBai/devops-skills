@@ -270,3 +270,36 @@ Implemented exec_detached run/status/tail-log/wait/list with nohup remote jobs, 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: Ship cicd-debug secret scope audit
+
+**Date**: 2026-05-31
+**Task**: Ship cicd-debug secret scope audit
+**Branch**: `main`
+
+### Summary
+
+Implemented secret_scope_audit v1.0 with provider secret/workflow adapters, YAML reference analysis, risk flags, tests, docs, and validation.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d2f5598` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

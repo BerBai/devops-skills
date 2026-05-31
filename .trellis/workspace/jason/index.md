@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 8
+- **Total Sessions**: 9
 - **Last Active**: 2026-05-31
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~272 | Active |
+| `journal-1.md` | ~305 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 9 | 2026-05-31 | Ship cicd-debug secret scope audit | `d2f5598` | `main` |
 | 8 | 2026-05-31 | Ship ssh-guarded exec_detached v1.0 | `ab21f2a` | `main` |
 | 7 | 2026-05-28 | ssh-guarded request/execute pipeline v1.0 ship + transport ~ drift fix | `cabbb8d` | `main` |
 | 6 | 2026-05-26 | ship ssh_download v1.0 + plan ssh-guarded Phase 2 (4 children) | `5395ded` | `main` |
