@@ -152,7 +152,10 @@ pipeline_analyzer.py <provider> <run-id|pipeline-id>
   - `summary` computed correctly per D4 truth table;
   - `--include-full-step-logs` toggles step `.full_log` presence;
   - `--gh-bin` / `GH_BIN` env override exercised.
-  Target: ≥ 90% statement coverage on `pipeline_analyzer.py` AND on `lib_cicd.py`.
+  Target: ≥ 90% statement coverage on `pipeline_analyzer.py`; pipeline-facing
+  `lib_cicd.py` methods covered here. Full-file `lib_cicd.py` coverage is now
+  shared across cicd-debug children because `secret_scope_audit.py` added
+  secret/workflow provider methods to the same module.
 
 - **Integration (`tests/test_pipeline_analyzer_integration.py`, `cicd_gh` mark)** — opt-in, hits real `gh`:
   - `--help` exits 0 (smoke);
@@ -192,7 +195,7 @@ pipeline_analyzer.py <provider> <run-id|pipeline-id>
 - [ ] `pipeline_analyzer.py` is no longer a stub; no `UNIMPLEMENTED_NOTE`; loc target 400-650 (rule of thumb: between `ssh_execute` 257 and `ssh_config_manager` 1055; this script does more orchestration than ssh_execute but less than ssh_config_manager).
 - [ ] `lib_cicd.py` ships with `GhAdapter` + `GlabAdapter` + `resolve_provider` + `run_cli`; loc 200-400.
 - [ ] `python pipeline_analyzer.py --help` shows the v1.0 surface from D6 and exits 0.
-- [ ] `tests/test_pipeline_analyzer_unit.py` exists; ≥ 90% statement coverage on `pipeline_analyzer.py` AND `lib_cicd.py`; every `failure_class` row in D3 covered; every `findings` kind in D5 covered.
+- [ ] `tests/test_pipeline_analyzer_unit.py` exists; ≥ 90% statement coverage on `pipeline_analyzer.py`; pipeline-facing `lib_cicd.py` methods covered; every `failure_class` row in D3 covered; every `findings` kind in D5 covered.
 - [ ] `tests/test_pipeline_analyzer_integration.py` exists with `cicd_gh` mark; 4 cases (help / success-run / failure-run / diff-last-success); all skip gracefully when env unset.
 - [ ] `cicd_glab` mark registered; at least the help-smoke case exists under it.
 - [ ] `pytest tests/` default suite green (no regressions on existing 670+ default tests).

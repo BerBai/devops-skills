@@ -79,6 +79,103 @@ to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`�
 those ranges has a paired `data.failure_class` string defined in the
 script's source; callers MUST branch on the class, not the number.
 
+## Scenario: cicd-debug `pipeline_analyzer` v1.0
+
+### 1. Scope / Trigger
+
+- Trigger: `pipeline_analyzer.py` is the first shipped `cicd-debug`
+  provider-backed command and defines the read-only GitHub/GitLab analysis
+  contract that sibling scripts reuse.
+- Scope: analyzer result semantics, CLI signature, JSON `data` payload, and
+  provider failure mapping. This spec does not define mutating CI operations.
+
+### 2. Signatures
+
+```bash
+pipeline_analyzer.py <provider> <run-id|pipeline-id> \
+  [--project <owner/repo|group/project>] \
+  [--diff-against last-success|<other-id>] \
+  [--log-size-cap-mb N] \
+  [--include-full-step-logs] \
+  [--gh-bin <path>] [--glab-bin <path>] \
+  [--timeout N] [--json]
+```
+
+- `provider` is exactly `gh` or `glab`.
+- `--project` is required for `glab`; it is optional for `gh`.
+- `--gh-bin` / `--glab-bin` override `GH_BIN` / `GLAB_BIN`, which override
+  normal binary discovery.
+
+### 3. Contracts
+
+- Analyzer success is not pipeline success. If the CI run was fetched and
+  analyzed, emit `success=true`, `exit_code=0`, and
+  `data.failure_class=null` even when `data.summary="crit"`.
+- `data` must contain `provider`, `run_ref`, `run_meta`, `job_states`,
+  `failed_steps`, `actions_used`, `cache_summary`, `runner_used`,
+  `diff_summary`, `summary`, `findings`, `failure_class`, and `elapsed_s`.
+- `job_states[].steps[].full_log` is opt-in only when
+  `--include-full-step-logs` is present.
+- Oversized logs are capped by `--log-size-cap-mb` and must add an
+  `analyzer_partial` finding when analysis continues with truncated input.
+- `findings[].hint` values that point into
+  `references/pipeline_failures.md#...` must use anchors that exist.
+
+### 4. Validation & Error Matrix
+
+| Condition | `failure_class` | Exit |
+|-----------|-----------------|------|
+| Missing `gh` / `glab` from direct binary discovery | `tool_missing` | `150` |
+| Requested provider cannot be resolved through adapter setup | `provider_unavailable` | `151` |
+| CLI reports unauthenticated / not logged in | `auth` | `152` |
+| Run or pipeline id is absent | `not_found` | `153` |
+| Provider denies repository/project read access | `permission` | `154` |
+| DNS, connect timeout, or 5xx transport failure | `network` | `155` |
+| Invalid arguments, including missing `--project` for `glab` | `bad_args` | `156` |
+| Provider returns successful status with unexpected JSON shape | `api_unexpected` | `157` |
+| Logs are too large to derive required failed-step data | `log_truncated` | `158` |
+| Subprocess timeout | `timeout` | `124` |
+| Unhandled analyzer bug | `internal` | `1` |
+
+### 5. Good/Base/Bad Cases
+
+- Good: completed successful run -> `success=true`, `summary="ok"`,
+  `failed_steps=[]`, exit `0`.
+- Base: completed failed run -> `success=true`, `summary="crit"`, at least
+  one `failed_step` finding when failed step data is available, exit `0`.
+- Bad: provider auth failure -> `success=false`,
+  `data.failure_class="auth"`, exit `152`.
+
+### 6. Tests Required
+
+- Unit tests assert the CLI surface, every failure class above, summary
+  computation, finding kinds, log-cap behavior, full-log opt-in, and
+  `--diff-against` with both `last-success` and a concrete reference id.
+- Integration tests are opt-in: `cicd_gh` cases skip unless `CICD_GH_REPO`
+  and `gh` auth are available; `cicd_glab` cases skip unless `glab` is
+  installed.
+- Coverage target for `pipeline_analyzer.py` is at least 90% statements.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```json
+{"success": false, "exit_code": 1, "data": {"summary": "crit"}}
+```
+
+This treats a failed CI run as an analyzer failure and forces callers to
+parse generic failure output.
+
+#### Correct
+
+```json
+{"success": true, "exit_code": 0, "data": {"summary": "crit", "failure_class": null}}
+```
+
+The analyzer completed successfully; callers read `summary` / `findings` for
+CI health and `failure_class` only for analyzer/provider failures.
+
 ---
 
 ## Pillar 2: subprocess safety

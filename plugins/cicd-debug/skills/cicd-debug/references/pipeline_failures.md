@@ -4,7 +4,7 @@
 
 ---
 
-## Action / image 版本漂移
+## Action / image 版本漂移 {#action-version-drift}
 
 > **Symptoms**: "上周还能跑，今天就 fail"。没改代码，CI 就坏。
 >
@@ -26,7 +26,7 @@
 
 ---
 
-## Cache miss 导致构建变慢
+## Cache miss 导致构建变慢 {#cache-miss}
 
 > **Symptoms**: build time 翻倍，依赖每次都重装。
 >
@@ -89,7 +89,7 @@
 
 ---
 
-## Self-hosted runner 不接活
+## Self-hosted runner 不接活 {#self-hosted-runner}
 
 > **Symptoms**: queued job 卡 N 分钟没人接。
 >
@@ -155,6 +155,29 @@
 > **Remedy**: 输入用 `inputs.X` + 输出用 `outputs.Y`；secret 用 `secrets:` block；类型在 caller 处 `${{ true }}` 显式声明。
 >
 > **Prevention**: reusable workflow 写 schema 注释；CI 跑 actionlint。
+
+---
+
+## Failed steps {#failed-steps}
+
+> **Symptoms**: CI run fails with specific step errors (exit code non-zero).
+>
+> **Common causes**:
+> 1. Test failures (unit tests, integration tests)
+> 2. Build errors (compilation, dependency resolution)
+> 3. Linting/formatting violations
+> 4. Script syntax errors
+>
+> **Diagnostic**:
+> ```bash
+> gh run view <run-id> --log-failed
+> # or for glab:
+> glab ci trace <job-id>
+> ```
+>
+> **Remedy**: Fix the underlying issue in code or workflow configuration.
+>
+> **Prevention**: Run tests locally before pushing; use pre-commit hooks.
 
 ---
 
