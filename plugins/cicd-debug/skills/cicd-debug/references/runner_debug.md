@@ -40,6 +40,58 @@ gh api orgs/<org>/actions/runners --jq '.runners[] | {name, status, busy}'
 
 **没有 `online + busy` 的某 label = 该 label 的 job 必排队**。
 
+### runner_check findings {#runner-check-findings}
+
+`runner_check.py` emits stable finding kinds so agents can link directly to the
+right operational note.
+
+#### All offline {#all-offline}
+
+Every runner in the selected scope is offline. Check whether the runner host is
+powered on, whether the service is running, and whether the registration token
+or network path expired.
+
+#### Queue starving {#queue-starving}
+
+Queued work exists while no online runner can accept it. First compare queued
+job labels/tags with runner labels/tags, then check concurrency limits and
+autoscaler capacity.
+
+#### Runner offline majority {#runner-offline-majority}
+
+At least 30 percent of the pool is offline. Treat this as degraded capacity
+even if some jobs still run, because queue time can spike as soon as demand
+rises.
+
+#### Queue pressure {#queue-pressure}
+
+Queue depth or p95 queue age is high. Add runner capacity, reduce matrix
+fan-out, or lower `max-parallel` for noncritical workflows.
+
+#### Last heartbeat unavailable {#last-heartbeat-unavailable}
+
+GitHub's public runner list API does not expose a heartbeat timestamp. Use
+runner service logs (`~/actions-runner/_diag/`) or host monitoring for the
+freshness check. GitLab exposes `contacted_at`, and `runner_check.py` surfaces
+it as `last_heartbeat`.
+
+#### Running job unavailable at scope {#running-job-unavailable-at-scope}
+
+`running_job` is only practical at repo/project scope in v1.0. Org,
+enterprise, group, and instance scopes return pool state but do not cross-join
+every running job.
+
+#### Pool truncated {#pool-truncated}
+
+The pool hit `--pool-cap`; raise the cap for a one-off audit or split the
+inspection by repo/project/group to avoid enormous payloads.
+
+#### Ephemeral runner offline {#ephemeral-runner-offline}
+
+An offline ephemeral runner is often normal after it finishes a single job.
+Investigate only when queued jobs are also starving or the autoscaler fails to
+start replacements.
+
 ### Label 匹配语义
 
 ```yaml

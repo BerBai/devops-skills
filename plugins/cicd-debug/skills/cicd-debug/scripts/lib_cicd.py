@@ -144,6 +144,30 @@ class WorkflowFile:
     source: str
 
 
+@dataclass(frozen=True)
+class RunnerData:
+    """Normalized CI runner metadata."""
+    id: str
+    name: str
+    os: str | None
+    status: str
+    busy: bool
+    ephemeral: bool
+    labels: tuple[dict[str, str | None], ...]
+    last_heartbeat: str | None = None
+    running_job: dict[str, Any] | None = None
+    machine_info: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class QueuedRun:
+    """Normalized queued workflow run/job metadata."""
+    id: str
+    name: str | None
+    created_at: str
+    labels: tuple[str, ...] = ()
+
+
 @runtime_checkable
 class ProviderAdapter(Protocol):
     """Protocol for CI/CD provider CLI adapters (gh/glab)."""
@@ -167,8 +191,12 @@ class ProviderAdapter(Protocol):
         ...
 
     # Methods used by siblings (raise NotImplementedError in pipeline_analyzer's usage)
-    def list_runners(self, scope: str) -> list[dict[str, Any]]:
+    def list_runners(self, scope: Any, *, limit: int = 5000) -> list[RunnerData]:
         """List runners (used by runner_check)."""
+        raise NotImplementedError
+
+    def list_queued_runs(self, scope: Any, *, limit: int = 200) -> list[QueuedRun]:
+        """List queued runs/jobs (used by runner_check)."""
         raise NotImplementedError
 
     def list_secrets(
@@ -349,6 +377,117 @@ def _ensure_list(value: Any, context: str) -> list[Any]:
     return value
 
 
+def _runner_rows(data: Any, key: str, context: str) -> list[Any]:
+    if isinstance(data, dict):
+        rows = data.get(key)
+        return _ensure_list(rows, context)
+    return _ensure_list(data, context)
+
+
+def _label_tuple(rows: Any, *, fallback_type: str | None = None) -> tuple[dict[str, str | None], ...]:
+    labels: list[dict[str, str | None]] = []
+    if isinstance(rows, list):
+        for row in rows:
+            if isinstance(row, dict):
+                name = row.get("name")
+                if isinstance(name, str):
+                    label_type = row.get("type")
+                    labels.append(
+                        {"name": name, "type": label_type if isinstance(label_type, str) else fallback_type}
+                    )
+            elif isinstance(row, str):
+                labels.append({"name": row, "type": fallback_type})
+    return tuple(labels)
+
+
+def _normalize_gh_runner(row: Any) -> RunnerData:
+    if not isinstance(row, dict):
+        raise ApiUnexpectedError("gh runners: expected object")
+    runner_id = row.get("id")
+    name = row.get("name")
+    if runner_id is None or not isinstance(name, str):
+        raise ApiUnexpectedError("gh runners: missing id/name")
+    os_name = row.get("os")
+    status = row.get("status")
+    busy = row.get("busy")
+    return RunnerData(
+        id=str(runner_id),
+        name=name,
+        os=os_name if isinstance(os_name, str) else None,
+        status=status if isinstance(status, str) else "offline",
+        busy=bool(busy),
+        ephemeral=bool(row.get("ephemeral")),
+        labels=_label_tuple(row.get("labels"), fallback_type=None),
+        last_heartbeat=None,
+        running_job=None,
+        machine_info={"os": os_name} if isinstance(os_name, str) else {},
+    )
+
+
+def _normalize_gh_queued_run(row: Any) -> QueuedRun:
+    if not isinstance(row, dict):
+        raise ApiUnexpectedError("gh queued runs: expected object")
+    run_id = row.get("id") or row.get("database_id") or row.get("databaseId")
+    created_at = row.get("created_at") or row.get("createdAt")
+    if run_id is None or not isinstance(created_at, str):
+        raise ApiUnexpectedError("gh queued runs: missing id/created_at")
+    name = row.get("name") or row.get("display_title") or row.get("displayTitle")
+    return QueuedRun(
+        id=str(run_id),
+        name=name if isinstance(name, str) else None,
+        created_at=created_at,
+        labels=tuple(),
+    )
+
+
+def _normalize_glab_runner(row: Any) -> RunnerData:
+    if not isinstance(row, dict):
+        raise ApiUnexpectedError("glab runners: expected object")
+    runner_id = row.get("id")
+    name = row.get("description") or row.get("name")
+    if runner_id is None or not isinstance(name, str):
+        raise ApiUnexpectedError("glab runners: missing id/name")
+    platform = row.get("platform")
+    status_value = row.get("status")
+    online = row.get("online")
+    status = "online" if online is True or status_value == "online" else "offline"
+    machine_info = {
+        key: row[key]
+        for key in ("platform", "architecture", "version", "runner_type")
+        if key in row and row[key] is not None
+    }
+    return RunnerData(
+        id=str(runner_id),
+        name=name,
+        os=platform if isinstance(platform, str) else None,
+        status=status,
+        busy=bool(row.get("busy")),
+        ephemeral=bool(row.get("is_ephemeral") or row.get("ephemeral")),
+        labels=_label_tuple(row.get("tag_list"), fallback_type="tag"),
+        last_heartbeat=row.get("contacted_at") if isinstance(row.get("contacted_at"), str) else None,
+        running_job=None,
+        machine_info=machine_info,
+    )
+
+
+def _normalize_glab_queued_run(row: Any) -> QueuedRun:
+    if not isinstance(row, dict):
+        raise ApiUnexpectedError("glab queued jobs: expected object")
+    job_id = row.get("id")
+    created_at = row.get("created_at") or row.get("createdAt")
+    if job_id is None or not isinstance(created_at, str):
+        raise ApiUnexpectedError("glab queued jobs: missing id/created_at")
+    name = row.get("name")
+    tags = row.get("tag_list") or row.get("tags")
+    labels = tuple(str(tag) for tag in tags) if isinstance(tags, list) else tuple()
+    return QueuedRun(
+        id=str(job_id),
+        name=name if isinstance(name, str) else None,
+        created_at=created_at,
+        labels=labels,
+    )
+
+
 class GhAdapter:
     """GitHub Actions adapter via gh CLI."""
 
@@ -427,9 +566,32 @@ class GhAdapter:
             files.append((path, decoded))
         return files
 
-    def list_runners(self, scope: str) -> list[dict[str, Any]]:
+    def list_runners(self, scope: Any, *, limit: int = 5000) -> list[RunnerData]:
         """List GitHub runners (used by runner_check)."""
-        raise NotImplementedError
+        scope_kind, scope_value = _scope_parts(scope)
+        if scope_kind == "repo":
+            owner, repo = scope_value.split("/", 1)
+            endpoint = f"repos/{owner}/{repo}/actions/runners"
+        elif scope_kind == "org":
+            endpoint = f"orgs/{scope_value}/actions/runners"
+        elif scope_kind == "enterprise":
+            endpoint = f"enterprises/{scope_value}/actions/runners"
+        else:
+            raise BadArgsError("gh supports repo, org, or enterprise runner scope")
+        data = self._run_json([str(self.binary), "api", endpoint, "--paginate"], timeout=60)
+        rows = _runner_rows(data, "runners", "gh runners")
+        return [_normalize_gh_runner(row) for row in rows[:limit]]
+
+    def list_queued_runs(self, scope: Any, *, limit: int = 200) -> list[QueuedRun]:
+        """List queued GitHub Actions runs for repo scope."""
+        scope_kind, scope_value = _scope_parts(scope)
+        if scope_kind != "repo":
+            return []
+        owner, repo = scope_value.split("/", 1)
+        endpoint = f"repos/{owner}/{repo}/actions/runs?status=queued&per_page=100"
+        data = self._run_json([str(self.binary), "api", endpoint, "--paginate"], timeout=60)
+        rows = _runner_rows(data, "workflow_runs", "gh queued runs")
+        return [_normalize_gh_queued_run(row) for row in rows[:limit]]
 
     def _run_json(self, argv: list[str], *, timeout: int = 120) -> Any:
         result = run_cli(argv, timeout=timeout)
@@ -676,9 +838,32 @@ class GlabAdapter:
         # For v1.0, return empty list (GitLab workflow structure differs)
         return []
 
-    def list_runners(self, scope: str) -> list[dict[str, Any]]:
+    def list_runners(self, scope: Any, *, limit: int = 5000) -> list[RunnerData]:
         """List GitLab runners (used by runner_check)."""
-        raise NotImplementedError
+        scope_kind, scope_value = _scope_parts(scope)
+        if scope_kind == "project":
+            argv = [str(self.binary), "runner", "list", "--repo", scope_value, "--output", "json"]
+        elif scope_kind == "group":
+            argv = [str(self.binary), "runner", "list", "--group", scope_value, "--output", "json"]
+        elif scope_kind == "instance":
+            argv = [str(self.binary), "runner", "list", "--instance", "--output", "json"]
+        else:
+            raise BadArgsError("glab supports project, group, or instance runner scope")
+        rows = _ensure_list(self._run_json(argv, timeout=60), "glab runners")
+        return [_normalize_glab_runner(row) for row in rows[:limit]]
+
+    def list_queued_runs(self, scope: Any, *, limit: int = 200) -> list[QueuedRun]:
+        """List queued GitLab jobs for project scope."""
+        scope_kind, scope_value = _scope_parts(scope)
+        if scope_kind != "project":
+            return []
+        encoded = quote(scope_value, safe="")
+        endpoint = f"projects/{encoded}/jobs?scope[]=pending&per_page=100"
+        rows = _ensure_list(
+            self._run_json([str(self.binary), "api", endpoint], timeout=60),
+            "glab queued jobs",
+        )
+        return [_normalize_glab_queued_run(row) for row in rows[:limit]]
 
     def _run_json(self, argv: list[str], *, timeout: int = 120) -> Any:
         result = run_cli(argv, timeout=timeout)

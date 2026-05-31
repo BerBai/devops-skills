@@ -33,8 +33,8 @@ CI/CD 症状？
 │
 ├─ Runner 不工作 ─────────── runner_check.py <provider>
 │                              → 在线 runner 数、忙闲、label 覆盖
-│                              → self-hosted runner 最近 heartbeat
-│                              → 队列长度（GitLab）/ pending workflow 数（GH）
+│                              → 最近 heartbeat（GitLab 支持；GitHub API v1.0 返回 null）
+│                              → 队列长度；running_job 仅 repo/project scope 可用
 │
 └─ Secret / 环境作用域困惑 ── secret_scope_audit.py <provider> <repo>
                                 → 每个 secret 的可见性（repo / env / org）
@@ -62,7 +62,9 @@ python scripts/pipeline_analyzer.py glab 567890 --project mygroup/myrepo
 
 # Runner 健康
 python scripts/runner_check.py gh --org myorg --json
+python scripts/runner_check.py gh --repo owner/name --json
 python scripts/runner_check.py glab --group mygroup
+python scripts/runner_check.py glab --project mygroup/myrepo --json
 
 # Secret 审计
 python scripts/secret_scope_audit.py gh --repo owner/name
@@ -163,6 +165,49 @@ python scripts/secret_scope_audit.py glab --project mygroup/myrepo
     "failure_class": null,
     "elapsed_s": 5.2
   }
+}
+```
+
+`runner_check.py` 的 `data` 负载使用同一 envelope，核心字段是：
+
+```json
+{
+  "provider": "gh",
+  "scope": {"kind": "repo", "value": "owner/name"},
+  "runners": [
+    {
+      "id": "123",
+      "name": "linux-runner-1",
+      "os": "linux",
+      "status": "online",
+      "busy": false,
+      "ephemeral": false,
+      "labels": [{"name": "self-hosted", "type": "read-only"}],
+      "last_heartbeat": null,
+      "running_job": null,
+      "machine_info": {"os": "linux"}
+    }
+  ],
+  "aggregate": {
+    "online_count": 1,
+    "offline_count": 0,
+    "busy_count": 0,
+    "total_count": 1,
+    "label_coverage": {"self-hosted": 1},
+    "queue_depth": 0,
+    "queue_p95_age_sec": null,
+    "queue_max_age_sec": null
+  },
+  "summary": "ok",
+  "findings": [
+    {
+      "severity": "info",
+      "kind": "last_heartbeat_unavailable",
+      "hint": "see references/runner_debug.md#last-heartbeat-unavailable"
+    }
+  ],
+  "failure_class": null,
+  "elapsed_s": 0.7
 }
 ```
 
