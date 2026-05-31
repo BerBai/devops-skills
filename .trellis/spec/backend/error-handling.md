@@ -55,6 +55,7 @@ The scaffold-era convention, used by every v0.2 stub:
 | `70`–`74` | `redact_check` ssh-guarded per-script failure classes. `70` `catalog_load_failed`, `71` `catalog_schema_invalid`, `72` `regex_compile_failed`. Reserved by archived request-pipeline design §1 C5. |
 | `75`–`79` | `scan_software` ssh-guarded per-script failure classes. `75` `catalog_load_failed`, `76` `cache_write_failed`, `77` `cache_corrupt`, `78` `ssh_batch_failed`, `79` `tool_probe_corrupted`. Reserved by archived scan_software task PRD D8. |
 | `80`–`87` | `diagnose_pod` and sibling k8s-debug script failure classes (namespace `80`–`89`; this child uses `80`–`87`). `80` `host_unreachable` (ssh-core remote unreachable, or local kubectl API server refused / DNS-missing), `81` `kubectl_missing` (binary absent or rc 127), `82` `kubeconfig_missing` (KUBECONFIG unset or file missing), `83` `pod_not_found`, `84` `namespace_not_found`, `85` `forbidden` (RBAC denial, or upstream ssh auth failure — same source in this context), `86` `api_timeout` (kubectl's own `--request-timeout=30s` trip; distinct from Python-side `124`), `87` `metrics_unavailable` (soft failure — exit `0` with a `warn` finding, used for `kubectl top` against a cluster without metrics-server). Introduced by `diagnose_pod` v1.0 (see `.trellis/tasks/05-26-k8s-debug-diagnose-pod/prd.md` R6 + `design.md` D4). ADR follow-up TBD. |
+| `90`–`99` | `correlate` log-aggregator per-script failure classes. `90` `anchor_not_found`, `91` `window_invalid`, `92` `pair_unmatched`; `93`–`99` reserved. Introduced by `correlate` v1.0 after resolving the stale `50`–`59` planning conflict (see `.trellis/tasks/05-25-log-aggregator-correlate/prd.md` R8). |
 | `150`–`158` | `pipeline_analyzer` cicd-debug per-script failure classes. `150` `tool_missing`, `151` `provider_unavailable`, `152` `auth`, `153` `not_found`, `154` `permission`, `155` `network`, `156` `bad_args`, `157` `api_unexpected`, `158` `log_truncated`. Reserved by `.trellis/tasks/05-26-cicd-debug-pipeline-analyzer/prd.md` D3 after 2026-05-31 namespace correction; implementation/tests must migrate from the stale `30`-`38` draft before shipping. |
 | `160`–`168` | `runner_check` cicd-debug per-script failure classes. `160` `tool_missing`, `161` `provider_unavailable`, `162` `auth`, `163` `not_found`, `164` `permission`, `165` `network`, `166` `bad_args`, `167` `api_unexpected`, `168` `pagination_overflow`. Reserved by `.trellis/tasks/05-26-cicd-debug-runner-check/prd.md` D3. |
 | `170`–`179` | `secret_scope_audit` cicd-debug per-script failure classes. `170` `tool_missing`, `171` `provider_unavailable`, `172` `auth`, `173` `not_found`, `174` `permission`, `175` `network`, `176` `bad_args`, `177` `api_unexpected`, `178` `workflow_yaml_parse_failed`, `179` `workflow_dir_missing` (soft class; script exits `0` when the audit completed with no workflow graph). Reserved by `.trellis/tasks/05-26-cicd-debug-secret-scope-audit/prd.md` D3. |
@@ -65,9 +66,9 @@ constant in `plugins/k8s-debug/skills/k8s-debug/scripts/check_namespace.py`
 line 26, and the payload it returns at lines 41-47. When a scaffold script
 is fleshed out, keep `0`/`1`; replace `2` only when implementing the
 behavior. Do not invent new exit codes beyond the ones listed above
-(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`87` / `150`–`179` / `124`) — new codes
+(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`87` / `90`–`99` / `150`–`179` / `124`) — new codes
 require a spec update plus a referenced ADR (or task PRD) explaining the
-semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`87`, `150`–`179`) are namespaced to
+semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`87`, `90`–`99`, `150`–`179`) are namespaced to
 their script and not reusable by other scripts without a fresh range
 allocation here.
 
@@ -75,7 +76,7 @@ Scripts that emit `4`–`9` MUST also set `data.failure_class` to the
 matching string (`not_found` / `already_exists` / `config_missing` /
 `parse_error` / `permission` / `transfer_verify_failed`) so callers can
 branch on the class without re-parsing `stderr`. The same rule applies
-to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`87`, `150`–`179`): every numeric exit code in
+to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`87`, `90`–`99`, `150`–`179`): every numeric exit code in
 those ranges has a paired `data.failure_class` string defined in the
 script's source; callers MUST branch on the class, not the number.
 
@@ -175,6 +176,96 @@ parse generic failure output.
 
 The analyzer completed successfully; callers read `summary` / `findings` for
 CI health and `failure_class` only for analyzer/provider failures.
+
+---
+
+## Scenario: log-aggregator `correlate` v1.0
+
+### 1. Scope / Trigger
+
+- Trigger: `correlate.py` is the first non-streaming log-aggregator command.
+  It resolves multiple sources, fetches them to exhaustion, anchors on a regex
+  match, returns a bounded time window, and emits one JSON envelope.
+- Scope: CLI surface, JSON `data` payload, human section layout, and
+  correlate-local failure classes. This spec does not define source parsing or
+  fetcher transport; those remain in the log-aggregator local `lib/` modules.
+
+### 2. Signatures
+
+```bash
+correlate.py --sources <spec>... --anchor <regex>
+    [--window 30s] [--pair-mode] [--since 1h] [--json]
+```
+
+- `--sources` and `--anchor` are required.
+- `--window` accepts positive `s/m/h/d` durations such as `30s`, `2m`, `1h`.
+- `--pair-mode` treats the earliest and latest anchor matches as span start/end.
+- `--json` emits a single envelope object, not NDJSON.
+
+### 3. Contracts
+
+- Success envelope:
+  - `success=true`, `exit_code=0`, `data.failure_class=null`.
+  - `data.anchor` is an object for single-anchor mode, and `{first, last}` for
+    pair mode.
+  - `data.window_lines[]` entries contain `source`, `time`, `level`, `body`,
+    `is_anchor`, and `fields`.
+  - `data.summary` contains `sources_with_hits`, `events_in_window`,
+    `anchor_severity`, `likely_root_cause_hint`, and `partial_fetch`.
+  - Pair mode also includes `data.summary.duration_ms`.
+- Partial fetch is not a command failure when an anchor is still found:
+  `success=true`, `exit_code=0`, `data.failed_fetchers[]` explains failed
+  sources, and `data.summary.partial_fetch=true`.
+- Human output uses exactly these section markers:
+  `=== Anchor ===`, `=== Within window (<duration>) ===`, `=== Summary ===`.
+
+### 4. Validation & Error Matrix
+
+| Condition | `failure_class` | Exit |
+|-----------|-----------------|------|
+| No source line matches `--anchor` | `anchor_not_found` | `90` |
+| Invalid or non-positive `--window` | `window_invalid` | `91` |
+| `--pair-mode` sees only one match | `pair_unmatched` | `92` |
+| Source spec parse failure | `source_spec_invalid` | `40` |
+| Source expansion resolves no sources | `no_sources_resolved` | `44` |
+| Subprocess timeout from underlying transport | `timeout` | `124` |
+
+### 5. Good/Base/Bad Cases
+
+- Good: two file sources, anchor found, window includes critical event ->
+  `success=true`, sorted `window_lines`, non-null `likely_root_cause_hint`.
+- Base: one source fetcher fails but another contains anchor -> `success=true`,
+  `partial_fetch=true`, `failed_fetchers` populated.
+- Bad: no anchor match in fetched lines -> `success=false`, `exit_code=90`,
+  `data.failure_class="anchor_not_found"`.
+
+### 6. Tests Required
+
+- Unit tests cover window parsing, anchor search, pair mode, window filtering,
+  hint computation, human layout, JSON envelope shape, and every correlate-local
+  failure class.
+- Integration tests cover a local file fixture with `--pair-mode` and a
+  skip-safe live SSH journal query.
+- Full default `pytest tests/` must remain green, including existing
+  `tail_multi` tests.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```json
+{"success": false, "exit_code": 1, "data": {"summary": "no match"}}
+```
+
+This hides the actionable branch condition behind a generic failure.
+
+#### Correct
+
+```json
+{"success": false, "exit_code": 90, "data": {"failure_class": "anchor_not_found"}}
+```
+
+Callers can branch on the class without parsing human text.
 
 ---
 

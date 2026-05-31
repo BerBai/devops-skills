@@ -71,6 +71,7 @@ awk -v offset=<bytes> 'NR > offset' <path>   # 等价于位置游标，能 resum
 
 **坑**：
 - 没时间戳的日志只能靠 line order 排序，跨源关联会丢精度。我们在 source spec 后允许 `?ts_regex=<regex>&ts_format=<strftime>`，让用户告诉我们怎么从行里提取时间。
+- `source_spec` 会先做 brace expansion，所以 query 里的正则不要直接写 `{4}` 这类量词；它会被当成 brace 模板改写。用 `[0-9][0-9][0-9][0-9]`，或在未来 URL-encoding 支持前避免花括号量词。
 - 日志轮转期间（`logrotate`）`tail -F` 行为比 `tail -f` 好，但 v1.0 实现要小心新文件 inode 变化。
 - 远端文件如果在 NFS 上，`tail -f` 不稳。
 
