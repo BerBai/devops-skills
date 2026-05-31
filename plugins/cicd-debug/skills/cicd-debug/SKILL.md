@@ -66,6 +66,7 @@ python scripts/runner_check.py glab --group mygroup
 
 # Secret 审计
 python scripts/secret_scope_audit.py gh --repo owner/name
+python scripts/secret_scope_audit.py gh --repo owner/name --include-codespaces --json
 python scripts/secret_scope_audit.py glab --project mygroup/myrepo
 ```
 
@@ -79,17 +80,128 @@ python scripts/secret_scope_audit.py glab --project mygroup/myrepo
   "stderr": "",
   "data": {
     "provider": "gh",
-    "summary": {"jobs": "warn", "runners": "ok", "diff_vs_last_success": "crit"},
-    "findings": [
-      {"severity": "crit", "kind": "action_version_drift",
-       "job": "test", "step": "actions/checkout",
-       "from": "v3", "to": "v4",
-       "hint": "see references/pipeline_failures.md#action-version-drift"}
+    "run_ref": "12345678",
+    "run_meta": {
+      "workflow_name": "test.yml",
+      "branch": "main",
+      "head_sha": "abc123",
+      "event": "push",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-05-26T10:00:00Z",
+      "url": "https://github.com/owner/repo/actions/runs/12345678"
+    },
+    "job_states": [
+      {
+        "name": "test",
+        "status": "completed",
+        "conclusion": "failure",
+        "runner_name": "my-runner",
+        "runner_labels": ["self-hosted", "linux"],
+        "duration_sec": 240.0,
+        "retry_count": 0,
+        "steps": [
+          {"name": "checkout", "conclusion": "success", "number": 1},
+          {"name": "run tests", "conclusion": "failure", "number": 2}
+        ]
+      }
     ],
-    "raw": {"run_id": 12345678, "workflow": ".github/workflows/test.yml"}
+    "failed_steps": [
+      {
+        "job": "test",
+        "name": "run tests",
+        "exit_code": 1,
+        "log_excerpt": "Error: Test failed\n    at test.js:42"
+      }
+    ],
+    "actions_used": [
+      {"action": "actions/checkout", "ref": "v4", "used_in": ["test", "lint"]},
+      {"action": "actions/setup-python", "ref": "v5", "used_in": ["test"]}
+    ],
+    "cache_summary": {
+      "hits": 2,
+      "misses": 1,
+      "saves": 0,
+      "events": [
+        {"job": "test", "key_prefix": "node-cache", "outcome": "hit"},
+        {"job": "lint", "key_prefix": "node-cache", "outcome": "hit"},
+        {"job": "build", "key_prefix": "build-cache", "outcome": "miss"}
+      ]
+    },
+    "runner_used": [
+      {"name": "my-runner", "labels": ["self-hosted", "linux"], "runs_on": ["ubuntu-latest"]}
+    ],
+    "diff_summary": {
+      "reference_run_ref": "12345677",
+      "action_version_drift": [
+        {"action": "actions/checkout", "from_ref": "v3", "to_ref": "v4"}
+      ],
+      "env_drift": [],
+      "runner_label_drift": [],
+      "cache_drift": []
+    },
+    "summary": "crit",
+    "findings": [
+      {
+        "severity": "crit",
+        "kind": "failed_step",
+        "job": "test",
+        "step": "run tests",
+        "exit_code": 1,
+        "log_excerpt": "Error: Test failed\n    at test.js:42",
+        "hint": "see references/pipeline_failures.md#failed-steps"
+      },
+      {
+        "severity": "warn",
+        "kind": "action_version_drift",
+        "action": "actions/checkout",
+        "from_ref": "v3",
+        "to_ref": "v4",
+        "hint": "see references/pipeline_failures.md#action-version-drift"
+      }
+    ],
+    "failure_class": null,
+    "elapsed_s": 5.2
   }
 }
 ```
+
+`secret_scope_audit.py` 的 `data` 负载使用同一 envelope，核心字段是：
+
+```json
+{
+  "provider": "gh",
+  "scope": {"kind": "repo", "value": "owner/repo"},
+  "secrets": [
+    {
+      "name": "AWS_DEPLOY_KEY",
+      "scope_kind": "repo",
+      "scope_value": "owner/repo",
+      "kind": "actions",
+      "visibility": null,
+      "num_selected_repos": null,
+      "masked": null,
+      "protected": null,
+      "environment_scope": null,
+      "updated_at": null,
+      "referenced_in_workflows": [
+        {"path": ".github/workflows/deploy.yml", "jobs": ["deploy"]}
+      ],
+      "risk_flags": ["long_lived_cloud_credential", "exposed_on_fork_pr"]
+    }
+  ],
+  "environments": [],
+  "workflow_files": [],
+  "summary": "warn",
+  "findings": [],
+  "failure_class": null,
+  "elapsed_s": 1.2
+}
+```
+
+v1.0 risk flags: `long_lived_cloud_credential`, `exposed_on_fork_pr`,
+`pull_request_target_unsafe_checkout`, `unused`. v1.1 will add deeper
+environment/org-scope cross-checks.
 
 ## References
 

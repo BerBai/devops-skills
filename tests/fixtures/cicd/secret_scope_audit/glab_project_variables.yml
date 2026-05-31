@@ -1,0 +1,3 @@
+deploy:
+  script:
+    - curl -H "Authorization: ${DEPLOY_TOKEN}" example.invalid

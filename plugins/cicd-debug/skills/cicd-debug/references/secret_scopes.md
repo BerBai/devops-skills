@@ -32,6 +32,8 @@ gh api repos/<owner>/<repo>/environments/<env>/secrets
 
 ### `pull_request` from fork
 
+Anchor: `#pull_request-from-fork`
+
 **关键**：`pull_request` 事件来自 fork 时**所有 secret 都不注入**。Action 拿到的 `secrets.X` 是空字符串。
 
 这是 GitHub 故意的：防止恶意 PR `echo $TOKEN` 偷密钥。
@@ -42,6 +44,8 @@ gh api repos/<owner>/<repo>/environments/<env>/secrets
 - 显式安装 GitHub App 的某些 webhook
 
 ### `pull_request_target` 的陷阱
+
+Anchor: `#pull_request_target-trap`
 
 ```yaml
 on: pull_request_target
@@ -63,6 +67,8 @@ jobs:
 - `workflow_run` → 触发部署 workflow，能用 secret，但**不**直接跑 PR 代码
 
 ### 哪些 workflow 用了哪些 secret
+
+Anchor: `#which-workflows-use-which-secrets`
 
 `secret_scope_audit.py` 列出：
 - 每个 secret 在哪些 `.github/workflows/*.yml` 被引用
@@ -137,6 +143,8 @@ glab ci trigger run --variables KEY=VALUE
 
 ## OIDC：少用 long-lived token
 
+Anchor: `#oidc-use-fewer-long-lived-tokens`
+
 最理想：CI 用 OIDC 拿短期 token（AWS STS / GCP Workload Identity / Azure federated credentials），完全不存长 token 在 CI secret 里。
 
 ```yaml
@@ -154,3 +162,17 @@ jobs:
 ```
 
 `secret_scope_audit.py` 顺手检测：是否用了 OIDC，还是依赖 long-lived `AWS_ACCESS_KEY_ID` —— 后者每个 30 天该旋转的 secret 都是定时炸弹。
+
+## v1.0 shipped and v1.1 deferred flags
+
+v1.0 emits these `risk_flags`:
+
+- `long_lived_cloud_credential`
+- `exposed_on_fork_pr`
+- `pull_request_target_unsafe_checkout`
+- `unused`
+
+Deferred to v1.1:
+
+- `protected_secret_referenced_from_unprotected_job`
+- `wildcard_org_scope_on_public_repo`

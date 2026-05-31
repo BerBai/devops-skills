@@ -19,7 +19,9 @@ classifiers = [
 # wheel itself has no runtime deps.
 # Exception: paramiko is required by lib/sftp_transport.py (see ADR-003) for
 # ssh_upload / ssh_download chunk-level SFTP with resume + progress.
-dependencies = ["paramiko>=3.0,<4"]
+# Exception: PyYAML is required by cicd-debug/secret_scope_audit.py to parse
+# GitHub Actions and GitLab CI workflow YAML structurally.
+dependencies = ["paramiko>=3.0,<4", "pyyaml>=6.0"]
 
 [project.optional-dependencies]
 dev = [
@@ -27,6 +29,7 @@ dev = [
   "pytest-cov>=5.0",
   "ruff>=0.4",
   "mypy>=1.10",
+  "types-PyYAML>=6.0",
 ]
 
 [project.urls]
@@ -47,6 +50,8 @@ addopts = "-ra -q"
 markers = [
     "live_ssh: integration tests that ssh to a real host (default alias 'pai'). Skipped by default; run with `pytest -m live_ssh`. See tests/README.md for prerequisites.",
     "live_k8s: integration tests that need a kind cluster + kubectl. Skipped by default; run with `pytest -m live_k8s`.",
+    "cicd_gh: tests requiring GitHub CLI access to CICD_GH_REPO.",
+    "cicd_glab: tests requiring GitLab CLI access.",
 ]
 
 [build-system]
