@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "JSON envelope contract + exit code table; 80-87 namespace must be appended here in ship commit (per design.md D4)"}
+{"file": ".trellis/spec/backend/adr-001-ssh-execute.md", "reason": "Contract that design.md D2 piggybacks on — remote kubectl goes through ssh_execute.py --json subprocess; envelope failure_class mapping (network/auth/timeout) defined here"}
+{"file": ".trellis/spec/backend/adr-003-sftp-transport.md", "reason": "Precedent for the lib-shared pattern (scripts/lib/<module>.py with thin CLI shell); informs design.md D1's structure even though we copy helpers rather than depend cross-plugin"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "pytest/ruff/mypy gates; manifest tests; review checklist used by Phase V"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "stdout/stderr-only channel rule; no logging module; never log secrets — applies to all new code under scripts/"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Plugin/skill/scripts layout — confirms where lib/__init__.py, lib/kubectl.py, tests/fixtures/k8s/ belong"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Pre-modification rule (grep first); informs the L1 decision to copy ssh-core helpers rather than abstract them"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer data flow checklist — relevant because diagnose_pod spans CLI / lib / subprocess / ssh-core envelope / kubectl JSON output"}

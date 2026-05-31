@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Primary check spec — pytest/ruff/mypy gates + review checklist; Phase V validation map"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "JSON envelope schema check + exit code table; verify 80-87 strings are wired to data.failure_class and ship commit added the table row"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Ensure no `logging` module added; no emoji; no secrets in stderr/stdout"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Verify lib/, tests/fixtures/k8s/, and modified files land in canonical layout"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Cross-check whether the 4 helpers copied from ssh-core lib drifted, and whether any new duplication was introduced that should have reused existing code"}

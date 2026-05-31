@@ -1,0 +1,94 @@
+# devops-skills v1.0 rollout — remaining stubs
+
+## Goal
+
+把仓库内剩余 **23 个 stub 脚本**（横跨 6 个 plugin）按既定 docstring 契约推到 v1.0 完成态，匹配已 ship 的 9 个 v1.0 脚本（ssh-core/remote-debug/docker-quick）的质量基线：250–740 loc 实现 + unit test + integration test (`-m live_ssh`) + SKILL.md 同步 + commit。
+
+本 task 是 **parent / 总览**，不直接落代码；每个 v1.0 script 各自一个 **child task**，独立 plan→implement→check→commit→archive。
+
+## Background
+
+- 当前 v1.0 完成度：9/32 脚本（28%），分布在 ssh-core (2/9)、remote-debug (4/4)、docker-quick (3/3)
+- 完成验证：`05-24-e2e-validate-skills-on-pai` 报告确认 9 个脚本在 pai + 本地 Docker 真实环境下全部端到端可用，3 个 finding 已 fix
+- 剩余 23 个脚本现状：docstring 标 `v1.0 surface:` 或 `v1.0 design:`，平均 ~60 loc 的 argparse skeleton + `unimplemented` 占位
+
+## Scope
+
+### Children — Phase 1: ssh-core（7 stub，本批已建 child task）
+
+| Slug | Stub | Priority | 顺序理由 |
+|---|---|---|---|
+| ssh-core-ssh-config-manager | ssh_config_manager.py | P1 | 基础设施。SKILL.md workflow 第 1 步 (discover) 直接依赖；其他 stub 都假定 alias 可被 list/find |
+| ssh-core-deploy-pubkey | deploy_pubkey.py | P1 | 最小 surface（3 flag）、零跨脚本依赖、跑通即可 demo 真实价值 |
+| ssh-core-ssh-download | ssh_download.py | P2 | 独立 SFTP，比 upload 低风险（拉文件容错性高） |
+| ssh-core-ssh-upload | ssh_upload.py | P2 | ssh_download 的 mirror，复用 SFTP resume 逻辑 |
+| ssh-core-ssh-daemon | ssh_daemon.py | P2 | 长连接池架构核心（4-byte length JSON 协议、state file、heartbeat），后续 tunnel 复用 |
+| ssh-core-ssh-tunnel | ssh_tunnel.py | P3 | 复用 ssh_daemon shape，依赖 daemon 落地 |
+| ssh-core-ssh-server-transfer | ssh_server_transfer.py | P3 | 跨两远程 host、4 模式，体量与复杂度最高 |
+
+### Children — Phase 2+: 其他 5 plugin（16 stub，本 task 尚未建 child）
+
+待 ssh-core Phase 1 收尾后再开 child task。原因：其他 plugin 都依赖 ssh-core 作为 SSH 传输底座。
+
+| Plugin | Stub 数 | Phase | 备注 |
+|---|---|---|---|
+| ssh-guarded | 3 | Phase 2 | redact_check / request_mkdir / request_delete — 安全审批层，建在 ssh-core 之上 |
+| log-aggregator | 3 | Phase 2 | correlate / tail_multi / grep_across_sources — 多源日志拉取，依赖 ssh-core |
+| k8s-debug | 4 | Phase 3 | diagnose_pod / helm_status / cluster_health / check_namespace — 需 kubectl/helm fixture |
+| iac-state | 3 | Phase 3 | module_validate / drift_check / state_inspect — 需 terraform fixture |
+| cicd-debug | 3 | Phase 3 | secret_scope_audit / pipeline_analyzer / runner_check — 需 CI runner fixture |
+
+## In-scope（parent 维度）
+
+1. 维护 23 个 stub 的总体进度看板（通过 child task 完结状态）
+2. 当 plugin Phase 收尾时，开新的 e2e validation 任务做端到端真机验证（参考 `05-24-e2e-validate-skills-on-pai`）
+3. 跨 child 的共性问题集中记在本 task：例如 SSH 子进程超时策略、JSON contract 字段一致性、windows MSYS path 处理
+
+## Out-of-scope
+
+- 实现细节、unit/integration test 设计 → 各 child task 的 prd/design/implement 负责
+- 性能优化、压力测试、benchmarking
+- 新建 plugin / 新增 stub（本 task 仅推已存在的 23 个 stub 到 v1.0）
+- SKILL.md / references 的大改（局部对齐归 child task，结构性大改另开任务）
+
+## Constraints
+
+- 每个 child 必须维持已建立的契约：docstring `v1.0 surface:` → 实际实现签名 1:1 对齐；JSON output 用统一 contract（`{success, data, error}` 等已落地的字段）
+- 每个 v1.0 落地必须有配套 integration test（`-m live_ssh` 或本地 fixture），不能只有 unit
+- 不破坏已 ship 的 9 个 v1.0 脚本及其 40 个 live_ssh 测试
+- Phase 1（ssh-core）全部 ship 完成 + e2e validate 通过后，才开 Phase 2 children
+
+## Acceptance Criteria
+
+- [ ] 23 个 child task 全部 completed/archived
+- [ ] 23 个对应 v1.0 脚本通过自身 unit + integration 测试
+- [ ] 每个 plugin Phase 收尾后有 e2e validation 报告（child task 形式）落仓
+- [ ] `pytest tests/` 默认套件全绿、`pytest -m live_ssh` 全绿
+- [ ] 32 个 v1.0 脚本 100% 完成（已 ship 9 + 本 rollout 23 = 32）
+
+## Tracking
+
+- Phase 1 进度看 `task.py list` 中 7 个 `ssh-core-*` child 的状态
+- Phase 2+ children 待 Phase 1 收尾后再建
+- 共性 finding / decision 追加到本 prd 的「Notes」节（不要写实现细节）
+
+## Notes
+
+- 2026-05-24 创建。9/32 已 ship；建 7 个 ssh-core children 作为 Phase 1。
+- 2026-05-24 **ssh_config_manager v1.0 shipped** — commit `488bc1f`. 3 files / 2106 insertions / 38 deletions. 47 unit + 3 live_ssh = 50 new PASS。Aggregate suite: 538 default + 43 live = 581 PASS。ruff clean。Phase 1 进度: 1/7。
+- 2026-05-25 **deploy_pubkey v1.0 shipped** — commit `bc3a27e`. 7 files / 1747 insertions / 23 deletions. 79 unit + 4 live_ssh = 83 new PASS。Aggregate suite: 612 default + 13 live = 625 PASS。ruff clean, mypy clean (pre-existing project-wide `lib` import warning unchanged). 99% statement coverage on deploy_pubkey.py. Phase 1 进度: 2/7。Key decisions: ssh-copy-id wrapper (inherits tty for first-touch password prompt) + dropped v0.2 stub `--strip-password` (deferred v1.1 alongside paramiko+daemon path restoration) + per-script `failure_class` namespace with 8 strings + exit codes 10-15. Doc sync: SKILL.md decision tree + quick reference; references/{safety,workflows,troubleshooting}.md.
+- 2026-05-25 **ssh_daemon v1.0 DEFERRED to v1.1 per ADR-001 A2** — commit `5fd8f93`. 5 files, docs-only, **zero new code**. Phase 1 进度: 3/7 (1 deferred). Decision evidence: ADR-001 D1 forbids paramiko + custom daemon; ADR-001 A2 explicitly rejects ssh_daemon.py v1.0 and points to ControlMaster as the v1.1 candidate. No shipped v1.0 code calls ssh_daemon (grep confirmed). `ssh_tunnel` stub said "Same daemon shape as ssh_daemon.py" but this means **process model** (detached + PID + idle exit), not wire protocol — ssh_tunnel ships standalone without depending on this file. Doc sync brings SKILL.md frontmatter + CRITICAL block + ## Daemon model section + Workflow #2 + Quick reference, references/{workflows,safety,troubleshooting}.md, and the ssh_daemon.py docstring all in line with v1.0 reality (no daemon). Trigger conditions for v1.1 revival recorded in this child task PRD.
+- 2026-05-25 **ssh_server_transfer v1.0 shipped** — commit `a502afb`. 6 files / 1841 insertions / 44 deletions. 58 unit + 5 live_ssh = 63 new PASS. Aggregate suite: 670 default + 49 live = 719 PASS. ruff clean. 99% statement coverage on ssh_server_transfer.py (600 LOC, over the 300-450 design target by ~33% due to 12 failure_class constants + per-class exit-code & hint dicts + two-session lifecycle in main()). Phase 1 进度: 4/7 (1 deferred). Key decisions: stream-only with surface preservation (auto/hybrid route to stream + log data.{auto,hybrid}_resolved_to; direct refuses with mode_deferred exit 20; --use-rsync refuses with flag_deferred exit 21); per-script failure_class namespace (12 strings, exit codes 20-29 + 124 + 1) — third precedent of the per-script namespace pattern after ssh_config_manager (4-8) and deploy_pubkey (10-15); _TransferIOError marker subclass distinguishes mid-pipe IOError (transfer_io) from pre-pipe OSError (dst_path_invalid) under the same OSError catch; bwlimit pacing threaded across tree walks via start_time + running_bytes so the cap is tree-wide; iterative BFS in _pipe_tree avoids stack limits; symlinks/specials silently skipped (S_ISREG only). Doc sync: SKILL.md decision tree (parenthetical v1.0 note) + quick reference (v1.0 mode collapse comment); references/workflows.md §3 4-mode table gains v1.0-status column + footer note; references/troubleshooting.md large-file-hang section flagged v1.1 deferred.
+- 跨 child 经验沉淀（要复用到下一个 stub 的 design.md）：
+  - 共享 argparse 参数走 `parents=[common]` 时必须用 `default=argparse.SUPPRESS`，否则 subparser 默认值会 clobber top-level 设的值（实测会 silently 让 `--config-path` 失效然后写到真实文件）。`main()` 用 `getattr(args, "field", default)` 兜底
+  - `.trellis/spec/backend/` 是个人 workspace（gitignored），ADR 与 spec 改动 commit 不进；团队规范 source-of-truth 是 `CONTRIBUTING.md` + plugin 的 `SKILL.md` + `references/*.md`。后续 ship commit 跟随历史惯例：只 commit `scripts/<x>.py` + 2 个测试（deploy_pubkey 额外 commit 了 4 个 references/* docs sync,因为这次 ship 引入跨文件的 wording 变更）
+  - sub-agent dispatch（trellis-implement）非常适合 ~500 loc 实现 + 30+ unit 测试的体量，单次 dispatch 完成 Phase 1-5；docs/commit 留 main session 收尾。Sub-agent token 用量 ~210k (ssh_config_manager) / ~225k (deploy_pubkey)
+  - 2026-05-25 **Per-script `failure_class` namespace pattern** 现在有 2 个先例（ssh_config_manager 的 6 类 + deploy_pubkey 的 8 类）—— 确认这是项目惯例,新脚本沿用 (per-script namespace, exit codes 自选不冲突区间, lib/classify_failure 仅 ssh subprocess 通用工具不强制)
+  - 2026-05-25 **`uv run` 副作用**: 在 dev 环境跑 `uv run pytest` / `uv run ruff` 会触发 uv.lock 重 resolve,可能升级依赖(deploy_pubkey commit 时观察到 bcrypt 5.0.0 升级)。**commit 前用 `git restore uv.lock` 隔离**,避免无关变更混入 child commit。
+- 2026-05-26 **k8s-debug Phase 3 children 提前规划** —— 4 个 child task 已建（`05-26-k8s-debug-diagnose-pod` / `05-26-k8s-debug-check-namespace` / `05-26-k8s-debug-cluster-health` / `05-26-k8s-debug-helm-status`），全部 PRD 初稿落地。**Phase 排期不变**：实际 ship 顺序仍按本 PRD scope 表（Phase 1 ssh-core 收尾 → Phase 2 ssh-guarded + log-aggregator → Phase 3 k8s-debug / iac-state / cicd-debug），本批仅完成 planning 工件，不抢占 implement 资源。Key decisions 落到 child PRD 而非本 Notes（避免双写漂移）：(1) **exit code 80-119** 为 k8s-debug 4 child 预留 namespace（diagnose_pod 80-89 / check_namespace 90-99 / cluster_health 100-109 / helm_status 110-119），与已分配 30-79 不冲突；(2) **`scripts/lib/kubectl.py` 由 diagnose_pod ship 时抽出**，封装 `local` vs `ssh_execute <alias>` 二分执行 + 超时双轨 + JSON 解析，供其他 3 个 sibling 复用，先例对齐 ssh-core `lib/sftp_transport.py`；(3) **live_k8s fixture 走 kind 本地集群 + helm CLI**（与父任务规划决议一致；具体 fixture spin-up / 缓存 / CI 兼容性留 design.md）；(4) **推荐 ship 顺序**：diagnose_pod → check_namespace → cluster_health → helm_status（lib 依赖方向 + helm CLI 依赖最重留最后）。
+- 2026-05-26 **iac-state Phase 3 children 提前规划** —— 3 个 child task 已建（`05-26-iac-state-state-inspect` / `05-26-iac-state-drift-check` / `05-26-iac-state-module-validate`），全部 PRD 初稿落地。**Phase 排期不变**，与 k8s-debug 同批仅 planning，不抢占 implement 资源。Key decisions 落到 child PRD（不在本 Notes 双写）：(1) **exit code 120-149** 为 iac-state 3 child 预留 namespace（state_inspect 120-129 / drift_check 130-139 / module_validate 140-149），续接 k8s-debug 80-119；(2) **`scripts/lib/terraform.py` 由 state_inspect ship 时抽出**，封装 tool autodetect（`tofu` → fallback `terraform`，可 `--tool` 覆盖）+ `local` vs `ssh_execute <alias>` 二分 + lock 检测解析，供 drift_check / module_validate 复用；(3) **live_terraform fixture 用 `null_resource` / `random_*` provider**（零云账号依赖，CI 与本机都能跑）；(4) **新增 dep `python-hcl2`** 由 module_validate ship 时引入到 pyproject.toml（ADR follow-up 留 design 阶段；选 hcl2 而非自写 parser 的理由：terraform HCL2 语法含 lambda / dynamic block / for expression，社区 driftctl / checkov 都用 hcl2）；(5) **推荐 ship 顺序**：state_inspect → drift_check → module_validate（lib 依赖方向 + 复杂度递增 + 新 dep 留最后）。
+- 2026-05-26 **cicd-debug Phase 3 children 提前规划** —— 3 个 child task 已建（`05-26-cicd-debug-pipeline-analyzer` P1 / `05-26-cicd-debug-runner-check` P2 / `05-26-cicd-debug-secret-scope-audit` P2），全部 PRD 初稿落地。与 k8s-debug 同期、与 ssh_tunnel 并存（ssh_tunnel 仍 in_progress，未 commit/finish — 用户决定搁置，先推 cicd-debug planning）。Phase 顺序约束放宽：用户决议 Phase 1/2/3 children 可并行 plan/implement。Key decisions 落到 child PRD（pipeline_analyzer PRD 是 cross-script anchor，runner_check 与 secret_scope_audit 引用其 D1/D2/D8）：(1) **exit code 150-179** 划给 cicd-debug 3 child（pipeline_analyzer 150-159 / runner_check 160-169 / secret_scope_audit 170-179），避开已由 ssh_tunnel 使用的 30-39；60-79 仍留给 ssh-guarded / log-aggregator Phase 2，80-119 已由 k8s-debug 占。(2) **`plugins/cicd-debug/skills/cicd-debug/scripts/lib_cicd.py`（plugin-local）** 由 pipeline_analyzer ship 时抽出，封装 `ProviderAdapter` Protocol + `GhAdapter`/`GlabAdapter` + `run_cli`；NOT 提升到 repo-root `lib/`（与 k8s-debug 的 `kubectl.py` 同结构、同动机：plugin-internal helpers 直到 2+ plugin 复用才提升）。(3) **v1.0 同时 ship gh + glab provider**；本机未装 glab → unit test 覆盖 GlabAdapter via mock，integration 测试用 `shutil.which("glab")` 守门跳过（与 ssh-core `live_ssh` 需要 `POC_HOST=pai` 才跑的风格一致）。(4) **RTK shell-shim** 已确认拦截 `gh run/api/secret/pr/issue/repo` 交互式调用；subprocess.run 层面是否被拦截**留 implement.md 验证**，PRD 锁逃逸契约：`GH_BIN`/`GLAB_BIN` env + `--gh-bin`/`--glab-bin` flag + which-path "rtk" substring fallback 扫 `/opt/homebrew/bin`。(5) **新增 pytest 标记 `cicd_gh` / `cicd_glab`**（平行 `live_ssh`），gating env `CICD_GH_REPO` / `CICD_GH_ORG` / `CICD_GLAB_PROJECT`。(6) **PyYAML 进入 runtime deps**（仅 secret_scope_audit 消费），是项目第二个 runtime 依赖（首个是 paramiko/ADR-003）；types-PyYAML 视 mypy strict-mode 决定是否加 dev。**Surface 修正 vs v0.2 stub**：runner_check 的 `last_heartbeat` 在 gh API 不可得（return null + finding `last_heartbeat_unavailable`），glab API 有 `contacted_at` 故 glab 路径正常填；secret_scope_audit 的 `risk_flags` v1.0 ship 3/5（`long_lived_cloud_credential` / `exposed_on_fork_pr` / `pull_request_target_unsafe_checkout`），推迟 2/5（`protected_secret_referenced_from_unprotected_job` / `wildcard_org_scope_on_public_repo`）到 v1.1。**推荐 ship 顺序**：pipeline_analyzer（anchor，含 lib_cicd 基线 + 共通契约）→ runner_check（只加 `list_runners` / `list_queued_runs` 两方法）→ secret_scope_audit（加 yaml dep + `list_secrets` / `list_environments` / `fetch_workflow_files`，最复杂）。
+- 2026-05-31 **cicd-debug namespace correction approved** —— user approved moving cicd-debug off the conflicting `30-59` plan because `ssh_tunnel` owns `30-39` in `.trellis/spec/backend/error-handling.md`. Planning artifacts now reserve `150-179`; existing `pipeline_analyzer.py` implementation/tests still need to be migrated from old `30-39` values before that child is marked shipped.
+- 2026-05-26 **tail_multi v1.0 shipped** — commit `c2001b8`. 9 files / scripts + 5 lib + 2 tests. 52 unit + 2 live_ssh = 54 new PASS（live_ssh 本批 skip，本机 IP 当时不在 192.168.2.0/24 网段）。Aggregate suite: 670 → 822 default PASS（不含 ssh_tunnel）。ruff clean（per-line noqa + 单文件 `# ruff: noqa: PLR2004` 豁免给测试 magic value，跟 ssh_upload/ssh_server_transfer 先例）；mypy 不引入新 warning（修了 2 个：IO.write 加 str cast + var name shadow 改 fut_exc）。**Phase 2 进度 1/7**。Key decisions: 5 个 lib（source_spec / fetchers / filters / time_norm / clock_skew）落 plugin-local 不提升到 repo-root（与 k8s-debug `kubectl.py` 同结构）；exit code 40-49 namespace（source_spec_invalid / fetcher_failed / clock_skew_failed / normalize_failed / no_sources_resolved / partial_fetch）；fetchers 用 subprocess.Popen 流式而非 ssh_execute（design drift：PRD R10 说 shell out 但 streaming 不兼容 — 直接 `ssh` 仍守 ADR-001 D1）。**Implementation 接力故事**：第一次 dispatch trellis-implement stalled @ 600s（main session 阶段 watchdog），第二次 dispatch 给"补测试 + ship"也 stalled，main session 接手手修 11 个 source ruff + 4 个 mypy + 写 README + commit。
+- 2026-05-26 **scan_software v1.0 shipped** — commit `fe9e17e`. 3 files / scripts + 2 tests. 60 unit + 2 live_ssh = 62 new PASS（live_ssh 本批 skip 同 tail_multi）。ruff clean；mypy 不引入新 warning（修了 1 个：var redef `data` 改 `timeout_data`）。**Phase 2 进度 2/7（不含 Child A）**。Key decisions: 完全独立于 ssh-guarded request-pipeline（Child A）—— PRD R5 + design §1 明示不依赖共享 lib，scan_software 是 ssh-guarded 中唯一可单独 dispatch 的 child；exit code 75-79 namespace（catalog_load_failed / cache_write_failed / cache_corrupt / ssh_batch_failed / tool_probe_corrupted）；33-tool catalog literal + 7 category + Xilinx dir-scan 特例；base64 编码 heredoc shell 走 ssh_execute 单次 SSH 完成全 33 工具扫描；TTL 7d + stale-fallback exit 0（不 break shell-style 调用链路）。**实现 LOC 1105 远超 design 估计 280**：33-entry catalog literal + 5 个 hint dict + 7-category summary table + Xilinx 分支共同贡献。
+- 2026-05-26 **ssh_tunnel v1.0 shipped** — commit `4f95b26`. 8 files / script + 2 tests + 4 doc sync + .gitignore. 71 unit @ 98% coverage + 5 live_ssh = 76 new PASS（本机回到 192.168.2.108 网段，live_ssh 全跑通）。Aggregate suite: **934 PASS + 4 skipped**（Phase 2 + 1 累计）。ruff clean；mypy 不引入新 warning。**Phase 1 收尾完成**：ssh-core 7/9 shipped + 1 defer (ssh_daemon) + 1 未 implement (ssh_cluster 早已 ship)。Key decisions: exit code 30-39 namespace 在 ssh_server_transfer ship 时已落 `error-handling.md`；POSIX-only via `os.setsid` + `os.killpg`（D7 30 `posix_only` 保留 Windows 路径）；`--idle-timeout` 接受但 no-op + stderr warn + `flag_deferred=["--idle-timeout"]` marker（v1.1 ControlMaster 路线决议见 ADR-001 A2）；4 subcommand（start/stop/status/list）+ 状态文件 `$TMPDIR/ssh_tunnel/*.json` mode 0o600 / dir 0o700；`_kill_with_grace` SIGTERM → SIGKILL 双阶段 + dead-process 软处理。Doc sync: SKILL.md decision tree + workflows.md §4 + troubleshooting.md L33-34 + tests/README.md +71/+5 段 + .gitignore 增加 `.coverage`。**Phase 1 全口径 ship 数字**：ssh-core 7 个 + remote-debug 4 个 + docker-quick 3 个 + log-aggregator 1 个 + ssh-guarded 1 个 = **16 个 v1.0 scripts shipped / 32（50%）**，1 defer + 15 stub 待 ship。
