@@ -369,3 +369,36 @@ Implemented correlate v1.0 with anchor/window correlation, pair-mode duration, J
 ### Next Steps
 
 - None - task complete
+
+
+## Session 12: Ship cicd runner_check v1.0
+
+**Date**: 2026-05-31
+**Task**: Ship cicd runner_check v1.0
+**Branch**: `main`
+
+### Summary
+
+Implemented cicd-debug runner_check v1.0 with shared provider runner/queue adapters, unit and integration coverage, and runner docs sync.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6c3fb31` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
