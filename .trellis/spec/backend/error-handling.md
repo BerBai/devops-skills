@@ -59,6 +59,7 @@ The scaffold-era convention, used by every v0.2 stub:
 | `150`–`158` | `pipeline_analyzer` cicd-debug per-script failure classes. `150` `tool_missing`, `151` `provider_unavailable`, `152` `auth`, `153` `not_found`, `154` `permission`, `155` `network`, `156` `bad_args`, `157` `api_unexpected`, `158` `log_truncated`. Reserved by `.trellis/tasks/05-26-cicd-debug-pipeline-analyzer/prd.md` D3 after 2026-05-31 namespace correction; implementation/tests must migrate from the stale `30`-`38` draft before shipping. |
 | `160`–`168` | `runner_check` cicd-debug per-script failure classes. `160` `tool_missing`, `161` `provider_unavailable`, `162` `auth`, `163` `not_found`, `164` `permission`, `165` `network`, `166` `bad_args`, `167` `api_unexpected`, `168` `pagination_overflow`. Reserved by `.trellis/tasks/05-26-cicd-debug-runner-check/prd.md` D3. |
 | `170`–`179` | `secret_scope_audit` cicd-debug per-script failure classes. `170` `tool_missing`, `171` `provider_unavailable`, `172` `auth`, `173` `not_found`, `174` `permission`, `175` `network`, `176` `bad_args`, `177` `api_unexpected`, `178` `workflow_yaml_parse_failed`, `179` `workflow_dir_missing` (soft class; script exits `0` when the audit completed with no workflow graph). Reserved by `.trellis/tasks/05-26-cicd-debug-secret-scope-audit/prd.md` D3. |
+| `180`–`189` | `grep_across_sources` log-aggregator per-script failure classes. `180` `pattern_invalid`; `181`–`189` reserved. Introduced by `grep_across_sources` v1.0 after resolving the stale `60`–`69` planning conflict with `ssh-guarded exec_detached` (see `.trellis/tasks/05-25-log-aggregator-grep-across-sources/prd.md` R8). |
 | `124` | Python-side timeout enforcement triggered before the underlying command could complete. Matches GNU `timeout(1)` convention. Introduced by [ADR-001](./adr-001-ssh-execute.md) for `ssh_execute`; reusable by any script that needs distinguishable timeout semantics. |
 
 The `2` case is intentional and verifiable — see the `UNIMPLEMENTED_NOTE`
@@ -66,9 +67,9 @@ constant in `plugins/k8s-debug/skills/k8s-debug/scripts/check_namespace.py`
 line 26, and the payload it returns at lines 41-47. When a scaffold script
 is fleshed out, keep `0`/`1`; replace `2` only when implementing the
 behavior. Do not invent new exit codes beyond the ones listed above
-(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`87` / `90`–`99` / `150`–`179` / `124`) — new codes
+(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`87` / `90`–`99` / `150`–`179` / `180`–`189` / `124`) — new codes
 require a spec update plus a referenced ADR (or task PRD) explaining the
-semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`87`, `90`–`99`, `150`–`179`) are namespaced to
+semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`87`, `90`–`99`, `150`–`179`, `180`–`189`) are namespaced to
 their script and not reusable by other scripts without a fresh range
 allocation here.
 
@@ -76,7 +77,7 @@ Scripts that emit `4`–`9` MUST also set `data.failure_class` to the
 matching string (`not_found` / `already_exists` / `config_missing` /
 `parse_error` / `permission` / `transfer_verify_failed`) so callers can
 branch on the class without re-parsing `stderr`. The same rule applies
-to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`87`, `90`–`99`, `150`–`179`): every numeric exit code in
+to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`87`, `90`–`99`, `150`–`179`, `180`–`189`): every numeric exit code in
 those ranges has a paired `data.failure_class` string defined in the
 script's source; callers MUST branch on the class, not the number.
 
