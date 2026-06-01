@@ -20,14 +20,15 @@
       ```
 - [ ] **0.3** Re-read tail_multi ship commit + correlate ship commit
       （如果 correlate 已 ship）确认 lib 接口稳定。
-- [ ] **0.4** Spec slot：`.trellis/spec/backend/error-handling.md` 60-69 未占用。
+- [x] **0.4** Spec slot：`.trellis/spec/backend/error-handling.md` 60-69 已被
+      `ssh-guarded exec_detached` 占用；本 child 改用 180-189，避免冲突。
 
 ## Phase 1 — Foundation
 
 - [ ] **1.1** 用 v1.0 docstring 替换 stub docstring；保留 `v1.0 surface` block。
 - [ ] **1.2** 保留 build_parser 6 flag。增加：
       ```python
-      _EXIT_CODES = {None: 0, "pattern_invalid": 60,
+      _EXIT_CODES = {None: 0, "pattern_invalid": 180,
                      "source_spec_invalid": 40, "no_sources_resolved": 44,
                      "_generic": 1, "_timeout": 124}
       _HUMAN_HINTS = {
@@ -47,7 +48,7 @@
       try:
           pattern = _validate_pattern(args.pattern)
       except PatternError as e:
-          return _emit_failure("pattern_invalid", 60, str(e), args)
+          return _emit_failure("pattern_invalid", 180, str(e), args)
       ```
 
 ## Phase 3 — Source 解析 + 并发抓取
@@ -144,8 +145,8 @@ pytest tests/test_grep_across_sources_unit.py -v  # ~20 PASS
       tree + `:103-108` quick reference）。预期与 v1.0 实现一致 → 无改动。
 - [ ] **7.2** 若 ship 时发现 default 值偏差（如 `--max-samples` 从 5 改了）
       → 同步 quick reference。
-- [ ] **7.3** raw 模式 sample cap 行为差异 → 在 SKILL.md 或 quick reference
-      注一句（design D4 反思节）。如果文档已隐含这点，可不动。
+- [x] **7.3** raw/json 模式不做 sample cap；实现对齐 PRD R5/R6，
+      `--max-samples` 仅限制 summary 样例列。
 
 ## Phase 8 — Quality gate + spec update
 
@@ -162,11 +163,11 @@ pytest tests/test_grep_across_sources_unit.py -v  # ~20 PASS
 - [ ] **8.3** 编辑 `.trellis/spec/backend/error-handling.md`：在 50-59 行
       之后插入：
       ```markdown
-      | `60`–`69` | `grep_across_sources` per-script failure classes. `60`
+      | `180`–`189` | `grep_across_sources` per-script failure classes. `180`
       `pattern_invalid`. Introduced by `grep_across_sources` v1.0 (see
       `.trellis/tasks/05-25-log-aggregator-grep-across-sources/prd.md` R8). |
       ```
-      在「Do not invent new exit codes」段加入 `60`–`69`。
+      在「Do not invent new exit codes」段加入 `180`–`189`。
 
 ## Phase 9 — Commit & wrap-up
 
@@ -174,7 +175,7 @@ pytest tests/test_grep_across_sources_unit.py -v  # ~20 PASS
       - `plugins/log-aggregator/skills/log-aggregator/scripts/grep_across_sources.py`（重写）
       - `tests/test_grep_across_sources_unit.py`（新）
       - `tests/test_grep_across_sources_integration.py`（新）
-      - `.trellis/spec/backend/error-handling.md`（追加 60-69 段）
+      - `.trellis/spec/backend/error-handling.md`（追加 180-189 段）
       - `plugins/log-aggregator/skills/log-aggregator/SKILL.md`（仅在 Phase 7
         发现需调整时）
       - **不** commit：`.trellis/tasks/**` / `uv.lock`
@@ -185,10 +186,10 @@ pytest tests/test_grep_across_sources_unit.py -v  # ~20 PASS
       - regex match across N sources with hit-count + sample summary
       - three formats: summary (table sorted by hits) / raw / json (NDJSON)
       - heat-map mode when --pattern empty: per-source line volume
-      - 1 per-script failure class / exit code 60
+      - 1 per-script failure class / exit code 180
       - Reuses lib/{source_spec,fetchers} shipped by tail_multi (no lib changes)
       - ~20 unit + 2 live_ssh integration tests
-      - spec update: error-handling.md gains 60-69 range
+      - spec update: error-handling.md gains 180-189 range
       - Final v1.0 ship for log-aggregator plugin; e2e validation task next
 
       Refs: .trellis/tasks/05-25-log-aggregator-grep-across-sources/
@@ -213,6 +214,5 @@ pytest tests/test_grep_across_sources_unit.py -v  # ~20 PASS
 
 ## Open follow-ups（写入父 prd.md Notes）
 
-- raw 模式 sample cap 行为差异是否需要更显式标志？（v1.0 文档隐含；user
-  反馈频次决定 v1.1 是否加 `--no-sample-cap`）
+- raw/json 模式按 PRD 输出全部匹配事件；`--max-samples` 仅限制 summary 样例。
 - heat-map 模式是否需要排序选项？（v1.0 按 hits 降序唯一；user 反馈决定 v1.1）

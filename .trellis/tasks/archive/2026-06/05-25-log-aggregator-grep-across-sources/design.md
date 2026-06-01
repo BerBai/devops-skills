@@ -10,7 +10,7 @@ CLI args ───▶ build_parser() ──▶ args
          ┌─────────────────────────────┐
          │ _validate_pattern(args.pat) │
          │  → re.Pattern | None        │
-         │  失败 → exit 60             │
+         │  失败 → exit 180            │
          └────────┬────────────────────┘
                   │
                   ▼
@@ -161,18 +161,17 @@ def _emit_summary(groups: list[_HitGroup], is_heatmap: bool,
 
 ```python
 def _emit_raw(groups: list[_HitGroup], writer):
-    """Flatten all sample lines. Note: raw uses samples, NOT all hits ——
-    samples capped at --max-samples per source. For full hits without cap,
-    use --format json."""
+    """Flatten all matched lines. `--max-samples` does not cap raw/json,
+    only the summary-table sample column."""
     for g in groups:
-        for ts, body in g.samples:
+        for ts, body in g.events:
             print(f"[{g.source_tag} {ts}] {body}", file=writer)
 
 
 def _emit_json(groups, failures, is_heatmap, writer):
     # Stream NDJSON events
     for g in groups:
-        for ts, body in g.samples:
+        for ts, body in g.events:
             event = {"source": g.source_tag, "time": ts, "raw": body}
             print(json.dumps(event, ensure_ascii=False), file=writer)
     # Trailing envelope summary
@@ -193,14 +192,8 @@ def _emit_json(groups, failures, is_heatmap, writer):
     print(json.dumps(envelope, ensure_ascii=False), file=writer)
 ```
 
-**`--format raw` 行为说明**：与 grep -r 类似但**不输出全部命中**——仅样例上限
-`--max-samples` 内。这是有意决策：`--format raw` 主要为人读，不是机器消费；
-机器消费走 `--format json`，envelope 给确切 hit count 但 events 仍是
-samples。这与 grep 真正全部命中行为有差异，文档明确说明（SKILL.md 同步）。
-
-**反思**：raw 模式的 sample 上限可能让用户困惑（"我跑 grep 期待全部命中"）。
-v1.0 接受这个 tradeoff（性能、内存上限考虑），文档说明；v1.1 可加
-`--no-sample-cap` flag。
+**`--format raw/json` 行为说明**：与 grep -r 类似，输出全部命中事件。
+`--max-samples` 只限制 summary table 的首条/样例存储，不限制 raw/json 事件流。
 
 ## D5 — Failure class & exit codes
 
@@ -210,8 +203,8 @@ v1.0 接受这个 tradeoff（性能、内存上限考虑），文档说明；v1.
 | 1 | generic | 未预期异常 |
 | 40 | source_spec_invalid | 透传 |
 | 44 | no_sources_resolved | 透传 |
-| 60 | pattern_invalid | `_validate_pattern` 失败 |
-| 61-69 | reserved | 未来扩展 |
+| 180 | pattern_invalid | `_validate_pattern` 失败 |
+| 181-189 | reserved | 未来扩展 |
 | 124 | (透传) | ssh timeout |
 
 ## D6 — Testing strategy
@@ -225,7 +218,7 @@ v1.0 接受这个 tradeoff（性能、内存上限考虑），文档说明；v1.
 | Raw 格式 | 3 | 多源合并、空命中、samples 与 hits 数对齐 |
 | JSON 格式 | 3 | NDJSON 流式、envelope total_hits / total_lines / per_source 字段 |
 | Heat-map 模式 | 3 | --pattern 空 → mode 切换 / summary 标题 "Lines" / envelope total_lines |
-| CLI / main | 4 | args bad / pattern invalid 60 / partial_fetcher exit 0 + failed_fetchers / sources 空 |
+| CLI / main | 4 | args bad / pattern invalid 180 / partial_fetcher exit 0 + failed_fetchers / sources 空 |
 
 ### Integration (~2 live_ssh)
 
@@ -265,7 +258,8 @@ def test_grep_local_fixture_heatmap(tmp_path):
 
 ## Open questions
 
-- **Q1**: 应否提供 `--no-sample-cap`？v1.0 不加（performance / surface 简洁）。
+- **Q1**: `--max-samples` 应否限制 raw/json？v1.0 不限制；raw/json 输出
+  全部事件，`--max-samples` 只限制 summary 样例列。
 - **Q2**: heat-map 排序应否提供 `--sort source` 选项？v1.0 不加，按 hits
   降序。
 - **Q3**: 多 pattern 是否值得？v1.0 不加，用户 `pattern1|pattern2`。

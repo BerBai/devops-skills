@@ -60,8 +60,10 @@ v1.0：在 N 个异构源上**并发跑同一个 regex**，输出每源命中数
    时钟漂移 —— 用户只看命中数，不做时间对齐）；不用 `filters`（grep 用户
    想看全部命中，过滤是反作用）。
 
-5. **Failure_class namespace 60-69**（父 prd.md X2）：
+5. **Failure_class namespace 180-189**（2026-06-01 修正）：
    `pattern_invalid` + 透传 `source_spec_invalid` / `no_sources_resolved`。
+   修正原因：后端规范已把 `60-69` 分配给 `ssh-guarded exec_detached`，本
+   child 不能复用旧规划区间。
 
 6. **测试基线**：~20 unit + 2 live_ssh integration（最少的一个 child）。
 
@@ -88,7 +90,7 @@ v1.0：在 N 个异构源上**并发跑同一个 regex**，输出每源命中数
 
 ### R2 — 流程
 1. `lib.source_spec.resolve(args.sources)` → 失败 exit 40 / 空集 exit 44
-2. `_validate_pattern(args.pattern)` → 失败 exit 60
+2. `_validate_pattern(args.pattern)` → 失败 exit 180
 3. 并发跑 fetcher（同 correlate `_collect_all_lines` 模式，但**不**做
    normalize/level inference，纯 raw_body）
 4. 对每行跑 `pattern.search(body)`（pattern 为空则跳过此步）
@@ -99,7 +101,7 @@ v1.0：在 N 个异构源上**并发跑同一个 regex**，输出每源命中数
 - `_validate_pattern(s) -> re.Pattern | None`：
   - `s` 为 None / 空 → 返回 None（heat-map 模式）
   - `s` 是合法 regex → 返回编译对象
-  - 编译失败（`re.error`）→ `failure_class=pattern_invalid` + `exit 60`
+  - 编译失败（`re.error`）→ `failure_class=pattern_invalid` + `exit 180`
 - 不强制大小写敏感（grep 默认敏感），用户加 `(?i)` 自己开关。
 
 ### R4 — Output: summary 格式
@@ -167,8 +169,8 @@ NDJSON 流式：
 | 1 | generic | 未预期异常 |
 | 40 | source_spec_invalid | 透传 |
 | 44 | no_sources_resolved | 透传 |
-| 60 | pattern_invalid | regex 编译失败 |
-| 61-69 | reserved | 未来扩展 |
+| 180 | pattern_invalid | regex 编译失败 |
+| 181-189 | reserved | 未来扩展 |
 | 124 | (透传) | ssh timeout |
 
 Partial fetch 处理同 correlate：≥1 fetcher 失败但其他成功 → exit 0 + envelope
@@ -212,11 +214,11 @@ Partial fetch 处理同 correlate：≥1 fetcher 失败但其他成功 → exit 
       输出 NDJSON events + envelope，`data.total_hits` 等于实际匹配行数。
 - [ ] `grep_across_sources.py --sources file://local/<fixture> --format summary`
       输出表格，按 hits 降序，header 与 R4 字符一致。
-- [ ] `--pattern "[bad regex"` → exit 60, failure_class=pattern_invalid。
+- [ ] `--pattern "[bad regex"` → exit 180, failure_class=pattern_invalid。
 - [ ] `--pattern ""` 或不传 → heat-map 模式输出，envelope `data.total_lines`
       字段（不是 total_hits）。
 - [ ] `--format json` 与 `--json` 输出完全相同。
-- [ ] `.trellis/spec/backend/error-handling.md` 追加 60-69 段。
+- [ ] `.trellis/spec/backend/error-handling.md` 追加 180-189 段。
 - [ ] `pytest tests/` 默认套件全绿，不破坏 tail_multi/correlate 测试。
 - [ ] `lib/` 保持原状。
 
