@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 16
+- **Total Sessions**: 17
 - **Last Active**: 2026-06-02
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~534 | Active |
+| `journal-1.md` | ~567 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 17 | 2026-06-02 | Mark V1 complete and add V1.1 roadmap | `67f5a6b` | `main` |
 | 16 | 2026-06-02 | Add ssh-guarded sandbox escape regression coverage | `6d77d5c` | `main` |
 | 15 | 2026-06-02 | Close devops-skills rollout | - | `main` |
 | 14 | 2026-06-02 | Ship iac-state module_validate | `0f416be` | `main` |

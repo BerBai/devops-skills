@@ -532,3 +532,36 @@ Added local pytest regression coverage for documented ssh-guarded workdir sandbo
 ### Next Steps
 
 - None - task complete
+
+
+## Session 17: Mark V1 complete and add V1.1 roadmap
+
+**Date**: 2026-06-02
+**Task**: Mark V1 complete and add V1.1 roadmap
+**Branch**: `main`
+
+### Summary
+
+Audited all devops-skills plugin V1 CLI targets, confirmed V1 completion under the accepted rollout criterion with ssh_daemon.py deferred to V1.1 per ADR-001, then refreshed README/CONTRIBUTING/tests README in English and Chinese to remove stale scaffold/V1-missing wording and document the V1.1 roadmap. Validation: tests/test_manifests.py passed and stale-status searches returned no matches.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `67f5a6b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
