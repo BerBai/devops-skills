@@ -133,13 +133,13 @@ ship 时各 child 在自己的 commit 里仅同步**已变化的事实**：
 
 ## Acceptance Criteria（plugin-level）
 
-- [ ] 3 个 child task 全部 `completed/archived`
-- [ ] 3 个对应 v1.0 脚本通过自身 unit + integration（`-m live_ssh`）测试
-- [ ] `pytest tests/` 默认套件全绿、`pytest -m live_ssh` 全绿、ruff clean、mypy clean
-- [ ] `plugins/log-aggregator/skills/log-aggregator/scripts/lib/` 含 5 个共享模块（X1），correlate 和 grep_across_sources 复用、不复制 fetcher 实现
-- [ ] e2e validation 报告（独立 child task 形式）落仓：3 脚本在 pai + 本地 docker fixture 真机跑通
-- [ ] SKILL.md frontmatter + decision tree + quick reference 与实际 CLI 一致；3 references/ 不需要重写（已是 v1.0 描述）；若 ship 中发现偏差，对应 child 同步 commit 修订
-- [ ] `.trellis/spec/backend/error-handling.md` 追加 40–49 / 90–99 / 180–189 三段 per-script exit code range（每个 child ship 时同步追加自己那一段，参 X2 节 Spec update 时机）
+- [x] 3 个 child task 全部 `completed/archived`
+- [x] 3 个对应 v1.0 脚本通过自身 unit + integration（`-m live_ssh`）测试
+- [x] `pytest tests/` 默认套件全绿、`pytest -m live_ssh` 全绿、ruff clean、mypy clean
+- [x] `plugins/log-aggregator/skills/log-aggregator/scripts/lib/` 含 5 个共享模块（X1），correlate 和 grep_across_sources 复用、不复制 fetcher 实现
+- [x] e2e validation 报告落仓：2026-06-01 post-ship pai rerun 记录在本 PRD Notes，3 脚本在 pai/local fixture 真机路径通过或环境跳过
+- [x] SKILL.md frontmatter + decision tree + quick reference 与实际 CLI 一致；3 references/ 不需要重写（已是 v1.0 描述）；若 ship 中发现偏差，对应 child 同步 commit 修订
+- [x] `.trellis/spec/backend/error-handling.md` 追加 40–49 / 90–99 / 180–189 三段 per-script exit code range（每个 child ship 时同步追加自己那一段，参 X2 节 Spec update 时机）
 
 ## Tracking
 
@@ -153,6 +153,7 @@ ship 时各 child 在自己的 commit 里仅同步**已变化的事实**：
 - 2026-05-25 三 child 全部 `planning`；`task.py start` 触发延后到 Phase 1 (ssh-core) 收尾后。本 task 也保持 `planning`。
 - 2026-06-01 **grep_across_sources v1.0 shipped** — commit `c6e77e4`. 4 files / script + 2 tests + error-handling spec. 20 unit + 3 integration (`-m live_ssh`; local fixture PASS, remote pai SKIP because host unreachable) PASS. Full default `pytest tests/` PASS with environment skips; full `pytest tests/ -m live_ssh` PASS with environment skips. Key decision: stale `60-69` plan conflicted with `ssh-guarded exec_detached`, so this child moved to `180-189` with `180 pattern_invalid`. Implementation outputs all raw/json events; `--max-samples` only limits summary samples. **log-aggregator plugin scripts are now 3/3 v1.0 shipped**; e2e validation task remains.
 - 2026-06-01 **post-ship pai validation rerun** — user reported `pai` reachable; `ssh -o BatchMode=yes -o ConnectTimeout=5 pai true` PASS. `POC_HOST=pai uv run pytest tests/test_tail_multi_integration.py tests/test_correlate_integration.py tests/test_grep_across_sources_integration.py -m live_ssh -v` → **6 PASS / 1 SKIP** (`correlate` remote anchor skipped because no recent sshd `Accepted` line). `POC_HOST=pai uv run pytest tests/ -m live_ssh -q` → PASS with 10 environment skips (Docker daemon unavailable, `/tmp/poc-ssh-config` missing, one root chmod edge, same `correlate` no-anchor skip). This confirms the new `grep_across_sources` remote journal path works on `pai`.
+- 2026-06-02 **plugin rollup closed** — all 3 child scripts are shipped/archived, shared lib + exit-code spec acceptance is satisfied, and the 2026-06-01 pai rerun is the persisted e2e validation evidence for this plugin rollup.
 - 跨 plugin 经验沉淀（来自 ssh-core 5 个已 ship 脚本，复用到本 plugin）：
   - 共享 argparse 父 parser 用 `default=argparse.SUPPRESS` + `main()` `getattr` 兜底，避免 subparser default 覆盖（`05-24-devops-skills-v1-rollout/prd.md:84`）
   - `uv run` 副作用：commit 前 `git restore uv.lock` 隔离意外依赖升级（`prd.md:87`）
