@@ -125,6 +125,33 @@ def test_builtin_no_match_passthrough(capsys: pytest.CaptureFixture[str]) -> Non
     assert err == "redact_check: 0 hits\n"
 
 
+def test_builtin_catalog_redacts_multiple_kinds_in_one_input(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    text = "\n".join(
+        [
+            "aws=AKIAABCDEFGHIJKLMNOP",
+            "gh=ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij",
+            "jwt=eyJhbGciOiJIUzI1.eyJzdWIiOjEyMzQ1.signaturepayload",
+            "key=-----BEGIN EC PRIVATE KEY-----",
+        ]
+    )
+    rc, out, err = _run([], text + "\n", capsys)
+    assert rc == 0
+    assert "AKIAABCDEFGHIJKLMNOP" not in out
+    assert "ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij" not in out
+    assert "signaturepayload" not in out
+    assert "-----BEGIN EC PRIVATE KEY-----" not in out
+    assert "[REDACTED-AWS-ACCESS-KEY]" in out
+    assert "[REDACTED-GH-TOKEN]" in out
+    assert "[REDACTED-JWT]" in out
+    assert "[REDACTED-PRIVATE-KEY-HEADER]" in out
+    assert err == (
+        "redact_check: 4 hits "
+        "(aws_access_key=1, github_token=1, jwt=1, rsa_private=1)\n"
+    )
+
+
 def test_catalog_override_replaces_builtin(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -141,11 +168,87 @@ def test_catalog_override_replaces_builtin(
     assert "internal_api_key=1" in err
 
 
+def test_catalog_multiple_patterns_use_catalog_replacements(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    catalog = _catalog(
+        tmp_path,
+        [
+            {
+                "kind": "internal_api_key",
+                "regex": r"MYCO-[A-Z0-9]{8}",
+                "replace_with": "[REDACTED-INTERNAL]",
+            },
+            {
+                "kind": "build_token",
+                "regex": r"BUILD-[0-9]{4}",
+                "replace_with": "[REDACTED-BUILD]",
+            },
+        ],
+    )
+    rc, out, err = _run(
+        ["--catalog", str(catalog)],
+        "MYCO-ABCDEFGH BUILD-1234\n",
+        capsys,
+    )
+    assert rc == 0
+    assert out == "[REDACTED-INTERNAL] [REDACTED-BUILD]\n"
+    assert err == "redact_check: 2 hits (build_token=1, internal_api_key=1)\n"
+
+
+def test_catalog_redaction_is_ordered_and_can_redact_replacements(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    catalog = _catalog(
+        tmp_path,
+        [
+            {
+                "kind": "outer_secret",
+                "regex": r"SECRET-[0-9]+",
+                "replace_with": "TOKEN=SECONDARY",
+            },
+            {
+                "kind": "token_env",
+                "regex": r"TOKEN=[A-Z]+",
+                "replace_with": "[REDACTED-TOKEN]",
+            },
+        ],
+    )
+    rc, out, _ = _run(
+        ["--catalog", str(catalog), "--json", "--emit-redacted"],
+        "value=SECRET-123\n",
+        capsys,
+    )
+    env = json.loads(out)
+    assert rc == 0
+    assert env["data"]["redacted_text"] == "value=[REDACTED-TOKEN]\n"
+    assert env["data"]["summary"] == {"outer_secret": 1, "token_env": 1}
+    assert [hit["kind"] for hit in env["data"]["hits"]] == [
+        "outer_secret",
+        "token_env",
+    ]
+
+
 def test_catalog_missing_returns_70(capsys: pytest.CaptureFixture[str]) -> None:
     rc, out, err = _run(["--catalog", "/no/such/redact.json"], "x\n", capsys)
     assert rc == 70
     assert out == ""
     assert "failure_class=catalog_load_failed" in err
+
+
+def test_catalog_missing_json_error_envelope(capsys: pytest.CaptureFixture[str]) -> None:
+    rc, out, err = _run(["--catalog", "/no/such/redact.json", "--json"], "x\n", capsys)
+    env = json.loads(out)
+    assert rc == 70
+    assert err == ""
+    assert env["success"] is False
+    assert env["exit_code"] == 70
+    assert env["stdout"] == ""
+    assert env["stderr"].startswith("failure_class=catalog_load_failed:")
+    assert env["data"]["failure_class"] == "catalog_load_failed"
+    assert env["data"]["catalog"] == "/no/such/redact.json"
 
 
 def test_catalog_bad_json_returns_71(

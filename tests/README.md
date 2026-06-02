@@ -158,5 +158,4 @@ Integration tests (opt-in via `-m live_ssh`):
 
 - Sandbox-escape attempts on `ssh-guarded` beyond the two pedagogical
   refusal cases (the full path rules table in `workdir-sandbox.md`)
-- Redact-catalog regression suite for `redact_check.py` (sibling task)
 - `scan_software.py` live tests (sibling task)
