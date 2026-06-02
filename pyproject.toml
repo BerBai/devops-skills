@@ -50,6 +50,7 @@ addopts = "-ra -q"
 markers = [
     "live_ssh: integration tests that ssh to a real host (default alias 'pai'). Skipped by default; run with `pytest -m live_ssh`. See tests/README.md for prerequisites.",
     "live_k8s: integration tests that need a kind cluster + kubectl. Skipped by default; run with `pytest -m live_k8s`.",
+    "live_terraform: integration tests that need Terraform/OpenTofu and initialized fixture projects.",
     "cicd_gh: tests requiring GitHub CLI access to CICD_GH_REPO.",
     "cicd_glab: tests requiring GitLab CLI access.",
 ]

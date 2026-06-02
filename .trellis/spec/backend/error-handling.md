@@ -58,6 +58,7 @@ The scaffold-era convention, used by every v0.2 stub:
 | `90`–`99` | `correlate` log-aggregator per-script failure classes. `90` `anchor_not_found`, `91` `window_invalid`, `92` `pair_unmatched`; `93`–`99` reserved. Introduced by `correlate` v1.0 after resolving the stale `50`–`59` planning conflict (see `.trellis/tasks/05-25-log-aggregator-correlate/prd.md` R8). |
 | `100`–`109` | `cluster_health` k8s-debug per-script failure classes. `100` `cluster_unreachable` (mandatory `kubectl get nodes` probe reached kubectl but could not reach the Kubernetes API server); `101` `healthz_unavailable` (soft finding when managed-cluster control-plane pods and raw health endpoints are unavailable); `102` `versions_partial` (soft finding when `kubectl version --short` cannot be collected while nodes are available); `103`–`109` reserved. Introduced by `cluster_health` v1.0 (see `.trellis/tasks/05-26-k8s-debug-cluster-health/design.md`). |
 | `110`–`119` | `helm_status` k8s-debug per-script failure classes. `110` `helm_missing`, `111` `release_not_found`, `112` `helm_version_unsupported`, `113` `history_truncated` (soft warning; exit `0`), `114` `pending_scan_partial` (reserved soft class for future namespace-partial scans), `115`–`119` reserved. Introduced by `helm_status` v1.0 (see `.trellis/tasks/05-26-k8s-debug-helm-status/design.md`). |
+| `120`–`129` | `state_inspect` iac-state per-script failure classes. `120` `host_unreachable`, `121` `tool_missing`, `122` `project_dir_invalid`, `123` `not_initialized`, `125` `backend_unknown` (soft warning; exit `0`), `126` `lock_parse_failed` (soft warning; exit `0`), `127` `workspace_list_failed` (soft warning; exit `0`), `128`–`129` reserved. `124` remains the shared timeout convention. Introduced by `state_inspect` v1.0 (see `.trellis/tasks/05-26-iac-state-state-inspect/design.md`). |
 | `150`–`158` | `pipeline_analyzer` cicd-debug per-script failure classes. `150` `tool_missing`, `151` `provider_unavailable`, `152` `auth`, `153` `not_found`, `154` `permission`, `155` `network`, `156` `bad_args`, `157` `api_unexpected`, `158` `log_truncated`. Reserved by `.trellis/tasks/05-26-cicd-debug-pipeline-analyzer/prd.md` D3 after 2026-05-31 namespace correction; implementation/tests must migrate from the stale `30`-`38` draft before shipping. |
 | `160`–`168` | `runner_check` cicd-debug per-script failure classes. `160` `tool_missing`, `161` `provider_unavailable`, `162` `auth`, `163` `not_found`, `164` `permission`, `165` `network`, `166` `bad_args`, `167` `api_unexpected`, `168` `pagination_overflow`. Reserved by `.trellis/tasks/05-26-cicd-debug-runner-check/prd.md` D3. |
 | `170`–`179` | `secret_scope_audit` cicd-debug per-script failure classes. `170` `tool_missing`, `171` `provider_unavailable`, `172` `auth`, `173` `not_found`, `174` `permission`, `175` `network`, `176` `bad_args`, `177` `api_unexpected`, `178` `workflow_yaml_parse_failed`, `179` `workflow_dir_missing` (soft class; script exits `0` when the audit completed with no workflow graph). Reserved by `.trellis/tasks/05-26-cicd-debug-secret-scope-audit/prd.md` D3. |
@@ -69,9 +70,9 @@ constant in `plugins/k8s-debug/skills/k8s-debug/scripts/check_namespace.py`
 line 26, and the payload it returns at lines 41-47. When a scaffold script
 is fleshed out, keep `0`/`1`; replace `2` only when implementing the
 behavior. Do not invent new exit codes beyond the ones listed above
-(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`88` / `90`–`119` / `150`–`179` / `180`–`189` / `124`) — new codes
+(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`88` / `90`–`129` / `150`–`179` / `180`–`189` / `124`) — new codes
 require a spec update plus a referenced ADR (or task PRD) explaining the
-semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`119`, `150`–`179`, `180`–`189`) are namespaced to
+semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`129`, `150`–`179`, `180`–`189`) are namespaced to
 their script and not reusable by other scripts without a fresh range
 allocation here.
 
@@ -79,7 +80,7 @@ Scripts that emit `4`–`9` MUST also set `data.failure_class` to the
 matching string (`not_found` / `already_exists` / `config_missing` /
 `parse_error` / `permission` / `transfer_verify_failed`) so callers can
 branch on the class without re-parsing `stderr`. The same rule applies
-to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`119`, `150`–`179`, `180`–`189`): every numeric exit code in
+to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`129`, `150`–`179`, `180`–`189`): every numeric exit code in
 those ranges has a paired `data.failure_class` string defined in the
 script's source; callers MUST branch on the class, not the number.
 
@@ -361,6 +362,95 @@ provider failure.
 ```
 
 Callers can branch on `release_not_found` without parsing Helm's human stderr.
+
+## Scenario: iac-state `state_inspect` v1.0
+
+### 1. Scope / Trigger
+
+- Trigger: `state_inspect.py` is the iac-state foundation command and ships the
+  shared Terraform/OpenTofu runner used by sibling iac-state scripts.
+- Scope: CLI signature, JSON `data` payload, local/remote Terraform execution,
+  state lock detection, and state-inspect-local failure classes `120`-`127`.
+
+### 2. Signatures
+
+```bash
+state_inspect.py <host> <project-dir> [--tool auto|tofu|terraform] [--json]
+```
+
+Shared helper signatures:
+
+```python
+resolve_tool(host: str, tool_arg: str) -> str
+run_tf(host: str, project_dir: str, args: list[str], *, tool: str | None = None, timeout: int = 60, parse_json: bool = False) -> TfResult
+```
+
+### 3. Contracts
+
+- `--tool auto` tries `tofu`, then `terraform`; explicit `--tool` requires that
+  selected binary.
+- Local execution runs argv-list subprocesses with `cwd=<project-dir>`.
+- Remote execution shells out through `ssh-core/ssh_execute.py --json` with
+  `cd <project-dir> && <tool> ...`.
+- Success data contains `backend`, `state_size_bytes`, `resource_count`,
+  `is_locked`, `lock_info`, `workspaces`, `summary`, `findings`, `raw`, and
+  `failure_class=null`.
+- Lock detection must use `plan -lock-timeout=1s -refresh=false -input=false`
+  and must not use `-lock=false`.
+
+### 4. Validation & Error Matrix
+
+| Condition | `failure_class` | Exit |
+|-----------|-----------------|------|
+| Remote host or ssh transport unavailable | `host_unreachable` | `120` |
+| Neither Terraform nor OpenTofu binary is available | `tool_missing` | `121` |
+| Project directory is absent, not a directory, or has no `*.tf` files | `project_dir_invalid` | `122` |
+| Cached `.terraform/terraform.tfstate` is absent | `not_initialized` | `123` |
+| Terraform/OpenTofu subprocess timeout | `timeout` | `124` |
+| Cached backend metadata cannot be parsed | `backend_unknown` | `0` soft warning |
+| State lock detected but fields cannot be parsed | `lock_parse_failed` | `0` soft warning |
+| Workspace listing fails after core state metadata is collected | `workspace_list_failed` | `0` soft warning |
+| Unexpected script bug | `null` | `1` |
+
+### 5. Good/Base/Bad Cases
+
+- Good: initialized local backend, no lock, workspace list succeeds ->
+  `summary.state="ok"`, exit `0`.
+- Base: remote backend or workspace listing failure -> exit `0`,
+  `summary.state="warn"`, with findings explaining degraded metadata.
+- Bad: uninitialized project -> exit `123`, `success=false`,
+  `data.failure_class="not_initialized"`.
+
+### 6. Tests Required
+
+- Unit tests cover backend parsing, safe config redaction, local/remote backend
+  state size behavior, resource count, workspace parsing, lock parsing,
+  non-mutating lock command argv, hard 120-123 classes, and soft 125-127
+  findings.
+- Live Terraform tests are opt-in under `live_terraform` and must be skip-safe
+  when Terraform/OpenTofu or fixture provider setup is unavailable.
+- Default `pytest tests/` must remain green with environment-dependent live
+  cases skipped rather than failed.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```bash
+terraform plan -lock=false -refresh=false
+```
+
+This bypasses lock acquisition and cannot detect the locked-state failure the
+script is meant to surface.
+
+#### Correct
+
+```bash
+terraform plan -lock-timeout=1s -refresh=false -input=false
+```
+
+This keeps the operation read-only while still exercising Terraform's normal
+state lock acquisition path.
 
 ## Scenario: cicd-debug `pipeline_analyzer` v1.0
 
