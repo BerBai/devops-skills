@@ -57,6 +57,7 @@ The scaffold-era convention, used by every v0.2 stub:
 | `80`–`88` | k8s-debug script failure classes (namespace `80`–`89`). `80` `host_unreachable` (ssh-core remote unreachable, or local kubectl API server refused / DNS-missing), `81` `kubectl_missing` (binary absent or rc 127), `82` `kubeconfig_missing` (KUBECONFIG unset or file missing), `83` `pod_not_found`, `84` `namespace_not_found`, `85` `forbidden` (RBAC denial, or upstream ssh auth failure — same source in this context), `86` `api_timeout` (kubectl's own `--request-timeout=30s` trip; distinct from Python-side `124`), `87` `metrics_unavailable` (soft failure — exit `0` with a `warn` finding, used for `kubectl top` against a cluster without metrics-server), `88` `partial_collection` (check_namespace collected too few namespace domains to produce a reliable health snapshot). `80`–`87` introduced by `diagnose_pod` v1.0 (see `.trellis/tasks/05-26-k8s-debug-diagnose-pod/prd.md` R6 + `design.md` D4); `88` introduced by `check_namespace` v1.0 after avoiding the stale `90`–`99` planning conflict with log-aggregator `correlate`. ADR follow-up TBD. |
 | `90`–`99` | `correlate` log-aggregator per-script failure classes. `90` `anchor_not_found`, `91` `window_invalid`, `92` `pair_unmatched`; `93`–`99` reserved. Introduced by `correlate` v1.0 after resolving the stale `50`–`59` planning conflict (see `.trellis/tasks/05-25-log-aggregator-correlate/prd.md` R8). |
 | `100`–`109` | `cluster_health` k8s-debug per-script failure classes. `100` `cluster_unreachable` (mandatory `kubectl get nodes` probe reached kubectl but could not reach the Kubernetes API server); `101` `healthz_unavailable` (soft finding when managed-cluster control-plane pods and raw health endpoints are unavailable); `102` `versions_partial` (soft finding when `kubectl version --short` cannot be collected while nodes are available); `103`–`109` reserved. Introduced by `cluster_health` v1.0 (see `.trellis/tasks/05-26-k8s-debug-cluster-health/design.md`). |
+| `110`–`119` | `helm_status` k8s-debug per-script failure classes. `110` `helm_missing`, `111` `release_not_found`, `112` `helm_version_unsupported`, `113` `history_truncated` (soft warning; exit `0`), `114` `pending_scan_partial` (reserved soft class for future namespace-partial scans), `115`–`119` reserved. Introduced by `helm_status` v1.0 (see `.trellis/tasks/05-26-k8s-debug-helm-status/design.md`). |
 | `150`–`158` | `pipeline_analyzer` cicd-debug per-script failure classes. `150` `tool_missing`, `151` `provider_unavailable`, `152` `auth`, `153` `not_found`, `154` `permission`, `155` `network`, `156` `bad_args`, `157` `api_unexpected`, `158` `log_truncated`. Reserved by `.trellis/tasks/05-26-cicd-debug-pipeline-analyzer/prd.md` D3 after 2026-05-31 namespace correction; implementation/tests must migrate from the stale `30`-`38` draft before shipping. |
 | `160`–`168` | `runner_check` cicd-debug per-script failure classes. `160` `tool_missing`, `161` `provider_unavailable`, `162` `auth`, `163` `not_found`, `164` `permission`, `165` `network`, `166` `bad_args`, `167` `api_unexpected`, `168` `pagination_overflow`. Reserved by `.trellis/tasks/05-26-cicd-debug-runner-check/prd.md` D3. |
 | `170`–`179` | `secret_scope_audit` cicd-debug per-script failure classes. `170` `tool_missing`, `171` `provider_unavailable`, `172` `auth`, `173` `not_found`, `174` `permission`, `175` `network`, `176` `bad_args`, `177` `api_unexpected`, `178` `workflow_yaml_parse_failed`, `179` `workflow_dir_missing` (soft class; script exits `0` when the audit completed with no workflow graph). Reserved by `.trellis/tasks/05-26-cicd-debug-secret-scope-audit/prd.md` D3. |
@@ -68,9 +69,9 @@ constant in `plugins/k8s-debug/skills/k8s-debug/scripts/check_namespace.py`
 line 26, and the payload it returns at lines 41-47. When a scaffold script
 is fleshed out, keep `0`/`1`; replace `2` only when implementing the
 behavior. Do not invent new exit codes beyond the ones listed above
-(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`88` / `90`–`109` / `150`–`179` / `180`–`189` / `124`) — new codes
+(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`88` / `90`–`119` / `150`–`179` / `180`–`189` / `124`) — new codes
 require a spec update plus a referenced ADR (or task PRD) explaining the
-semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`109`, `150`–`179`, `180`–`189`) are namespaced to
+semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`119`, `150`–`179`, `180`–`189`) are namespaced to
 their script and not reusable by other scripts without a fresh range
 allocation here.
 
@@ -78,7 +79,7 @@ Scripts that emit `4`–`9` MUST also set `data.failure_class` to the
 matching string (`not_found` / `already_exists` / `config_missing` /
 `parse_error` / `permission` / `transfer_verify_failed`) so callers can
 branch on the class without re-parsing `stderr`. The same rule applies
-to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`109`, `150`–`179`, `180`–`189`): every numeric exit code in
+to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`119`, `150`–`179`, `180`–`189`): every numeric exit code in
 those ranges has a paired `data.failure_class` string defined in the
 script's source; callers MUST branch on the class, not the number.
 
@@ -271,6 +272,95 @@ This mixes a cluster-health-local API-server failure class with the shared
 
 `100` distinguishes "kubectl was invoked but the Kubernetes API server is not
 reachable" from SSH transport failures that remain `80 host_unreachable`.
+
+## Scenario: k8s-debug `helm_status` v1.0
+
+### 1. Scope / Trigger
+
+- Trigger: `helm_status.py` is the Helm release diagnostic entrypoint for
+  per-release health and cluster-wide pending release scans.
+- Scope: CLI signature, JSON `data` payload, Helm 3 requirement, associated
+  hook job scoring, and helm-status-local failure classes `110`-`114`.
+
+### 2. Signatures
+
+```bash
+helm_status.py <host> <namespace> <release> [--json]
+helm_status.py <host> --list-pending [--json]
+```
+
+- `host` is `local` or an ssh-core alias. Local mode runs `helm` directly;
+  remote mode shells out through `ssh-core/ssh_execute.py --json`.
+- `--list-pending` is mutually exclusive with `<namespace> <release>`.
+
+### 3. Contracts
+
+- Success envelope: `success=true`, `exit_code=0`, and
+  `data.failure_class=null`.
+- Per-release data contains `status`, `history`, `associated_jobs`,
+  `stuck_resources`, `stuck_resources_deferred`, `summary`,
+  `recommended_next_step`, `findings`, `partial_failures`, and `raw`.
+- Pending scan data contains `pending_releases`, `summary`, `findings`, and
+  `raw`.
+- `associated_jobs.stuck` means an active hook job is older than five minutes
+  and has not succeeded. `associated_jobs.failed` means `status.failed > 0` or
+  Job condition `Failed=True`.
+- v1.0 does not diff Helm manifests against live resources. It returns
+  `stuck_resources=[]` and `stuck_resources_deferred=true`.
+
+### 4. Validation & Error Matrix
+
+| Condition | `failure_class` | Exit |
+|-----------|-----------------|------|
+| Missing local or remote `helm` binary | `helm_missing` | `110` |
+| Requested release is absent | `release_not_found` | `111` |
+| Helm major version is below 3 | `helm_version_unsupported` | `112` |
+| Release history cannot be collected or parsed | `history_truncated` | `0` soft warning |
+| Future namespace-partial pending scan | `pending_scan_partial` | `0` soft warning |
+| Hook Job collection RBAC/API failure | kubectl pass-through class | `0` soft partial failure |
+| SSH transport failure in remote Helm route | `host_unreachable` | `80` |
+| Remote SSH auth failure in Helm route | `forbidden` | `85` |
+| Helm subprocess timeout | `timeout` | `124` |
+| Unexpected script bug | `null` | `1` |
+
+### 5. Good/Base/Bad Cases
+
+- Good: deployed release with no stuck jobs -> `summary="ok"`,
+  `recommended_next_step="no action"`, exit `0`.
+- Base: pending-upgrade release or stuck hook job -> `summary="crit"`, exit
+  `0`, findings point to the Helm stuck pending section.
+- Bad: requested release is absent -> exit `111`, `success=false`,
+  `data.failure_class="release_not_found"`.
+
+### 6. Tests Required
+
+- Unit tests cover all eight Helm statuses, status/history/pending JSON schema
+  variants, per-release mode, list-pending mode, hook job stuck/failed rules,
+  110/111/112, soft 113, kubectl soft partial failure, sorting, and envelope
+  rendering.
+- Live k8s tests are opt-in under `live_k8s` and must be skip-safe when helm,
+  kind, kubectl, Docker, or chart registry access are unavailable.
+- Default `pytest tests/` must remain green with environment-dependent live
+  cases skipped rather than failed.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```json
+{"success": false, "exit_code": 1, "data": {"failure_class": "helm_failed"}}
+```
+
+This loses the distinction between an absent release and an implementation or
+provider failure.
+
+#### Correct
+
+```json
+{"success": false, "exit_code": 111, "data": {"failure_class": "release_not_found"}}
+```
+
+Callers can branch on `release_not_found` without parsing Helm's human stderr.
 
 ## Scenario: cicd-debug `pipeline_analyzer` v1.0
 
