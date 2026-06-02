@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 14
+- **Total Sessions**: 15
 - **Last Active**: 2026-06-02
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~470 | Active |
+| `journal-1.md` | ~501 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 15 | 2026-06-02 | Close devops-skills rollout | - | `main` |
 | 14 | 2026-06-02 | Ship iac-state module_validate | `0f416be` | `main` |
 | 13 | 2026-06-02 | Ship iac-state drift_check | `0534087` | `main` |
 | 12 | 2026-05-31 | Ship cicd runner_check v1.0 | `6c3fb31` | `main` |
