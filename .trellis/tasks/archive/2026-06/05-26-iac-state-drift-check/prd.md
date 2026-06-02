@@ -170,3 +170,15 @@ replace | destroy`，按 resource_type 评 severity，每条带 `hint` 指向
 - terraform JSON schema 跨版本兼容是已知坑，类似 helm_status 的 issue。
   design 阶段要明确 v1.0 最低支持版本，schema 不兼容时 132 报错 + hint
   提示用户升级，而不是默默错位解析。
+- 2026-06-02 **drift_check v1.0 shipped** — commit `0534087`. Script + plugin-local cleanup
+  helper + 36 unit tests + 3 skip-safe live_terraform integration tests.
+  `uv run pytest tests/test_drift_check_unit.py -q` PASS; integration tests
+  skip in this environment because neither `tofu` nor `terraform` is installed.
+  `uv run ruff check plugins/iac-state/ tests/test_drift_check_unit.py
+  tests/test_drift_check_integration.py` PASS; mypy on drift_check +
+  lib/terraform PASS; `uv run pytest tests/ -q` PASS with environment skips
+  (Docker daemon unavailable, pai unreachable, CICD env missing, Terraform
+  missing). Key decisions: plan uses `-lock-timeout=1s` to surface `lock_held`
+  instead of bypassing locks; crit destroy/replace drift exits 1 with
+  `failure_class=null`; retained raw plan JSON is capped at 10 MB while parsing
+  uses the full stdout.
