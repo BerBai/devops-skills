@@ -435,3 +435,36 @@ Implemented drift_check v1.0 with Terraform plan/show parsing, drift severity cl
 ### Next Steps
 
 - None - task complete
+
+
+## Session 14: Ship iac-state module_validate
+
+**Date**: 2026-06-02
+**Task**: Ship iac-state module_validate
+**Branch**: `main`
+
+### Summary
+
+Implemented module_validate v1.0 with python-hcl2 static HCL parsing, fmt/validate CLI checks, seven module audit categories, registry target-version diff, 140-149 error contract, dependency lock sync, docs/spec updates, and tests. Validation: module_validate unit 44 PASS; live_terraform integration skip-safe in this environment because neither tofu nor terraform is installed; ruff/mypy/help PASS; default tests PASS with environment skips; pytest -m live_terraform PASS/SKIP.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0f416be` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
