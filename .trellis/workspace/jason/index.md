@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 17
+- **Total Sessions**: 18
 - **Last Active**: 2026-06-02
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~567 | Active |
+| `journal-1.md` | ~601 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 18 | 2026-06-02 | ssh-core ControlMaster V1.1 | `9f8c6e2`, `6e85275` | `main` |
 | 17 | 2026-06-02 | Mark V1 complete and add V1.1 roadmap | `67f5a6b` | `main` |
 | 16 | 2026-06-02 | Add ssh-guarded sandbox escape regression coverage | `6d77d5c` | `main` |
 | 15 | 2026-06-02 | Close devops-skills rollout | - | `main` |

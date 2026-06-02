@@ -19,7 +19,8 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "06-02-refresh-v1-status-docs-v11-roadmap"
+    "06-02-refresh-v1-status-docs-v11-roadmap",
+    "06-02-ssh-core-connection-reuse-v11"
   ],
   "parent": null,
   "relatedFiles": [],

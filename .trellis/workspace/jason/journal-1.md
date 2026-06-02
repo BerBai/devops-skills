@@ -565,3 +565,37 @@ Audited all devops-skills plugin V1 CLI targets, confirmed V1 completion under t
 ### Next Steps
 
 - None - task complete
+
+
+## Session 18: ssh-core ControlMaster V1.1
+
+**Date**: 2026-06-02
+**Task**: ssh-core ControlMaster V1.1
+**Branch**: `main`
+
+### Summary
+
+Implemented opt-in OpenSSH ControlMaster reuse for ssh_execute, covered default argv compatibility and ControlPath hashing with unit tests, updated ssh-core docs and ADR/task artifacts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9f8c6e2` | (see git log) |
+| `6e85275` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
