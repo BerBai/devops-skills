@@ -10,11 +10,14 @@ caller (Claude Code)
    ▼
 ssh_execute.py <alias> "<cmd>"
    │
-   └─ native ssh -o BatchMode=yes -o ConnectTimeout=N (key auth only in v1.0)
-      (ControlMaster / ProxyJump / ForwardAgent are inherited from ~/.ssh/config)
+   └─ native ssh -o BatchMode=yes -o ConnectTimeout=N
+      (ProxyJump / ForwardAgent are inherited from ~/.ssh/config;
+       add --control-master auto to opt into OpenSSH ControlMaster reuse)
 ```
 
-Password / keyboard-interactive auth and connection-reuse daemon are **v1.1** (ADR-001 D1 + A2). For first-touch bootstrap on a password-only host, use `deploy_pubkey.py <alias>` from an interactive terminal.
+`ssh_execute.py --control-master auto` is the V1.1 first slice for connection reuse. It appends OpenSSH `ControlMaster=auto`, `ControlPersist=<seconds>`, and a hashed `ControlPath` under a private temp directory. The default remains off, so V1 argv stays unchanged unless the caller asks for reuse.
+
+Password / keyboard-interactive auth and a custom Python connection-reuse daemon remain deferred (ADR-001 D1 + A2). For first-touch bootstrap on a password-only host, use `deploy_pubkey.py <alias>` from an interactive terminal.
 
 **Output contract** (all scripts share this):
 ```json
@@ -70,7 +73,7 @@ ssh_tunnel.py status prod-db        # this alias's forwards
 ssh_tunnel.py stop prod-db --port 13306
 ```
 
-**v1.0 status**: `--idle-timeout` is accepted (surface-stable) but is a no-op; the tunnel runs until you call `stop` or kill its PID. The script emits `data.flag_deferred=["--idle-timeout"]` + a stderr warning so callers can notice. v1.1 will reintroduce idle exit, most likely via `ControlMaster` integration alongside the v1.1 `ssh_daemon` revival. Windows support is also v1.1 (the `start_new_session=True` detach is POSIX-only; Windows starts refuse with `failure_class=posix_only`, exit 30). Until then, callers should clean up explicitly. See `.trellis/tasks/05-24-ssh-core-ssh-tunnel/prd.md` for the full deferral rationale.
+**v1.0 status**: `--idle-timeout` is accepted (surface-stable) but is a no-op; the tunnel runs until you call `stop` or kill its PID. The script emits `data.flag_deferred=["--idle-timeout"]` + a stderr warning so callers can notice. v1.1 will reintroduce idle exit later, likely by reusing the ControlMaster direction now started in `ssh_execute.py`. Windows support is also v1.1 (the `start_new_session=True` detach is POSIX-only; Windows starts refuse with `failure_class=posix_only`, exit 30). Until then, callers should clean up explicitly. See `.trellis/tasks/05-24-ssh-core-ssh-tunnel/prd.md` for the full deferral rationale.
 
 ## 5. Manage `~/.ssh/config`
 
@@ -97,7 +100,7 @@ Passwords in comments are opt-in and discouraged. The preferred flow is `deploy_
 
 ## 7. Failure modes worth knowing
 
-- **Daemon stuck.** ~~State file present, port unresponsive.~~ N/A in v1.0 — no daemon ships (ADR-001 D1). Recovery instructions will reappear when v1.1 lands the daemon (or ControlMaster equivalent).
+- **Daemon stuck.** There is still no custom Python daemon. For `ssh_execute.py --control-master auto`, OpenSSH owns the master socket and expires it through `ControlPersist`; rerun without `--control-master auto` to bypass reuse while debugging.
 - **Host key changed.** `StrictHostKeyChecking` fails. Don't auto-accept. Ask the user; if confirmed, the user (not us) edits `~/.ssh/known_hosts`.
 - **MSYS path mangling.** Symptom: `/srv/x` becomes `C:/Program Files/Git/srv/x`. We set `MSYS_NO_PATHCONV=1` on every spawn. If you ever see a Windows drive prefix in a remote path argument, the wrapper has a bug.
 - **`ProxyJump` chain breaks.** Usually a key auth issue on the bastion. The wrapper retries once, then surfaces the chain it tried so the user can debug.

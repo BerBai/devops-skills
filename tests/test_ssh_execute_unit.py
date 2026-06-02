@@ -35,6 +35,9 @@ EXIT_SSH_CLIENT_FAILURE = 255
 # Default --timeout used by ssh_execute.main(); checked in dispatch tests.
 TIMEOUT_DEFAULT = 120
 TIMEOUT_BUDGET = 3.0
+CONTROL_PERSIST_DEFAULT = 600
+CONTROL_PATH_DIGEST_LEN = 24
+CONTROL_DIR_MODE = 0o700
 
 
 # -----------------------------------------------------------------------------
@@ -203,6 +206,74 @@ def test_local_route_timeout_returns_124(monkeypatch: pytest.MonkeyPatch) -> Non
 # -----------------------------------------------------------------------------
 # remote route — envelope shape (ADR-001 D3)
 # -----------------------------------------------------------------------------
+
+
+def test_build_remote_argv_default_is_v1_unchanged() -> None:
+    """Default remote argv must stay byte-for-byte compatible with v1.0."""
+    assert ssh_execute._build_remote_argv("pai", "true", 8, None) == [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=8",
+        "pai",
+        "true",
+    ]
+    assert ssh_execute._build_remote_argv("pai", "true", 8, "/tmp/poc-ssh-config") == [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=8",
+        "-F",
+        "/tmp/poc-ssh-config",
+        "pai",
+        "true",
+    ]
+
+
+def test_build_remote_argv_control_master_auto_adds_options(tmp_path: Path) -> None:
+    argv = ssh_execute._build_remote_argv(
+        "prod-web-01",
+        "uptime",
+        5,
+        "/tmp/poc-ssh-config",
+        control_master="auto",
+        control_persist=42,
+        control_path_dir=str(tmp_path),
+    )
+
+    assert argv[:5] == ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+    assert argv[-2:] == ["prod-web-01", "uptime"]
+    assert "ControlMaster=auto" in argv
+    assert "ControlPersist=42" in argv
+    control_path_opt = next(arg for arg in argv if arg.startswith("ControlPath="))
+    control_path = Path(control_path_opt.removeprefix("ControlPath="))
+    assert control_path.parent == tmp_path
+    assert len(control_path.name) == CONTROL_PATH_DIGEST_LEN
+    int(control_path.name, 16)
+    assert tmp_path.stat().st_mode & 0o777 == CONTROL_DIR_MODE
+
+
+def test_control_path_is_deterministic_and_hash_only(tmp_path: Path) -> None:
+    control_dir = tmp_path / "cm"
+    first = ssh_execute._control_path(
+        "prod-web-01.internal", "/tmp/config-for-prod-web-01", str(control_dir)
+    )
+    second = ssh_execute._control_path(
+        "prod-web-01.internal", "/tmp/config-for-prod-web-01", str(control_dir)
+    )
+    other_config = ssh_execute._control_path(
+        "prod-web-01.internal", "/tmp/other-config-for-prod-web-01", str(control_dir)
+    )
+
+    assert first == second
+    assert first != other_config
+    basename = Path(first).name
+    assert len(basename) == CONTROL_PATH_DIGEST_LEN
+    assert "prod" not in basename
+    assert "config" not in basename
+    int(basename, 16)
 
 
 def test_remote_route_envelope_shape(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -402,6 +473,9 @@ def test_help_does_not_crash(capsys: pytest.CaptureFixture[str]) -> None:
     assert "command" in captured.out
     assert "--timeout" in captured.out
     assert "--ssh-config" in captured.out
+    assert "--control-master" in captured.out
+    assert "--control-persist" in captured.out
+    assert "--control-path-dir" in captured.out
     assert "--json" in captured.out
 
 
@@ -441,13 +515,26 @@ def test_main_remote_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     """main(['<host>', ...]) routes through _run_remote with all flags."""
     called: dict = {}
 
-    def fake_run_remote(host, command, timeout, connect_timeout, ssh_config):
+    def fake_run_remote(
+        host,
+        command,
+        timeout,
+        connect_timeout,
+        ssh_config,
+        *,
+        control_master,
+        control_persist,
+        control_path_dir,
+    ):
         called.update(
             host=host,
             command=command,
             timeout=timeout,
             connect_timeout=connect_timeout,
             ssh_config=ssh_config,
+            control_master=control_master,
+            control_persist=control_persist,
+            control_path_dir=control_path_dir,
         )
         return {"success": True, "exit_code": 0, "stdout": "", "stderr": "", "data": {}}
 
@@ -464,6 +551,9 @@ def test_main_remote_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
             "--timeout", "30",
             "--connect-timeout", "5",
             "--ssh-config", "/tmp/x",
+            "--control-master", "auto",
+            "--control-persist", "30",
+            "--control-path-dir", "/tmp/cm",
             "--json",
         ]
     )
@@ -474,4 +564,55 @@ def test_main_remote_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
         "timeout": 30,
         "connect_timeout": 5,
         "ssh_config": "/tmp/x",
+        "control_master": "auto",
+        "control_persist": 30,
+        "control_path_dir": "/tmp/cm",
+    }
+
+
+def test_main_remote_dispatch_control_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default parser values preserve the opt-out remote route."""
+    called: dict = {}
+
+    def fake_run_remote(
+        host,
+        command,
+        timeout,
+        connect_timeout,
+        ssh_config,
+        *,
+        control_master,
+        control_persist,
+        control_path_dir,
+    ):
+        called.update(
+            host=host,
+            command=command,
+            timeout=timeout,
+            connect_timeout=connect_timeout,
+            ssh_config=ssh_config,
+            control_master=control_master,
+            control_persist=control_persist,
+            control_path_dir=control_path_dir,
+        )
+        return {"success": True, "exit_code": 0, "stdout": "", "stderr": "", "data": {}}
+
+    monkeypatch.setattr(ssh_execute, "_run_remote", fake_run_remote)
+    monkeypatch.setattr(
+        ssh_execute,
+        "_run_local",
+        lambda *a, **kw: pytest.fail("_run_local must not be called for non-local host"),
+    )
+    rc = ssh_execute.main(["pai", "true", "--json"])
+
+    assert rc == EXIT_OK
+    assert called == {
+        "host": "pai",
+        "command": "true",
+        "timeout": TIMEOUT_DEFAULT,
+        "connect_timeout": 8,
+        "ssh_config": None,
+        "control_master": "off",
+        "control_persist": CONTROL_PERSIST_DEFAULT,
+        "control_path_dir": None,
     }

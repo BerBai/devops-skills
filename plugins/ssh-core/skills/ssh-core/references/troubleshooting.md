@@ -23,7 +23,15 @@ Do **not** auto-clear `~/.ssh/known_hosts`. Show the user the offending line num
 
 ## Daemon won't start
 
-**v1.0: there is no daemon.** `ssh_execute` is BatchMode-only and spawns one `ssh` subprocess per call (ADR-001 D1). The `ssh_daemon.py` stub returns `unimplemented()` and is deferred to v1.1 (likely OpenSSH ControlMaster rather than a custom Python daemon). If a future v1.1 ships the daemon, this section will document recovery for zombie daemons (state file present, port unresponsive) via `ssh_daemon.py stop <alias>`.
+There is still no custom Python daemon. `ssh_daemon.py` remains a stub and returns `unimplemented()`.
+
+For repeated `ssh_execute.py` calls, V1.1 starts with OpenSSH ControlMaster instead:
+
+```bash
+ssh_execute.py <alias> "uptime" --control-master auto
+```
+
+OpenSSH owns the master socket and expires it through `ControlPersist`. To bypass a suspected reuse issue, rerun the command without `--control-master auto`; the default path is still a fresh `ssh` subprocess per call.
 
 ## Tunnel claims it's up but `nc localhost <port>` refuses
 
@@ -77,7 +85,7 @@ Host <alias>
 
 ## Daemon log location
 
-**v1.0: there is no daemon, so no daemon log.** Deferred to v1.1 (see "Daemon won't start" above). When the daemon ships, logs will land at `$TMPDIR/ssh_daemon/<md5(alias)>.log` (1 MB rotating).
+There is no custom daemon log because no custom daemon ships. OpenSSH ControlMaster does not write a repo-managed log; inspect the command's captured `stderr` / `data.raw_stderr`, or rerun without `--control-master auto` to compare behavior.
 
 ## `deploy_pubkey` quirks
 

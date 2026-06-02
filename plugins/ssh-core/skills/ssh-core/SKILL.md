@@ -58,7 +58,7 @@ Is the target a remote host?
 ## Workflow (every operation)
 
 1. **Discover.** If the user names a host you haven't seen, run `ssh_config_manager.py list` to confirm it exists in `~/.ssh/config`. If it doesn't, ask the user — do not invent connection details.
-2. **Choose transport.** v1.0: key auth only via native `ssh` (BatchMode + ConnectTimeout; gets ControlMaster, ProxyJump, ForwardAgent for free). Password / keyboard-interactive auth is v1.1 (see ## Daemon model below). For first-touch bootstrap on a password-only host, use `deploy_pubkey.py <alias>` from an interactive terminal.
+2. **Choose transport.** Key auth uses native `ssh` with `BatchMode=yes` and `ConnectTimeout`. `ssh_execute.py` can opt into OpenSSH ControlMaster reuse with `--control-master auto`; ProxyJump and ForwardAgent still come from `~/.ssh/config`. Password / keyboard-interactive auth remains v1.1 deferred (see ## Daemon model below). For first-touch bootstrap on a password-only host, use `deploy_pubkey.py <alias>` from an interactive terminal.
 3. **Execute.** Pass the alias and the command. Read the JSON result. If `success` is false, read `stderr` before retrying.
 4. **Report.** Show the user the command, the host, the exit code, and the last few lines of stdout/stderr. Never show keys, passwords, or `IdentityFile` paths.
 
@@ -69,6 +69,9 @@ See `references/workflows.md` for the long form.
 ```bash
 # Run a command (key auth only in v1.0; BatchMode + ConnectTimeout)
 python scripts/ssh_execute.py prod-web-01 "systemctl status nginx" --json
+
+# Opt into OpenSSH ControlMaster reuse for repeated commands to the same alias
+python scripts/ssh_execute.py prod-web-01 "uptime" --control-master auto --json
 
 # Upload with resume
 python scripts/ssh_upload.py prod-web-01 ./release.tar.gz /srv/releases/ --resume
@@ -113,9 +116,11 @@ No proprietary database. No lock-in. `ssh prod-web-01` from any terminal still w
 
 ## Daemon model
 
-**v1.0: no daemon.** Each `ssh_execute` call is a fresh `ssh` subprocess (ADR-001 D1) with `BatchMode=yes` — key auth only. No paramiko, no custom socket protocol, no connection pool. Per-call cost is one SSH handshake (~200-300 ms).
+**Default: no daemon.** Each `ssh_execute` call is a normal `ssh` subprocess (ADR-001 D1) with `BatchMode=yes` — key auth only. No paramiko and no custom socket protocol. With no extra flags, per-call cost is one SSH handshake (~200-300 ms).
 
-Connection pooling and password / keyboard-interactive auth are planned for v1.1, likely via OpenSSH `ControlMaster` rather than a custom Python daemon (ADR-001 A2). The `ssh_daemon.py` stub in the scripts directory retains its v0.2 design intent in the source docstring for the v1.1 revival task.
+**V1.1 first slice:** `ssh_execute.py --control-master auto` enables OpenSSH ControlMaster reuse additively. It writes a short hashed `ControlPath` under a private temp directory and passes `ControlPersist` to native `ssh`. Defaults stay off for compatibility.
+
+Password / keyboard-interactive auth and a custom Python daemon remain deferred. The `ssh_daemon.py` stub in the scripts directory retains its v0.2 design intent in the source docstring until there is evidence ControlMaster is insufficient for a concrete workload.
 
 ## Safety baseline
 
