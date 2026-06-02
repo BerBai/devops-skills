@@ -499,3 +499,36 @@ Archived the completed diagnose_pod child, closed and archived the log-aggregato
 ### Next Steps
 
 - None - task complete
+
+
+## Session 16: Add ssh-guarded sandbox escape regression coverage
+
+**Date**: 2026-06-02
+**Task**: Add ssh-guarded sandbox escape regression coverage
+**Branch**: `main`
+
+### Summary
+
+Added local pytest regression coverage for documented ssh-guarded workdir sandbox escape attempts, including traversal, Windows-style path rejection, null-byte error assertions, and request-artifact traversal refusal. Validation: targeted ssh-guarded sandbox/request tests passed, full pytest passed with environment skips, touched-file ruff passed; full ruff and mypy still have unrelated pre-existing Trellis/Codex and duplicate-module failures.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6d77d5c` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
