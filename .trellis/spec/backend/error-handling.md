@@ -54,7 +54,7 @@ The scaffold-era convention, used by every v0.2 stub:
 | `60`–`69` | `exec_detached` ssh-guarded per-script failure classes. `60` `request_not_executable`, `61` `nohup_dispatch_failed`, `62` `pid_capture_failed`, `63` `remote_log_unreachable`, `64` `job_vanished`, `65` `job_state_corrupt`. Reserved by `.trellis/tasks/05-25-ssh-guarded-exec-detached/prd.md` R8. |
 | `70`–`74` | `redact_check` ssh-guarded per-script failure classes. `70` `catalog_load_failed`, `71` `catalog_schema_invalid`, `72` `regex_compile_failed`. Reserved by archived request-pipeline design §1 C5. |
 | `75`–`79` | `scan_software` ssh-guarded per-script failure classes. `75` `catalog_load_failed`, `76` `cache_write_failed`, `77` `cache_corrupt`, `78` `ssh_batch_failed`, `79` `tool_probe_corrupted`. Reserved by archived scan_software task PRD D8. |
-| `80`–`87` | `diagnose_pod` and sibling k8s-debug script failure classes (namespace `80`–`89`; this child uses `80`–`87`). `80` `host_unreachable` (ssh-core remote unreachable, or local kubectl API server refused / DNS-missing), `81` `kubectl_missing` (binary absent or rc 127), `82` `kubeconfig_missing` (KUBECONFIG unset or file missing), `83` `pod_not_found`, `84` `namespace_not_found`, `85` `forbidden` (RBAC denial, or upstream ssh auth failure — same source in this context), `86` `api_timeout` (kubectl's own `--request-timeout=30s` trip; distinct from Python-side `124`), `87` `metrics_unavailable` (soft failure — exit `0` with a `warn` finding, used for `kubectl top` against a cluster without metrics-server). Introduced by `diagnose_pod` v1.0 (see `.trellis/tasks/05-26-k8s-debug-diagnose-pod/prd.md` R6 + `design.md` D4). ADR follow-up TBD. |
+| `80`–`88` | k8s-debug script failure classes (namespace `80`–`89`). `80` `host_unreachable` (ssh-core remote unreachable, or local kubectl API server refused / DNS-missing), `81` `kubectl_missing` (binary absent or rc 127), `82` `kubeconfig_missing` (KUBECONFIG unset or file missing), `83` `pod_not_found`, `84` `namespace_not_found`, `85` `forbidden` (RBAC denial, or upstream ssh auth failure — same source in this context), `86` `api_timeout` (kubectl's own `--request-timeout=30s` trip; distinct from Python-side `124`), `87` `metrics_unavailable` (soft failure — exit `0` with a `warn` finding, used for `kubectl top` against a cluster without metrics-server), `88` `partial_collection` (check_namespace collected too few namespace domains to produce a reliable health snapshot). `80`–`87` introduced by `diagnose_pod` v1.0 (see `.trellis/tasks/05-26-k8s-debug-diagnose-pod/prd.md` R6 + `design.md` D4); `88` introduced by `check_namespace` v1.0 after avoiding the stale `90`–`99` planning conflict with log-aggregator `correlate`. ADR follow-up TBD. |
 | `90`–`99` | `correlate` log-aggregator per-script failure classes. `90` `anchor_not_found`, `91` `window_invalid`, `92` `pair_unmatched`; `93`–`99` reserved. Introduced by `correlate` v1.0 after resolving the stale `50`–`59` planning conflict (see `.trellis/tasks/05-25-log-aggregator-correlate/prd.md` R8). |
 | `150`–`158` | `pipeline_analyzer` cicd-debug per-script failure classes. `150` `tool_missing`, `151` `provider_unavailable`, `152` `auth`, `153` `not_found`, `154` `permission`, `155` `network`, `156` `bad_args`, `157` `api_unexpected`, `158` `log_truncated`. Reserved by `.trellis/tasks/05-26-cicd-debug-pipeline-analyzer/prd.md` D3 after 2026-05-31 namespace correction; implementation/tests must migrate from the stale `30`-`38` draft before shipping. |
 | `160`–`168` | `runner_check` cicd-debug per-script failure classes. `160` `tool_missing`, `161` `provider_unavailable`, `162` `auth`, `163` `not_found`, `164` `permission`, `165` `network`, `166` `bad_args`, `167` `api_unexpected`, `168` `pagination_overflow`. Reserved by `.trellis/tasks/05-26-cicd-debug-runner-check/prd.md` D3. |
@@ -67,9 +67,9 @@ constant in `plugins/k8s-debug/skills/k8s-debug/scripts/check_namespace.py`
 line 26, and the payload it returns at lines 41-47. When a scaffold script
 is fleshed out, keep `0`/`1`; replace `2` only when implementing the
 behavior. Do not invent new exit codes beyond the ones listed above
-(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`87` / `90`–`99` / `150`–`179` / `180`–`189` / `124`) — new codes
+(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`88` / `90`–`99` / `150`–`179` / `180`–`189` / `124`) — new codes
 require a spec update plus a referenced ADR (or task PRD) explaining the
-semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`87`, `90`–`99`, `150`–`179`, `180`–`189`) are namespaced to
+semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`99`, `150`–`179`, `180`–`189`) are namespaced to
 their script and not reusable by other scripts without a fresh range
 allocation here.
 
@@ -77,9 +77,106 @@ Scripts that emit `4`–`9` MUST also set `data.failure_class` to the
 matching string (`not_found` / `already_exists` / `config_missing` /
 `parse_error` / `permission` / `transfer_verify_failed`) so callers can
 branch on the class without re-parsing `stderr`. The same rule applies
-to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`87`, `90`–`99`, `150`–`179`, `180`–`189`): every numeric exit code in
+to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`99`, `150`–`179`, `180`–`189`): every numeric exit code in
 those ranges has a paired `data.failure_class` string defined in the
 script's source; callers MUST branch on the class, not the number.
+
+## Scenario: k8s-debug `check_namespace` v1.0
+
+### 1. Scope / Trigger
+
+- Trigger: `check_namespace.py` is the namespace-level k8s-debug entrypoint.
+  It probes a namespace, collects five health domains, scores each domain, and
+  returns top findings without mutating the cluster.
+- Scope: CLI signature, JSON `data` payload, partial collection behavior, and
+  k8s-debug-local failure code `88`.
+
+### 2. Signatures
+
+```bash
+check_namespace.py <host> <namespace> [--since 60] [--json]
+```
+
+- `host` is `local` or an ssh-core alias accepted by `lib.kubectl.run_kubectl`.
+- `namespace` is passed to `kubectl -n <namespace>` after an existence probe
+  with `kubectl get ns <namespace>`.
+- `--since` is minutes for Event recency intent. Values below `1` normalize to
+  `1`; values above `1440` are accepted but add a warning in `data.warnings`.
+
+### 3. Contracts
+
+- Success envelope: `success=true`, `exit_code=0`, and
+  `data.failure_class=null`.
+- `data.summary` must contain exactly the user-facing domains
+  `pods`, `events`, `deployments`, `services`, and `pvcs`, each scored
+  `ok | warn | crit`.
+- `data.findings` contains the stable top 3 findings sorted by severity, domain
+  order, kind, name, then reason. `data.all_findings_count` records the full
+  untruncated finding count.
+- `data.raw` keeps raw kubectl JSON stdout per collected raw domain, including
+  `endpoints` even though endpoint scoring rolls up under `services`.
+- 1-3 failed collection domains are a completed degraded snapshot:
+  `success=true`, `exit_code=0`, failed user-facing domains score `warn`, and
+  `data.partial_failures[]` records domain, `failure_class`, exit code, and
+  stderr.
+
+### 4. Validation & Error Matrix
+
+| Condition | `failure_class` | Exit |
+|-----------|-----------------|------|
+| Host cannot run kubectl locally or remotely | `host_unreachable` | `80` |
+| Missing kubectl binary | `kubectl_missing` | `81` |
+| Missing kubeconfig / kube context access | `kubeconfig_missing` | `82` |
+| Namespace does not exist | `namespace_not_found` | `84` |
+| RBAC denial | `forbidden` | `85` |
+| kubectl API timeout | `api_timeout` | `86` |
+| 4+ collection domains fail after namespace probe succeeds | `partial_collection` | `88` |
+| Unexpected script bug | `null` | `1` |
+
+`80`-`86` are pass-through `KubectlError` classes from `lib.kubectl`;
+`check_namespace.py` owns only `88`.
+
+### 5. Good/Base/Bad Cases
+
+- Good: healthy namespace with no warnings -> all summary domains `ok`, no
+  findings, exit `0`.
+- Base: one or more unhealthy objects but collection succeeds -> exit `0`,
+  `success=true`, summary domains mark `warn` or `crit`, and findings explain
+  the health issue.
+- Bad: namespace probe succeeds but 4+ collection domains fail -> exit `88`,
+  `success=false`, `data.failure_class="partial_collection"`.
+
+### 6. Tests Required
+
+- Unit tests cover each scorer's ok/warn/crit behavior, stable top-3 sorting,
+  namespace-not-found pass-through, soft partial collection, hard `88`, and
+  JSON/human envelope shape.
+- Live k8s tests are opt-in under `live_k8s` and must be skip-safe when kind,
+  kubectl, or Docker are unavailable. They should cover both a healthy
+  namespace and a degraded fixture namespace when the local kind fixture can
+  run.
+- Default `pytest tests/` must remain green with environment-dependent live
+  cases skipped rather than failed.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```json
+{"success": false, "exit_code": 91, "data": {"failure_class": "partial_collection"}}
+```
+
+This uses the stale `90`-`99` planning namespace, which is reserved for
+log-aggregator `correlate`.
+
+#### Correct
+
+```json
+{"success": false, "exit_code": 88, "data": {"failure_class": "partial_collection"}}
+```
+
+`88` stays inside the k8s-debug `80`-`89` namespace and is the only
+`check_namespace.py`-local failure code.
 
 ## Scenario: cicd-debug `pipeline_analyzer` v1.0
 
