@@ -80,16 +80,17 @@ Unit tests (always-on, added v0.3.0):
   refusal, OSError spawn, KeyboardInterrupt -> exit 130). ssh subprocess is
   fully faked via a `_FakePopen` helper; state IO uses `tmp_path` via a
   monkeypatched `tempfile.gettempdir`.
-- `test_ssh_guarded_lib_*_unit.py` — 82 tests covering the 4 shared libs
+- `test_ssh_guarded_lib_*_unit.py` — 87 tests covering the 4 shared libs
   in `plugins/ssh-guarded/.../scripts/lib/`: `sandbox` (project-id
-  resolution, normalize, sandbox + denylist match), `redact` (default
-  catalog + custom catalog + missing/corrupt fallback + per-pattern
-  compile-fail skip), `lockfile` (POSIX `fcntl.flock` + Windows degraded
-  `.lock` sentinel + holder-pid lookup + cleanup-on-exception), and
-  `request_artifact` (schema v1 load/save atomic, `validate` chain
-  with denylist-before-sandbox order, `allocate_request_id` O_EXCL
-  retry, `parse_expires_in` D11 bounds, `compute_risk` per-op D4 table,
-  `save_result` redaction bypass).
+  resolution, normalize, documented sandbox escape attempts, sandbox +
+  denylist match), `redact` (default catalog + custom catalog +
+  missing/corrupt fallback + per-pattern compile-fail skip), `lockfile`
+  (POSIX `fcntl.flock` + Windows degraded `.lock` sentinel +
+  holder-pid lookup + cleanup-on-exception), and `request_artifact`
+  (schema v1 load/save atomic, `validate` chain with
+  denylist-before-sandbox order plus traversal refusal,
+  `allocate_request_id` O_EXCL retry, `parse_expires_in` D11 bounds,
+  `compute_risk` per-op D4 table, `save_result` redaction bypass).
 - `test_ssh_guarded_request_*_unit.py` + `test_ssh_guarded_run_request_unit.py`
   — 87 tests across the 4 drafters and `run_request` executor: argparse
   SUPPRESS pattern (D10), per-script `_EXIT_CODES` taxonomy (30-49 for
@@ -107,6 +108,14 @@ Unit tests (always-on, added v0.3.0):
   (running / exited / vanished / corrupt / log-unreachable), tail-log
   redaction toggles, wait timeout, list offline/probe, and malformed
   ssh_execute child envelopes.
+- `test_scan_software_unit.py` — cached software inventory coverage for
+  the default 37-entry catalog, user catalog merge/override, cache TTL,
+  `--has` / `--name`, corrupt cache handling, SSH batch failures, timeout,
+  NDJSON parse failures, Xilinx directory scans, and grouped human output.
+- `test_redact_check_unit.py` — redaction preview coverage for built-in
+  patterns, catalog override/schema/regex failures, JSON envelope shape,
+  report-only mode, per-line hit details, empty stdin, binary stdin, and
+  catalog regression behavior.
 
 Integration tests (opt-in via `-m live_ssh`):
 
@@ -153,9 +162,14 @@ Integration tests (opt-in via `-m live_ssh`):
   `request_already_executed`. Tests pin `--project-id exec-detached-it`,
   use uuid4-keyed remote workdirs under `~/workspace/exec-detached-it/`,
   and clean up remote workdirs plus local `reports/jobs/<job_id>.json`.
+- `test_scan_software_integration.py` — 2 live_ssh tests against `POC_HOST`
+  covering a full scan/cache write path and `--has` behavior for present,
+  unknown, and user-catalog absent tools. The tests skip when the local
+  machine is not on the documented PoC subnet.
 
-## What's missing (v1.0 roadmap)
+## V1 status
 
-- Sandbox-escape attempts on `ssh-guarded` beyond the two pedagogical
-  refusal cases (the full path rules table in `workdir-sandbox.md`)
-- `scan_software.py` live tests (sibling task)
+The V1 roadmap coverage is complete under the accepted rollout criterion:
+all shipped V1 scripts have local tests, and environment-dependent tests
+remain skip-safe. `ssh_daemon.py` is intentionally deferred to V1.1 per
+ADR-001 rather than treated as a missing V1 implementation.

@@ -2,7 +2,7 @@
 
 English | [简体中文](./CONTRIBUTING.zh-CN.md)
 
-Thanks for considering a contribution. This document describes the structure of the repo and what's needed to take it from scaffold to v1.
+Thanks for considering a contribution. This document describes the structure of the repo, the shipped V1 status, and the current V1.1 roadmap.
 
 ## Repo layout
 
@@ -26,7 +26,7 @@ devops-skills/
 └── tests/                            # pytest suites + manifest linters
 ```
 
-Each plugin is **self-contained** — its `skills/<name>/scripts/` reaches outside the plugin only when explicitly documented. v0.2 diagnosis plugins (`k8s-debug` / `docker-quick` / `log-aggregator` / `iac-state` / `cicd-debug`) depend on `ssh-core` for remote command execution but do not import its Python directly; they shell out to the user-installed `ssh-core` CLIs. `ssh-guarded` plays the same shell-out game.
+Each plugin is **self-contained** — its `skills/<name>/scripts/` reaches outside the plugin only when explicitly documented. Diagnosis plugins (`remote-debug` / `k8s-debug` / `docker-quick` / `log-aggregator` / `iac-state` / `cicd-debug`) depend on `ssh-core` for remote command execution but do not import its Python directly; they shell out to the user-installed `ssh-core` CLIs. `ssh-guarded` plays the same shell-out game.
 
 ## Skill authoring conventions
 
@@ -38,64 +38,38 @@ Each plugin is **self-contained** — its `skills/<name>/scripts/` reaches outsi
 6. **No emoji in skill output** unless the user explicitly asks. Skill markdown should also stay emoji-free.
 7. **Docs examples must show shipped behavior only.** `SKILL.md` and `references/*.md` must not present deferred, not-yet-implemented, or future-version flags as positive examples. If a flag prints a "deferred to vX.Y" notice at runtime, it must not appear in docs without an explicit "not yet implemented" annotation. Same rule for paths or files that don't exist on supported distros (e.g. `/var/log/syslog` on systemd-only Debian 12+ / RHEL 9+ / Ubuntu 22.04+) — annotate or replace.
 
-## Roadmap from scaffold to v1.0
+## V1 status
 
-### `ssh-core`
-- [ ] `ssh_daemon.py` — local TCP daemon, length-prefixed JSON protocol, 60s heartbeat, 30-min idle exit
-- [ ] `ssh_execute.py` — daemon-aware front door; native ssh for key auth, paramiko fallback for password
-- [ ] `ssh_tunnel.py` — port-forward daemon, ports 10000–20000 pool, state files keyed by `md5(alias)`
-- [ ] `ssh_cluster.py` — ThreadPoolExecutor broadcast, tag/environment filters
-- [ ] `ssh_server_transfer.py` — direct/stream/hybrid/auto modes
-- [ ] `ssh_config_manager.py` — CRUD on `~/.ssh/config` with comment-line metadata
-- [ ] `ssh_upload.py` / `ssh_download.py` — per-file SFTP transfer with progress and resume
-- [ ] `deploy_pubkey.py` — idempotent public-key push to remote `authorized_keys`
-- [ ] Windows `MSYS_NO_PATHCONV=1` plumbing in every transfer path
+V1 is complete under the accepted rollout criterion:
 
-### `ssh-guarded`
-- [ ] `request_command.py` / `request_upload.py` / `request_mkdir.py` / `request_delete.py` — generate JSON request artifacts under `reports/requests/`
-- [ ] `run_request.py` — review-then-execute; refuses to run without `--execute`
-- [ ] `exec_detached.py` — nohup + local job manifest, `status` and `tail-log` subcommands
-- [ ] `scan_software.py` — cache `python/cuda/gcc/cmake/kubectl/terraform/docker/...` per host
-- [ ] `redact_check.py` — sanity-check CLI for the redact module, which is default-on for all string output paths
+- All eight plugins have shipped their V1 CLI surfaces.
+- Every shipped script accepts `--help`; every operational script supports the JSON output contract.
+- Shipped scripts have unit coverage, and environment-dependent integration tests are skip-safe.
+- `ssh_daemon.py` is intentionally deferred to V1.1 per ADR-001 A2. V1 uses native OpenSSH subprocess execution through `ssh_execute.py`; no shipped V1 code calls the daemon stub.
 
-### `remote-debug`
-- [ ] `diagnose_host.py` — uptime/load/disk/mem/net/zombie checks, severity scoring
-- [ ] `tail_log.py` — multi-host log tail with prefix
-- [ ] `port_check.py` — TCP reachability matrix
-- [ ] `compare_across_hosts.py` — diff a file across N machines
-- [ ] Symptom → root-cause reference (`common_issues.md`)
-- [ ] SEV1–SEV4 incident response reference
+V1 script inventory:
 
-### `k8s-debug`
-- [ ] `check_namespace.py` — namespace health snapshot (pods/events/deployments/services/PVCs)
-- [ ] `diagnose_pod.py` — single Pod drill-down (describe + logs + previous-logs + events)
-- [ ] `cluster_health.py` — nodes / control-plane / kube-system events
-- [ ] `helm_status.py` — release status + stuck hook jobs + `--list-pending` cluster-wide
-- [ ] Host transport: support `local` (subprocess) and remote (via ssh-core)
+| Plugin | V1 status |
+|---|---|
+| `ssh-core` | `ssh_execute`, `ssh_cluster`, `ssh_tunnel`, `ssh_server_transfer`, `ssh_config_manager`, `ssh_upload`, `ssh_download`, and `deploy_pubkey` shipped; `ssh_daemon.py` deferred to V1.1. |
+| `ssh-guarded` | request drafters, `run_request`, `exec_detached`, `scan_software`, and `redact_check` shipped. |
+| `remote-debug` | `diagnose_host`, `tail_log`, `port_check`, and `compare_across_hosts` shipped. |
+| `k8s-debug` | `check_namespace`, `diagnose_pod`, `cluster_health`, and `helm_status` shipped. |
+| `docker-quick` | `inspect_container`, `image_audit`, and `compose_status` shipped. |
+| `log-aggregator` | `tail_multi`, `correlate`, and `grep_across_sources` shipped. |
+| `iac-state` | `state_inspect`, `drift_check`, and `module_validate` shipped. |
+| `cicd-debug` | `pipeline_analyzer`, `runner_check`, and `secret_scope_audit` shipped. |
 
-### `docker-quick`
-- [ ] `inspect_container.py` — state + config + health log + recent logs, with exit-code classification
-- [ ] `image_audit.py` — per-layer size + waste detection (apt/pip/npm cache, .git inside, root user)
-- [ ] `compose_status.py` — Compose stack health + depends_on / healthcheck / port collision detection
+## V1.1 roadmap
 
-### `log-aggregator`
-- [ ] `tail_multi.py` — multi-source tail with normalized timestamps + noise filter + level filter + suppression
-- [ ] `correlate.py` — anchor + window correlation across sources, with root-cause hint
-- [ ] `grep_across_sources.py` — pattern hunt across N sources, summary / raw / json output modes
-- [ ] Source spec parser supporting `journal://`, `docker://`, `kube://`, `file://` with brace/glob expansion (embedded in `tail_multi.py`)
-- [ ] Clock-skew probe at startup; emit `clock_skew_ms` metadata per source (embedded in `tail_multi.py`)
+Prioritize foundational transport work before plugin-specific enhancements:
 
-### `iac-state`
-- [ ] `state_inspect.py` — backend + size + lock status + workspace list
-- [ ] `drift_check.py` — `plan -detailed-exitcode` parse, per-resource classify (no-op/update/replace/destroy)
-- [ ] `module_validate.py` — module audit checklist, optional `--target-version` upgrade diff
-- [ ] Tool autodetect: `tofu` if available, otherwise `terraform`
-
-### `cicd-debug`
-- [ ] `pipeline_analyzer.py` — single run analysis + diff vs reference run + cache/actions/runner summary
-- [ ] `runner_check.py` — runner pool health (online/offline/busy/labels), queue depth, p95 wait
-- [ ] `secret_scope_audit.py` — secret visibility map + risk flags (fork-PR exposure, long-lived creds, etc.)
-- [ ] Provider auth via `gh auth status` / `glab auth status` — fail fast if not logged in
+1. `ssh-core` connection reuse: evaluate OpenSSH ControlMaster first, then decide whether `ssh_daemon.py` remains a custom daemon or becomes a compatibility wrapper.
+2. `ssh_server_transfer.py`: implement true `direct` / `auto` / `hybrid` modes and `--use-rsync`.
+3. `ssh_tunnel.py`: implement `--idle-timeout` behavior and revisit Windows support after the connection-reuse decision.
+4. Long-running log follow behavior: improve `tail_multi.py`, `tail_log.py`, and related follow/reconnect workflows.
+5. Redaction hardening: multiline private-key buffering, default catalog export, and optional regex timeout protection.
+6. Plugin-specific enhancements: CI secret-scope deeper risk flags, request upload-root configurability, and other documented V1.1 follow-ups.
 
 ## Setup
 

@@ -2,7 +2,7 @@
 
 [English](./CONTRIBUTING.md) | 简体中文
 
-感谢你考虑参与贡献。本文档讲清楚仓库结构，以及把项目从脚手架推到 v1.0 还要补哪些东西。
+感谢你考虑参与贡献。本文档讲清楚仓库结构、已发布的 V1 状态，以及当前 V1.1 路线图。
 
 ## 仓库布局
 
@@ -26,7 +26,7 @@ devops-skills/
 └── tests/                            # pytest 套件 + manifest linter
 ```
 
-每个 plugin **自我封闭** —— 它的 `skills/<name>/scripts/` 只在有明确文档说明的情况下才跨边界。v0.2 诊断 plugin（`k8s-debug` / `docker-quick` / `log-aggregator` / `iac-state` / `cicd-debug`）依赖 `ssh-core` 提供远端命令执行，但**不**直接 import 其 Python 模块；而是 shell out 调用用户已安装的 `ssh-core` CLI。`ssh-guarded` 同样如此。
+每个 plugin **自我封闭** —— 它的 `skills/<name>/scripts/` 只在有明确文档说明的情况下才跨边界。诊断 plugin（`remote-debug` / `k8s-debug` / `docker-quick` / `log-aggregator` / `iac-state` / `cicd-debug`）依赖 `ssh-core` 提供远端命令执行，但**不**直接 import 其 Python 模块；而是 shell out 调用用户已安装的 `ssh-core` CLI。`ssh-guarded` 同样如此。
 
 ## Skill 编写约定
 
@@ -37,64 +37,38 @@ devops-skills/
 5. **`subprocess.run(list, ...)`，永不传 shell 字符串。** 不要例外，哪怕输入"可信"。测试用例里专门塞了 `;`、`&&` 和 `` ` ``。
 6. **skill 输出不要 emoji**（除非用户显式要求）。Skill markdown 同样保持无 emoji。
 
-## 从脚手架到 v1.0 的路线图
+## V1 状态
 
-### `ssh-core`
-- [ ] `ssh_daemon.py` —— 本地 TCP daemon、长度前缀 JSON 协议、60s 心跳、30 分钟空闲退出
-- [ ] `ssh_execute.py` —— daemon 感知的入口；密钥认证走原生 ssh，密码认证降级 paramiko
-- [ ] `ssh_tunnel.py` —— 端口转发守护进程，端口池 10000–20000，状态文件按 `md5(alias)` 命名
-- [ ] `ssh_cluster.py` —— ThreadPoolExecutor 广播，支持 tag / environment 过滤
-- [ ] `ssh_server_transfer.py` —— direct / stream / hybrid / auto 四种模式
-- [ ] `ssh_config_manager.py` —— `~/.ssh/config` 的 CRUD（带注释行元数据）
-- [ ] `ssh_upload.py` / `ssh_download.py` —— 单文件 SFTP 传输，含进度与续传
-- [ ] `deploy_pubkey.py` —— 幂等地把本地公钥推到远端 `authorized_keys`
-- [ ] 所有传输路径 Windows 端强制 `MSYS_NO_PATHCONV=1`
+按已接受的 rollout 口径，V1 已完成：
 
-### `ssh-guarded`
-- [ ] `request_command.py` / `request_upload.py` / `request_mkdir.py` / `request_delete.py` —— 在 `reports/requests/` 下生成 JSON 请求工件
-- [ ] `run_request.py` —— 审核后执行，无 `--execute` 时只校验
-- [ ] `exec_detached.py` —— nohup + 本地 job 清单，含 `status` / `tail-log` 子命令
-- [ ] `scan_software.py` —— 缓存 `python/cuda/gcc/cmake/kubectl/terraform/docker/...` 各主机的安装版本
-- [ ] `redact_check.py` —— redact 模块的体检 CLI；模块本身在所有字符串输出路径上默认脱敏
+- 8 个 plugin 的 V1 CLI surface 均已发布。
+- 每个脚本都支持 `--help`；每个运行型脚本都支持 JSON 输出契约。
+- 已发布脚本具备 unit 覆盖；依赖环境的 integration 测试保持 skip-safe。
+- `ssh_daemon.py` 依据 ADR-001 A2 有意延后到 V1.1。V1 通过 `ssh_execute.py` 使用原生 OpenSSH subprocess；没有已发布的 V1 代码调用 daemon stub。
 
-### `remote-debug`
-- [ ] `diagnose_host.py` —— uptime / load / disk / mem / net / 僵尸进程检查，附严重度打分
-- [ ] `tail_log.py` —— 多主机 log tail 带前缀
-- [ ] `port_check.py` —— TCP 可达性矩阵
-- [ ] `compare_across_hosts.py` —— N 台机器之间 diff 同名文件
-- [ ] 症状 → 根因 参考（`common_issues.md`）
-- [ ] SEV1–SEV4 应急响应参考
+V1 脚本清单：
 
-### `k8s-debug`
-- [ ] `check_namespace.py` —— 命名空间健康快照（pods/events/deployments/services/PVCs）
-- [ ] `diagnose_pod.py` —— 单 Pod 深挖（describe + logs + previous-logs + events）
-- [ ] `cluster_health.py` —— nodes / control-plane / kube-system events
-- [ ] `helm_status.py` —— release 状态 + 卡住 hook job + `--list-pending` 全集群
-- [ ] Host 传输：支持 `local`（subprocess）和远端（经 ssh-core）
+| Plugin | V1 状态 |
+|---|---|
+| `ssh-core` | `ssh_execute`、`ssh_cluster`、`ssh_tunnel`、`ssh_server_transfer`、`ssh_config_manager`、`ssh_upload`、`ssh_download`、`deploy_pubkey` 已发布；`ssh_daemon.py` 延后到 V1.1。 |
+| `ssh-guarded` | request drafters、`run_request`、`exec_detached`、`scan_software`、`redact_check` 已发布。 |
+| `remote-debug` | `diagnose_host`、`tail_log`、`port_check`、`compare_across_hosts` 已发布。 |
+| `k8s-debug` | `check_namespace`、`diagnose_pod`、`cluster_health`、`helm_status` 已发布。 |
+| `docker-quick` | `inspect_container`、`image_audit`、`compose_status` 已发布。 |
+| `log-aggregator` | `tail_multi`、`correlate`、`grep_across_sources` 已发布。 |
+| `iac-state` | `state_inspect`、`drift_check`、`module_validate` 已发布。 |
+| `cicd-debug` | `pipeline_analyzer`、`runner_check`、`secret_scope_audit` 已发布。 |
 
-### `docker-quick`
-- [ ] `inspect_container.py` —— state + config + health log + 近期 logs，含退出码分类
-- [ ] `image_audit.py` —— 每层 size + 浪费检测（apt/pip/npm cache、.git 进镜像、root 用户）
-- [ ] `compose_status.py` —— Compose 栈健康 + depends_on / healthcheck / 端口冲突检测
+## V1.1 路线图
 
-### `log-aggregator`
-- [ ] `tail_multi.py` —— 多源 tail，含时间归一化 + 噪音过滤 + level 过滤 + 速率抑制
-- [ ] `correlate.py` —— anchor + window 跨源关联，含 root-cause hint
-- [ ] `grep_across_sources.py` —— N 源 pattern 搜索，summary / raw / json 三种输出
-- [ ] Source spec 解析器（支持 `journal://`、`docker://`、`kube://`、`file://` 及 brace/glob 展开）（内嵌于 `tail_multi.py`）
-- [ ] 启动时时钟漂移探测；每源输出 `clock_skew_ms` 元数据（内嵌于 `tail_multi.py`）
+优先推进能解锁多个后续能力的传输层基础工作：
 
-### `iac-state`
-- [ ] `state_inspect.py` —— backend + size + lock 状态 + workspace 列表
-- [ ] `drift_check.py` —— `plan -detailed-exitcode` 解析，逐资源分类（no-op/update/replace/destroy）
-- [ ] `module_validate.py` —— module 审计 checklist，可选 `--target-version` 升级 diff
-- [ ] 工具自动检测：有 `tofu` 用 `tofu`，否则 `terraform`
-
-### `cicd-debug`
-- [ ] `pipeline_analyzer.py` —— 单次 run 分析 + 与参照 run 的 diff + cache/actions/runner 摘要
-- [ ] `runner_check.py` —— runner 池健康（online/offline/busy/labels）、队列深度、p95 等待时长
-- [ ] `secret_scope_audit.py` —— secret 可见性图 + 风险标记（fork-PR 暴露、长效凭据等）
-- [ ] Provider 鉴权检测：`gh auth status` / `glab auth status` 没登录直接 fail fast
+1. `ssh-core` 连接复用：先评估 OpenSSH ControlMaster，再决定 `ssh_daemon.py` 是保留为自定义 daemon，还是变成兼容包装。
+2. `ssh_server_transfer.py`：实现真正的 `direct` / `auto` / `hybrid` 模式，以及 `--use-rsync`。
+3. `ssh_tunnel.py`：实现 `--idle-timeout`，并在连接复用决策后重新评估 Windows 支持。
+4. 长时间日志 follow：改进 `tail_multi.py`、`tail_log.py` 等 follow / reconnect 工作流。
+5. 脱敏强化：多行 private key 缓冲、默认 catalog 导出、可选 regex timeout 防护。
+6. 插件级增强：CI secret-scope 深层风险标记、request upload-root 可配置，以及其他已记录的 V1.1 follow-up。
 
 ## 环境准备
 
