@@ -34,7 +34,7 @@ IaC 症状？
 ├─ 怀疑漂移（真实云 vs state）
 │   └─ drift_check.py <host> <project-dir>
 │        → 跑 `terraform plan -detailed-exitcode` 解读差异
-│        → 按 resource 类型分组：unmanaged / drifted / orphaned
+│        → 分类为 create / update-in-place / replace / destroy
 │
 └─ module 本身的健康
     └─ module_validate.py <host> <module-path>
@@ -80,14 +80,15 @@ python scripts/module_validate.py local ~/modules/eks-cluster --json
   "stderr": "",
   "data": {
     "host": "local",
-    "project": "/srv/infra/prod",
+    "project_dir": "/srv/infra/prod",
     "tool": "terraform",
-    "summary": {"state": "ok", "drift": "warn", "modules": "ok"},
+    "summary": {"drift": "warn", "total_changes": 1},
     "findings": [
       {"severity": "warn", "kind": "drift",
        "resource": "aws_security_group.web",
+       "action": "update-in-place",
        "diff_summary": "ingress rule 0.0.0.0/0:443 missing in state",
-       "hint": "see references/drift_patterns.md#unmanaged-rule-changes"}
+       "hint": "see references/drift_patterns.md#manual-console-changes"}
     ],
     "raw": {"plan_exit_code": 2, "plan_json": "..."}
   }

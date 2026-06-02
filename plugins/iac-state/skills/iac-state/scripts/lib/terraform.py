@@ -145,3 +145,14 @@ def read_text(host: str, project_dir: str, relative_path: str, timeout: int = 30
     if result.returncode != 0:
         raise TfError("not_initialized", 123, result.stderr)
     return result.stdout
+
+
+def remove_path(host: str, path: str, timeout: int = 15) -> TfResult | None:
+    """Best-effort removal helper for temp artifacts created by iac-state scripts."""
+    if host == "local":
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError as exc:
+            raise TfError("project_dir_invalid", _PROJECT_DIR_INVALID, str(exc)) from None
+        return None
+    return _run_remote_shell(host, "rm -f " + shlex.quote(path), timeout)

@@ -22,6 +22,34 @@ terraform show -json plan.bin > plan.json
 
 `plan.json` 里 `resource_changes[]` 是每个资源的 before/after。本 plugin 的 `drift_check.py` 就是包装这个 + 分类输出。
 
+## drift_check.py hint anchors
+
+脚本里的 `hint` 字段会指到下面这些稳定锚点：
+
+### manual-console-changes
+
+对应「手动改控制台」。典型信号是 security group、IAM、route、防火墙等资源出现 in-place update。
+
+### resource-deleted-in-cloud
+
+对应「资源被云端删了」。典型信号是 Terraform JSON action 含 `delete`，脚本会标为 `destroy`。
+
+### interpreting-plan-diffs
+
+对应 `-/+` 或 delete/create 组合。脚本会标为 `replace`，默认 `crit`。
+
+### name-namespace-conflicts
+
+对应新建资源和命名空间冲突风险。脚本会把 `create` 默认标为 `warn`。
+
+### provider-managed-fields
+
+对应 AWS / 云服务自动改字段、tag / description / metadata 这类低风险漂移。
+
+### common-drift-patterns
+
+兜底锚点。用于未知资源类型的 in-place update。
+
 ## 常见漂移模式
 
 ### 1. 手动改控制台

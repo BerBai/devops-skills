@@ -59,6 +59,7 @@ The scaffold-era convention, used by every v0.2 stub:
 | `100`–`109` | `cluster_health` k8s-debug per-script failure classes. `100` `cluster_unreachable` (mandatory `kubectl get nodes` probe reached kubectl but could not reach the Kubernetes API server); `101` `healthz_unavailable` (soft finding when managed-cluster control-plane pods and raw health endpoints are unavailable); `102` `versions_partial` (soft finding when `kubectl version --short` cannot be collected while nodes are available); `103`–`109` reserved. Introduced by `cluster_health` v1.0 (see `.trellis/tasks/05-26-k8s-debug-cluster-health/design.md`). |
 | `110`–`119` | `helm_status` k8s-debug per-script failure classes. `110` `helm_missing`, `111` `release_not_found`, `112` `helm_version_unsupported`, `113` `history_truncated` (soft warning; exit `0`), `114` `pending_scan_partial` (reserved soft class for future namespace-partial scans), `115`–`119` reserved. Introduced by `helm_status` v1.0 (see `.trellis/tasks/05-26-k8s-debug-helm-status/design.md`). |
 | `120`–`129` | `state_inspect` iac-state per-script failure classes. `120` `host_unreachable`, `121` `tool_missing`, `122` `project_dir_invalid`, `123` `not_initialized`, `125` `backend_unknown` (soft warning; exit `0`), `126` `lock_parse_failed` (soft warning; exit `0`), `127` `workspace_list_failed` (soft warning; exit `0`), `128`–`129` reserved. `124` remains the shared timeout convention. Introduced by `state_inspect` v1.0 (see `.trellis/tasks/05-26-iac-state-state-inspect/design.md`). |
+| `130`–`139` | `drift_check` iac-state per-script failure classes. `130` `init_failed`, `131` `plan_failed`, `132` `show_parse_failed`, `133` `target_not_found`, `134` `lock_held`, `135` `provider_auth_failed`, `136` `plan_too_large` (soft warning; exit normally follows drift severity), `137`–`139` reserved. Introduced by `drift_check` v1.0 (see `.trellis/tasks/05-26-iac-state-drift-check/design.md`). |
 | `150`–`158` | `pipeline_analyzer` cicd-debug per-script failure classes. `150` `tool_missing`, `151` `provider_unavailable`, `152` `auth`, `153` `not_found`, `154` `permission`, `155` `network`, `156` `bad_args`, `157` `api_unexpected`, `158` `log_truncated`. Reserved by `.trellis/tasks/05-26-cicd-debug-pipeline-analyzer/prd.md` D3 after 2026-05-31 namespace correction; implementation/tests must migrate from the stale `30`-`38` draft before shipping. |
 | `160`–`168` | `runner_check` cicd-debug per-script failure classes. `160` `tool_missing`, `161` `provider_unavailable`, `162` `auth`, `163` `not_found`, `164` `permission`, `165` `network`, `166` `bad_args`, `167` `api_unexpected`, `168` `pagination_overflow`. Reserved by `.trellis/tasks/05-26-cicd-debug-runner-check/prd.md` D3. |
 | `170`–`179` | `secret_scope_audit` cicd-debug per-script failure classes. `170` `tool_missing`, `171` `provider_unavailable`, `172` `auth`, `173` `not_found`, `174` `permission`, `175` `network`, `176` `bad_args`, `177` `api_unexpected`, `178` `workflow_yaml_parse_failed`, `179` `workflow_dir_missing` (soft class; script exits `0` when the audit completed with no workflow graph). Reserved by `.trellis/tasks/05-26-cicd-debug-secret-scope-audit/prd.md` D3. |
@@ -70,9 +71,9 @@ constant in `plugins/k8s-debug/skills/k8s-debug/scripts/check_namespace.py`
 line 26, and the payload it returns at lines 41-47. When a scaffold script
 is fleshed out, keep `0`/`1`; replace `2` only when implementing the
 behavior. Do not invent new exit codes beyond the ones listed above
-(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`88` / `90`–`129` / `150`–`179` / `180`–`189` / `124`) — new codes
+(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`88` / `90`–`139` / `150`–`179` / `180`–`189` / `124`) — new codes
 require a spec update plus a referenced ADR (or task PRD) explaining the
-semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`129`, `150`–`179`, `180`–`189`) are namespaced to
+semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`139`, `150`–`179`, `180`–`189`) are namespaced to
 their script and not reusable by other scripts without a fresh range
 allocation here.
 
@@ -80,9 +81,106 @@ Scripts that emit `4`–`9` MUST also set `data.failure_class` to the
 matching string (`not_found` / `already_exists` / `config_missing` /
 `parse_error` / `permission` / `transfer_verify_failed`) so callers can
 branch on the class without re-parsing `stderr`. The same rule applies
-to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`129`, `150`–`179`, `180`–`189`): every numeric exit code in
+to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`139`, `150`–`179`, `180`–`189`): every numeric exit code in
 those ranges has a paired `data.failure_class` string defined in the
 script's source; callers MUST branch on the class, not the number.
+
+## Scenario: iac-state `drift_check` v1.0
+
+### 1. Scope / Trigger
+
+- Trigger: `drift_check.py` is the iac-state drift entrypoint. It runs
+  Terraform/OpenTofu `init`, `plan -detailed-exitcode`, and `show -json`, then
+  converts `resource_changes[]` into drift findings.
+- Scope: CLI signature, JSON `data` payload, drift severity exit behavior,
+  temp plan cleanup, and drift-check-local failure classes `130`-`136`.
+
+### 2. Signatures
+
+```bash
+drift_check.py <host> <project-dir> [--target ADDR] [--tool auto|tofu|terraform] [--json]
+```
+
+- `host` is `local` or an ssh-core alias accepted by
+  `plugins/iac-state/skills/iac-state/scripts/lib/terraform.py`.
+- `project-dir` must be a Terraform/OpenTofu project with at least one `*.tf`
+  file for local runs.
+- `--target` becomes `-target=<ADDR>` on the plan command.
+- `--tool auto` resolves `tofu` first, then `terraform`.
+
+### 3. Contracts
+
+- Success envelope for no/warn/info drift: `success=true`, `exit_code=0`, and
+  `data.failure_class=null`.
+- Critical drift is a completed analysis but not an OK state:
+  `success=false`, `exit_code=1`, and `data.failure_class=null`.
+- `data.summary` contains `drift`, `total_changes`, `counts_by_action`, and
+  `severity_counts`.
+- `data.findings[]` contains `severity`, `kind="drift"`, `resource`,
+  `resource_type`, `name`, `action`, `diff_summary`, and `hint`.
+- `data.raw` contains init/plan stdout and stderr, `plan_exit_code`, and
+  `plan_json` capped at 10 MB for output retention.
+- `data.warnings[]` carries soft issues such as `plan_too_large` or temp-file
+  cleanup failure; soft warnings do not set top-level `failure_class`.
+
+### 4. Validation & Error Matrix
+
+| Condition | `failure_class` | Exit |
+|-----------|-----------------|------|
+| Shared local/remote transport failure | `host_unreachable` | `120` |
+| Terraform/OpenTofu missing | `tool_missing` | `121` |
+| Local project path invalid or has no `*.tf` files | `project_dir_invalid` | `122` |
+| Python-side timeout | `timeout` | `124` |
+| `terraform init` fails without a more specific marker | `init_failed` | `130` |
+| `terraform plan` exits non-0/non-2 without a more specific marker | `plan_failed` | `131` |
+| `terraform show -json` fails, emits invalid JSON, or lacks `resource_changes[]` | `show_parse_failed` | `132` |
+| `--target` points at no matching resource address | `target_not_found` | `133` |
+| init/plan reports a held state lock | `lock_held` | `134` |
+| provider credentials are missing, expired, or unauthorized | `provider_auth_failed` | `135` |
+| retained raw plan JSON exceeds 10 MB | `plan_too_large` | `0` or `1` following drift severity |
+| Unexpected script bug | `null` | `1` |
+
+### 5. Good/Base/Bad Cases
+
+- Good: plan exit `0` -> no findings, `summary.drift="ok"`, exit `0`.
+- Base: plan exit `2` with create/update findings only -> sorted warn/info
+  findings, exit `0`.
+- Bad: plan exit `2` with destroy/replace findings -> `summary.drift="crit"`,
+  exit `1`.
+- Failure: plan stderr says state lock is held -> `failure_class="lock_held"`,
+  exit `134`.
+
+### 6. Tests Required
+
+- Unit tests cover action classification, severity table, stable sorting,
+  `--target` argv propagation, hard failure-class mapping, invalid show JSON,
+  temp cleanup, JSON envelope shape, and human stderr behavior.
+- Live Terraform tests are opt-in under `live_terraform` and must be skip-safe
+  when neither `tofu` nor `terraform` is installed. They should cover a no-drift
+  local project and a create-drift fixture when the built-in provider is
+  available.
+- Default `pytest tests/` must remain green with environment-dependent live
+  cases skipped rather than failed.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```json
+{"success": true, "exit_code": 0, "data": {"summary": {"drift": "crit"}, "failure_class": null}}
+```
+
+Critical drift must raise process exit `1`, matching existing diagnostic
+scripts where `crit` summaries are not OK states.
+
+#### Correct
+
+```json
+{"success": false, "exit_code": 1, "data": {"summary": {"drift": "crit"}, "failure_class": null}}
+```
+
+`failure_class` stays `null` because Terraform ran successfully; the nonzero
+exit is caused by the analyzed drift severity, not by a command failure.
 
 ## Scenario: k8s-debug `check_namespace` v1.0
 
