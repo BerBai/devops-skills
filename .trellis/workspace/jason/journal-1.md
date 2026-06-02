@@ -402,3 +402,36 @@ Implemented cicd-debug runner_check v1.0 with shared provider runner/queue adapt
 ### Next Steps
 
 - None - task complete
+
+
+## Session 13: Ship iac-state drift_check
+
+**Date**: 2026-06-02
+**Task**: Ship iac-state drift_check
+**Branch**: `main`
+
+### Summary
+
+Implemented drift_check v1.0 with Terraform plan/show parsing, drift severity classification, 130-139 error contract, docs/spec sync, and tests. Validation: drift_check unit 36 PASS; live_terraform integration skip-safe in this environment because neither tofu nor terraform is installed; ruff/mypy PASS; default tests PASS with environment skips.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0534087` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
