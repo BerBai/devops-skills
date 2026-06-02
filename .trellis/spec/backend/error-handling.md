@@ -56,6 +56,7 @@ The scaffold-era convention, used by every v0.2 stub:
 | `75`–`79` | `scan_software` ssh-guarded per-script failure classes. `75` `catalog_load_failed`, `76` `cache_write_failed`, `77` `cache_corrupt`, `78` `ssh_batch_failed`, `79` `tool_probe_corrupted`. Reserved by archived scan_software task PRD D8. |
 | `80`–`88` | k8s-debug script failure classes (namespace `80`–`89`). `80` `host_unreachable` (ssh-core remote unreachable, or local kubectl API server refused / DNS-missing), `81` `kubectl_missing` (binary absent or rc 127), `82` `kubeconfig_missing` (KUBECONFIG unset or file missing), `83` `pod_not_found`, `84` `namespace_not_found`, `85` `forbidden` (RBAC denial, or upstream ssh auth failure — same source in this context), `86` `api_timeout` (kubectl's own `--request-timeout=30s` trip; distinct from Python-side `124`), `87` `metrics_unavailable` (soft failure — exit `0` with a `warn` finding, used for `kubectl top` against a cluster without metrics-server), `88` `partial_collection` (check_namespace collected too few namespace domains to produce a reliable health snapshot). `80`–`87` introduced by `diagnose_pod` v1.0 (see `.trellis/tasks/05-26-k8s-debug-diagnose-pod/prd.md` R6 + `design.md` D4); `88` introduced by `check_namespace` v1.0 after avoiding the stale `90`–`99` planning conflict with log-aggregator `correlate`. ADR follow-up TBD. |
 | `90`–`99` | `correlate` log-aggregator per-script failure classes. `90` `anchor_not_found`, `91` `window_invalid`, `92` `pair_unmatched`; `93`–`99` reserved. Introduced by `correlate` v1.0 after resolving the stale `50`–`59` planning conflict (see `.trellis/tasks/05-25-log-aggregator-correlate/prd.md` R8). |
+| `100`–`109` | `cluster_health` k8s-debug per-script failure classes. `100` `cluster_unreachable` (mandatory `kubectl get nodes` probe reached kubectl but could not reach the Kubernetes API server); `101` `healthz_unavailable` (soft finding when managed-cluster control-plane pods and raw health endpoints are unavailable); `102` `versions_partial` (soft finding when `kubectl version --short` cannot be collected while nodes are available); `103`–`109` reserved. Introduced by `cluster_health` v1.0 (see `.trellis/tasks/05-26-k8s-debug-cluster-health/design.md`). |
 | `150`–`158` | `pipeline_analyzer` cicd-debug per-script failure classes. `150` `tool_missing`, `151` `provider_unavailable`, `152` `auth`, `153` `not_found`, `154` `permission`, `155` `network`, `156` `bad_args`, `157` `api_unexpected`, `158` `log_truncated`. Reserved by `.trellis/tasks/05-26-cicd-debug-pipeline-analyzer/prd.md` D3 after 2026-05-31 namespace correction; implementation/tests must migrate from the stale `30`-`38` draft before shipping. |
 | `160`–`168` | `runner_check` cicd-debug per-script failure classes. `160` `tool_missing`, `161` `provider_unavailable`, `162` `auth`, `163` `not_found`, `164` `permission`, `165` `network`, `166` `bad_args`, `167` `api_unexpected`, `168` `pagination_overflow`. Reserved by `.trellis/tasks/05-26-cicd-debug-runner-check/prd.md` D3. |
 | `170`–`179` | `secret_scope_audit` cicd-debug per-script failure classes. `170` `tool_missing`, `171` `provider_unavailable`, `172` `auth`, `173` `not_found`, `174` `permission`, `175` `network`, `176` `bad_args`, `177` `api_unexpected`, `178` `workflow_yaml_parse_failed`, `179` `workflow_dir_missing` (soft class; script exits `0` when the audit completed with no workflow graph). Reserved by `.trellis/tasks/05-26-cicd-debug-secret-scope-audit/prd.md` D3. |
@@ -67,9 +68,9 @@ constant in `plugins/k8s-debug/skills/k8s-debug/scripts/check_namespace.py`
 line 26, and the payload it returns at lines 41-47. When a scaffold script
 is fleshed out, keep `0`/`1`; replace `2` only when implementing the
 behavior. Do not invent new exit codes beyond the ones listed above
-(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`88` / `90`–`99` / `150`–`179` / `180`–`189` / `124`) — new codes
+(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`88` / `90`–`109` / `150`–`179` / `180`–`189` / `124`) — new codes
 require a spec update plus a referenced ADR (or task PRD) explaining the
-semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`99`, `150`–`179`, `180`–`189`) are namespaced to
+semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`109`, `150`–`179`, `180`–`189`) are namespaced to
 their script and not reusable by other scripts without a fresh range
 allocation here.
 
@@ -77,7 +78,7 @@ Scripts that emit `4`–`9` MUST also set `data.failure_class` to the
 matching string (`not_found` / `already_exists` / `config_missing` /
 `parse_error` / `permission` / `transfer_verify_failed`) so callers can
 branch on the class without re-parsing `stderr`. The same rule applies
-to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`99`, `150`–`179`, `180`–`189`): every numeric exit code in
+to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`109`, `150`–`179`, `180`–`189`): every numeric exit code in
 those ranges has a paired `data.failure_class` string defined in the
 script's source; callers MUST branch on the class, not the number.
 
@@ -177,6 +178,99 @@ log-aggregator `correlate`.
 
 `88` stays inside the k8s-debug `80`-`89` namespace and is the only
 `check_namespace.py`-local failure code.
+
+## Scenario: k8s-debug `cluster_health` v1.0
+
+### 1. Scope / Trigger
+
+- Trigger: `cluster_health.py` is the cluster-level k8s-debug entrypoint. It
+  probes nodes, control-plane visibility, kube-system pods/events, and version
+  skew before a user drills into namespace or Pod-level symptoms.
+- Scope: CLI signature, JSON `data` payload, managed control-plane fallback,
+  and cluster-health-local failure classes `100`-`102`.
+
+### 2. Signatures
+
+```bash
+cluster_health.py <host> [--json] [--since 30]
+```
+
+- `host` is `local` or an ssh-core alias accepted by `lib.kubectl.run_kubectl`.
+- `--since` is minutes for kube-system Event lookback intent. Values below
+  `1` normalize to `1`; values above `1440` are accepted but add a warning in
+  `data.warnings`.
+
+### 3. Contracts
+
+- Success envelope: `success=true`, `exit_code=0`, and
+  `data.failure_class=null`.
+- `data.summary` contains `nodes`, `control_plane`, `kube_system`, `events`,
+  and `versions`, each scored `ok | warn | crit`.
+- `data.findings` contains the stable top 5 findings sorted by severity,
+  domain order, kind, name, then reason. `data.all_findings_count` records the
+  full untruncated finding count.
+- `data.raw` keeps raw kubectl output per collected domain: `nodes`,
+  `kube_system_pods`, `kube_system_events`, `healthz`, `readyz`, and `version`
+  when available.
+- Optional domain failures do not fail the command. They produce warn findings
+  and `data.partial_failures[]`; only the mandatory nodes probe can produce a
+  hard cluster-health-local failure.
+
+### 4. Validation & Error Matrix
+
+| Condition | `failure_class` | Exit |
+|-----------|-----------------|------|
+| SSH host cannot run kubectl or remote transport fails | `host_unreachable` | `80` |
+| Missing kubectl binary | `kubectl_missing` | `81` |
+| Missing kubeconfig / kube context access | `kubeconfig_missing` | `82` |
+| RBAC denial | `forbidden` | `85` |
+| kubectl API timeout | `api_timeout` | `86` |
+| Mandatory `get nodes` reaches kubectl but cannot reach the API server | `cluster_unreachable` | `100` |
+| Managed-cluster control-plane pods and raw health endpoints unavailable | `healthz_unavailable` | `0` soft finding |
+| Version command unavailable while nodes are available | `versions_partial` | `0` soft finding |
+| Unexpected script bug | `null` | `1` |
+
+### 5. Good/Base/Bad Cases
+
+- Good: healthy kind or production cluster -> all summary domains `ok`, no
+  critical findings, exit `0`.
+- Base: kube-system has a failed addon pod or node pressure -> exit `0`,
+  `success=true`, relevant summary domain `warn` or `crit`, and top findings
+  explain the unhealthy object.
+- Bad: `kubectl get nodes` cannot reach the Kubernetes API server -> exit
+  `100`, `success=false`, `data.failure_class="cluster_unreachable"`.
+
+### 6. Tests Required
+
+- Unit tests cover node Ready/pressure/cordon rules, self-hosted and managed
+  control-plane paths, kube-system pod scoring, event scoring, version skew,
+  `100` conversion, `80` pass-through, soft `101`/`102`, sorting, and envelope
+  rendering.
+- Live k8s tests are opt-in under `live_k8s` and must be skip-safe when kind,
+  kubectl, or Docker are unavailable. They should cover a healthy kind cluster
+  and a degraded kube-system pod when local kind can run.
+- Default `pytest tests/` must remain green with environment-dependent live
+  cases skipped rather than failed.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```json
+{"success": false, "exit_code": 80, "data": {"failure_class": "cluster_unreachable"}}
+```
+
+This mixes a cluster-health-local API-server failure class with the shared
+`80 host_unreachable` transport/kubectl wrapper code.
+
+#### Correct
+
+```json
+{"success": false, "exit_code": 100, "data": {"failure_class": "cluster_unreachable"}}
+```
+
+`100` distinguishes "kubectl was invoked but the Kubernetes API server is not
+reachable" from SSH transport failures that remain `80 host_unreachable`.
 
 ## Scenario: cicd-debug `pipeline_analyzer` v1.0
 
