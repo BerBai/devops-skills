@@ -1,8 +1,8 @@
 """Unit tests for ssh-guarded ``lib/sandbox.py``.
 
-12 cases per design.md §3 D12:
+16+ cases per design.md §3 D12 and references/workdir-sandbox.md:
 - 4 for ``resolve_project_id`` (explicit, env, git, hard-fail)
-- 5 for ``is_inside_sandbox`` happy + escape attempts
+- 5+ for ``is_inside_sandbox`` happy + documented escape attempts
 - 5 for ``is_in_denylist`` per pattern type
 
 Total 14 ≥ 12 target (extra coverage for normalize_remote_path edge cases).
@@ -139,6 +139,21 @@ def test_is_inside_sandbox_workspace_root_no_pid_rejected() -> None:
     assert not sandbox.is_inside_sandbox("~/workspace/", "proj")
 
 
+@pytest.mark.parametrize(
+    "path,reason",
+    [
+        ("~/workspace/proj/../../etc/passwd", "double dot escape"),
+        ("~/workspace/proj/./../etc/passwd", "dot plus parent escape"),
+        (r"\workspace\proj\x", "windows backslash path"),
+        (r"C:\workspace\proj\x", "windows drive path"),
+    ],
+)
+def test_is_inside_sandbox_documented_escape_attempts_rejected(
+    path: str, reason: str
+) -> None:
+    assert not sandbox.is_inside_sandbox(path, "proj"), reason
+
+
 # --- is_in_denylist --------------------------------------------------------
 
 
@@ -184,5 +199,7 @@ def test_normalize_remote_path_rejects_escape() -> None:
 
 
 def test_normalize_remote_path_rejects_null_byte() -> None:
-    with pytest.raises(ArtifactError):
+    with pytest.raises(ArtifactError) as exc_info:
         sandbox.normalize_remote_path("~/foo\x00bar")
+    assert exc_info.value.failure_class == "workdir_outside_sandbox"
+    assert exc_info.value.exit_code == 50

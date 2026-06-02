@@ -306,6 +306,16 @@ def test_validate_sandbox_refusal() -> None:
     assert exc_info.value.exit_code == 50
 
 
+def test_validate_normalized_traversal_escape_refusal() -> None:
+    art = _make_command_art(
+        payload={"command": "ls", "workdir": f"{SANDBOX_ROOT}/./../etc/passwd"}
+    )
+    with pytest.raises(ArtifactError) as exc_info:
+        art.validate(project_id=PROJECT_ID)
+    assert exc_info.value.failure_class == "workdir_outside_sandbox"
+    assert exc_info.value.exit_code == 50
+
+
 def test_validate_denylist_refusal() -> None:
     art = _make_command_art(
         operation="delete",

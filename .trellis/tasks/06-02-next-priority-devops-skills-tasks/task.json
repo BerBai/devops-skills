@@ -19,7 +19,8 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "06-02-redact-catalog-regression-coverage"
+    "06-02-redact-catalog-regression-coverage",
+    "06-02-ssh-guarded-sandbox-escape-regression-coverage"
   ],
   "parent": null,
   "relatedFiles": [],

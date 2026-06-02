@@ -35,10 +35,10 @@ This parent task owns prioritization and task mapping. Child tasks own implement
 ## Child Task Map
 
 - `06-02-redact-catalog-regression-coverage` — add local regression coverage for `redact_check.py` catalog behavior.
+- `06-02-ssh-guarded-sandbox-escape-regression-coverage` — add local regression coverage for documented workdir sandbox escape attempts.
 
 ## Follow-Up Candidates
 
-- Add broader `ssh-guarded` sandbox-escape regression cases from `references/workdir-sandbox.md`.
 - Add skip-safe live tests for `scan_software.py`.
 
 ## Notes
