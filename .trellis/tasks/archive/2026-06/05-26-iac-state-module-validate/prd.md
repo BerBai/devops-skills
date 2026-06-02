@@ -156,3 +156,15 @@ outputs / naming / pinning / antipatterns / security_hints，stub docstring
   双写漂移；规则一旦写到 PRD 后续微调还要同步两处。
 - `--target-version` 仅支持 registry source 是有意限制 —— git source 拿
   历史版本需要 clone + checkout，复杂度跳跃，留 v1.1。
+- 2026-06-02 **module_validate v1.0 shipped** — commit `0f416be`. Script + python-hcl2
+  dependency + 44 unit tests + 2 skip-safe live_terraform integration tests.
+  `uv run pytest tests/test_module_validate_unit.py -q` PASS; integration tests
+  skip in this environment because neither `tofu` nor `terraform` is installed.
+  `uv run ruff check plugins/iac-state/ tests/test_module_validate_unit.py
+  tests/test_module_validate_integration.py` PASS; mypy on module_validate PASS;
+  `uv run pytest tests/ -q` PASS with environment skips; `uv run pytest tests/
+  -m live_terraform -q` PASS/SKIP (all six live_terraform cases skipped for
+  missing Terraform/OpenTofu). Key decisions: registry HTTP uses stdlib urllib
+  to avoid adding `requests`; hcl2 parse failures are degraded audit warnings;
+  validate failures are hard exit 143; `python-hcl2>=8.1,<9` synced to
+  `python-hcl2==8.1.2` in `uv.lock`.
