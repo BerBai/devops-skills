@@ -21,7 +21,13 @@ classifiers = [
 # ssh_upload / ssh_download chunk-level SFTP with resume + progress.
 # Exception: PyYAML is required by cicd-debug/secret_scope_audit.py to parse
 # GitHub Actions and GitLab CI workflow YAML structurally.
-dependencies = ["paramiko>=3.0,<4", "pyyaml>=6.0"]
+# Exception: python-hcl2 is required by iac-state/module_validate.py for
+# Terraform HCL2 static parsing.
+dependencies = [
+    "paramiko>=3.0,<4",
+    "python-hcl2>=8.1,<9",
+    "pyyaml>=6.0",
+]
 
 [project.optional-dependencies]
 dev = [

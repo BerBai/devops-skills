@@ -60,6 +60,7 @@ The scaffold-era convention, used by every v0.2 stub:
 | `110`–`119` | `helm_status` k8s-debug per-script failure classes. `110` `helm_missing`, `111` `release_not_found`, `112` `helm_version_unsupported`, `113` `history_truncated` (soft warning; exit `0`), `114` `pending_scan_partial` (reserved soft class for future namespace-partial scans), `115`–`119` reserved. Introduced by `helm_status` v1.0 (see `.trellis/tasks/05-26-k8s-debug-helm-status/design.md`). |
 | `120`–`129` | `state_inspect` iac-state per-script failure classes. `120` `host_unreachable`, `121` `tool_missing`, `122` `project_dir_invalid`, `123` `not_initialized`, `125` `backend_unknown` (soft warning; exit `0`), `126` `lock_parse_failed` (soft warning; exit `0`), `127` `workspace_list_failed` (soft warning; exit `0`), `128`–`129` reserved. `124` remains the shared timeout convention. Introduced by `state_inspect` v1.0 (see `.trellis/tasks/05-26-iac-state-state-inspect/design.md`). |
 | `130`–`139` | `drift_check` iac-state per-script failure classes. `130` `init_failed`, `131` `plan_failed`, `132` `show_parse_failed`, `133` `target_not_found`, `134` `lock_held`, `135` `provider_auth_failed`, `136` `plan_too_large` (soft warning; exit normally follows drift severity), `137`–`139` reserved. Introduced by `drift_check` v1.0 (see `.trellis/tasks/05-26-iac-state-drift-check/design.md`). |
+| `140`–`149` | `module_validate` iac-state per-script failure classes. `140` `module_path_invalid`, `141` `hcl_parse_failed` (soft warning; static checks skipped), `142` `fmt_failed` (soft finding; exit follows summary severity), `143` `validate_failed`, `144` `registry_unreachable` (soft warning; upgrade diff skipped), `145` `registry_version_not_found`, `146` `unsupported_source`, `147`–`149` reserved. Introduced by `module_validate` v1.0 (see `.trellis/tasks/05-26-iac-state-module-validate/design.md`). |
 | `150`–`158` | `pipeline_analyzer` cicd-debug per-script failure classes. `150` `tool_missing`, `151` `provider_unavailable`, `152` `auth`, `153` `not_found`, `154` `permission`, `155` `network`, `156` `bad_args`, `157` `api_unexpected`, `158` `log_truncated`. Reserved by `.trellis/tasks/05-26-cicd-debug-pipeline-analyzer/prd.md` D3 after 2026-05-31 namespace correction; implementation/tests must migrate from the stale `30`-`38` draft before shipping. |
 | `160`–`168` | `runner_check` cicd-debug per-script failure classes. `160` `tool_missing`, `161` `provider_unavailable`, `162` `auth`, `163` `not_found`, `164` `permission`, `165` `network`, `166` `bad_args`, `167` `api_unexpected`, `168` `pagination_overflow`. Reserved by `.trellis/tasks/05-26-cicd-debug-runner-check/prd.md` D3. |
 | `170`–`179` | `secret_scope_audit` cicd-debug per-script failure classes. `170` `tool_missing`, `171` `provider_unavailable`, `172` `auth`, `173` `not_found`, `174` `permission`, `175` `network`, `176` `bad_args`, `177` `api_unexpected`, `178` `workflow_yaml_parse_failed`, `179` `workflow_dir_missing` (soft class; script exits `0` when the audit completed with no workflow graph). Reserved by `.trellis/tasks/05-26-cicd-debug-secret-scope-audit/prd.md` D3. |
@@ -71,9 +72,9 @@ constant in `plugins/k8s-debug/skills/k8s-debug/scripts/check_namespace.py`
 line 26, and the payload it returns at lines 41-47. When a scaffold script
 is fleshed out, keep `0`/`1`; replace `2` only when implementing the
 behavior. Do not invent new exit codes beyond the ones listed above
-(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`88` / `90`–`139` / `150`–`179` / `180`–`189` / `124`) — new codes
+(`0` / `1` / `2` / `4`–`9` / `10`–`15` / `20`–`29` / `30`–`39` / `40`–`79` / `80`–`88` / `90`–`149` / `150`–`179` / `180`–`189` / `124`) — new codes
 require a spec update plus a referenced ADR (or task PRD) explaining the
-semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`139`, `150`–`179`, `180`–`189`) are namespaced to
+semantics. Per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`149`, `150`–`179`, `180`–`189`) are namespaced to
 their script and not reusable by other scripts without a fresh range
 allocation here.
 
@@ -81,7 +82,7 @@ Scripts that emit `4`–`9` MUST also set `data.failure_class` to the
 matching string (`not_found` / `already_exists` / `config_missing` /
 `parse_error` / `permission` / `transfer_verify_failed`) so callers can
 branch on the class without re-parsing `stderr`. The same rule applies
-to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`139`, `150`–`179`, `180`–`189`): every numeric exit code in
+to per-script ranges (`10`–`15`, `20`–`29`, `30`–`39`, `40`–`79`, `80`–`88`, `90`–`149`, `150`–`179`, `180`–`189`): every numeric exit code in
 those ranges has a paired `data.failure_class` string defined in the
 script's source; callers MUST branch on the class, not the number.
 
@@ -181,6 +182,95 @@ scripts where `crit` summaries are not OK states.
 
 `failure_class` stays `null` because Terraform ran successfully; the nonzero
 exit is caused by the analyzed drift severity, not by a command failure.
+
+## Scenario: iac-state `module_validate` v1.0
+
+### 1. Scope / Trigger
+
+- Trigger: `module_validate.py` is the iac-state static module audit entrypoint.
+  It runs Terraform/OpenTofu `fmt -check -recursive`, `validate -json`, parses
+  local HCL with `python-hcl2`, and optionally compares registry target-version
+  variables.
+- Scope: CLI signature, JSON `data` payload, static check findings,
+  target-version behavior, and module-validate-local failure classes `140`-`146`.
+
+### 2. Signatures
+
+```bash
+module_validate.py <host> <module-path> [--target-version X.Y.Z] [--tool auto|tofu|terraform] [--json]
+```
+
+- `host` is `local` or an ssh-core alias accepted by `lib/terraform.py`.
+- `module-path` must be a directory containing at least one `*.tf` for local
+  static-audit runs.
+- `--target-version` is supported only for registry source strings
+  `namespace/name/provider` or `registry.terraform.io/namespace/name/provider`.
+
+### 3. Contracts
+
+- `data.summary.modules` is `ok | warn | crit`.
+- `data.findings[]` contains `severity`, `kind`, `name`, `reason`, `message`,
+  and `hint`.
+- `data.raw` carries fmt/validate stdout, stderr, exit code, and validate JSON.
+- `fmt_failed`, `hcl_parse_failed`, and `registry_unreachable` are degraded
+  audit states: they emit findings/warnings and do not set top-level
+  `failure_class`.
+- `validate_failed`, unsupported target-version source, and missing registry
+  version are hard failures with top-level `failure_class`.
+
+### 4. Validation & Error Matrix
+
+| Condition | `failure_class` | Exit |
+|-----------|-----------------|------|
+| Shared local/remote transport failure | `host_unreachable` | `120` |
+| Terraform/OpenTofu missing | `tool_missing` | `121` |
+| Python-side timeout | `timeout` | `124` |
+| Local module path invalid or has no `*.tf` files | `module_path_invalid` | `140` |
+| HCL parser import/parse fails | `hcl_parse_failed` | `0` or `1` following summary severity |
+| `terraform fmt -check` reports files needing format | `fmt_failed` | `0` or `1` following summary severity |
+| `terraform validate -json` returns nonzero | `validate_failed` | `143` |
+| Registry request times out / network fails / returns malformed JSON | `registry_unreachable` | `0` or `1` following summary severity |
+| Registry version URL returns 404 | `registry_version_not_found` | `145` |
+| `--target-version` source is git/local/private/absent | `unsupported_source` | `146` |
+| Unexpected script bug | `null` | `1` |
+
+### 5. Good/Base/Bad Cases
+
+- Good: well-formed module, fmt clean, validate clean, no static findings ->
+  `summary.modules="ok"`, exit `0`.
+- Base: module validates but has missing README, unbounded provider version, or
+  hardcoded resource name -> warn findings, exit `0`.
+- Bad: module contains a backend block or target-version removes a current
+  variable -> `summary.modules="crit"`, exit `1`, `failure_class=null`.
+- Failure: Terraform validation diagnostics are invalid module health ->
+  `failure_class="validate_failed"`, exit `143`.
+
+### 6. Tests Required
+
+- Unit tests cover all seven static categories, hcl2 parsing, fmt soft failure,
+  validate hard failure, registry unsupported/404/unreachable paths, upgrade
+  diff removed/new-required variables, and envelope rendering.
+- Live Terraform tests are opt-in under `live_terraform` and must be skip-safe
+  when neither `tofu` nor `terraform` is installed.
+- Default `pytest tests/` must remain green with environment-dependent live
+  cases skipped rather than failed.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```json
+{"success": false, "exit_code": 141, "data": {"failure_class": "hcl_parse_failed"}}
+```
+
+HCL parse failure must not block fmt/validate. It is a degraded static-audit
+state, not a hard command failure.
+
+#### Correct
+
+```json
+{"success": true, "exit_code": 0, "data": {"warnings": [{"failure_class": "hcl_parse_failed"}], "failure_class": null}}
+```
 
 ## Scenario: k8s-debug `check_namespace` v1.0
 

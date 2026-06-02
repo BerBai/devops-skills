@@ -6,6 +6,42 @@ Terraform module 是复用单元。坏 module 比手写 HCL 还危险 —— 复
 
 `module_validate.py` 自动检查的项：
 
+## module_validate.py hint anchors
+
+脚本里的 finding `hint` 字段会指向这些稳定锚点：
+
+### structure
+
+文件结构检查：`main.tf` / `variables.tf` / `outputs.tf` / `README.md` / `versions.tf`。
+
+### inputs
+
+变量类型、描述、required 变量 validation 检查。
+
+### outputs
+
+输出描述和敏感输出标记检查。
+
+### naming
+
+`name` / `name_prefix` / `tags` 输入与硬编码资源名检查。
+
+### pinning
+
+Terraform 与 provider 版本 pinning 检查。
+
+### antipatterns
+
+backend/provider block、`count = 0`、resource-level `depends_on`、exec provisioner 检查。
+
+### security_hints
+
+IAM wildcard、`0.0.0.0/0`、public ACL、publicly accessible 等轻量安全提示。
+
+### upgrade_diff
+
+`--target-version` 对比发现的 removed variables 与 new required variables。
+
 ### 结构
 - [ ] 至少有 `main.tf` / `variables.tf` / `outputs.tf` 三件套
 - [ ] 有 `README.md` 说明用途、输入、输出
