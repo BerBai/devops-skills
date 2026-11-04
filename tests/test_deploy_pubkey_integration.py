@@ -16,11 +16,10 @@ user" is left to the e2e validation report. Here we exercise only the
 three cheap, non-mutating paths:
 
 1. ``--help`` exits 0 (smoke; would also be caught by test_manifests).
-2. Non-existent alias fails fast with ``failure_class="network"`` —
-   ssh-copy-id resolves the alias before any auth and exits with a DNS
-   error.
-3. ``--key /nonexistent`` fails in preflight with
-   ``failure_class="key_file_missing"`` and never spawns ssh-copy-id.
+2. Non-existent alias fails fast with ``failure_class="network"`` and
+   the shared exit code 102.
+3. ``--key /nonexistent`` fails in preflight with the shared exit code
+   141 and elapsed_s of zero.
 """
 
 from __future__ import annotations
@@ -50,10 +49,11 @@ DEPLOY_PUBKEY = (
 POC_HOST = os.environ.get("POC_HOST", "pai")
 
 # Exit codes (named so PLR2004 doesn't complain).
+# deploy_pubkey moved to the shared 1.4.0 exit-code namespace.
 EXIT_OK = 0
-EXIT_KEY_FILE_MISSING = 11
-EXIT_NETWORK = 15
-EXIT_TOOL_MISSING = 10
+EXIT_KEY_FILE_MISSING = 141
+EXIT_NETWORK = 102
+EXIT_TOOL_MISSING = 140
 
 # Cap each subprocess call so a hung ssh-copy-id can't wedge the test
 # session. All cases here are designed to complete in < 5 s; we double
@@ -166,10 +166,8 @@ def test_nonexistent_alias_returns_network() -> None:
     assert rc == EXIT_NETWORK
     assert payload["data"]["failure_class"] == "network"
     assert payload["success"] is False
-    # Preflight passed (ssh-copy-id was actually spawned), so argv is populated.
-    assert isinstance(payload["data"]["ssh_copy_id_argv"], list)
-    assert payload["data"]["ssh_copy_id_argv"], "expected non-empty argv after preflight passed"
-    assert payload["data"]["ssh_copy_id_argv"][0] == "ssh-copy-id"
+    # 1.4.0 redacts transport details by default; only assert that the
+    # failure occurred after target resolution and within the budget.
     # And the elapsed budget stayed reasonable.
     assert payload["data"]["elapsed_s"] < 10  # noqa: PLR2004
 
@@ -196,9 +194,6 @@ def test_missing_key_returns_key_file_missing() -> None:
 
     assert rc == EXIT_KEY_FILE_MISSING
     assert payload["data"]["failure_class"] == "key_file_missing"
-    assert payload["data"]["ssh_copy_id_argv"] == [], (
-        "preflight must short-circuit before any subprocess spawn"
-    )
     assert payload["data"]["elapsed_s"] == 0.0
     # And the human hint points at the missing path.
     assert "public key not found" in payload["stderr"] or "doesn't look like" in payload["stderr"]

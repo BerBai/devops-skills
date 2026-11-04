@@ -63,6 +63,7 @@ def _ns(**kwargs: object) -> object:
         "tags": None,
         "description": None,
         "location": None,
+        "show_key": False,
     }
     defaults.update(kwargs)
     return type("Args", (), defaults)()
@@ -490,13 +491,27 @@ def test_cmd_find_hit_returns_full_record(tmp_path: Path) -> None:
     assert result["exit_code"] == EXIT_OK
     data = result["data"]
     # Field rename: prd output is `key`, not `identity_file`.
+    # 1.4.0 redacts IdentityFile paths unless --show-key is requested.
     assert data["alias"] == "A"
     assert data["host"] == "1.1.1.1"
     assert data["user"] == "u"
     assert data["port"] == 2222  # noqa: PLR2004
-    assert data["key"] == "~/.ssh/key"
+    assert data["key"] == "<key-dir>/key"
+    assert data["key_redacted"] is True
     assert data["proxy_jump"] == "bastion"
     assert isinstance(data["raw_lines"], list) and data["raw_lines"]
+    assert "~/.ssh/key" not in "\n".join(data["raw_lines"])
+
+
+def test_cmd_find_show_key_returns_full_path(tmp_path: Path) -> None:
+    cfg = _write_config(
+        tmp_path,
+        "Host A\n    HostName 1.1.1.1\n    User u\n    IdentityFile ~/.ssh/key\n",
+    )
+    result = scm.cmd_find(_ns(alias="A", show_key=True), cfg)
+    assert result["success"] is True
+    assert result["data"]["key"] == "~/.ssh/key"
+    assert "key_redacted" not in result["data"]
 
 
 def test_cmd_find_not_found_returns_exit_4(tmp_path: Path) -> None:

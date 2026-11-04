@@ -8,7 +8,7 @@
 
 | Plugin | 层 | 角色 |
 |---|---|---|
-| **`ssh-core`** | 传输 | 快车道 —— 命令执行、集群广播、端口隧道、上传下载、服务器间直传 |
+| **`ssh-core`** | 传输 | 快车道 —— 字节安全命令执行、密钥/密码认证、交互会话、集群广播、端口隧道、多后端传输、sudo、重试与 SSH config CRUD |
 | **`ssh-guarded`** | 安全 | 慢车道 —— request/execute 两阶段写、默认脱敏输出、workdir 沙箱 |
 | **`remote-debug`** | 主机调试 | Playbook —— 症状决策树、应急响应、Linux 与网络诊断 |
 | **`k8s-debug`** | K8s | Pod/Deployment/Service 诊断、CrashLoopBackOff/OOMKilled、Helm release 健康 |
@@ -45,7 +45,7 @@
 
 ## 状态
 
-`v1.0` —— 8 个 plugin 的 V1 CLI surface 均已实现，具备 unit 覆盖和 skip-safe integration 覆盖。按已接受的 V1 收口标准，`ssh_daemon.py` 依据 ADR-001 延后到 V1.1：V1 使用原生 OpenSSH subprocess 执行，V1.1 会先评估 OpenSSH ControlMaster，再决定是否恢复自定义 daemon。
+`v1.0` 已发布 8 个 plugin surface。此后 `ssh-core` 已同步到独立版 `1.4.0`（ADR-004），新增字节安全输出、密钥/密码认证、交互会话、多后端传输、sudo/retry，以及 `ssh_session.py`、`ssh_daemon.py`、`selfcheck.py`、`audit.py`。其他 plugin 仍只通过 CLI + JSON 与它交互。
 
 V1.1 路线图见 [`CONTRIBUTING.zh-CN.md`](./CONTRIBUTING.zh-CN.md)。
 

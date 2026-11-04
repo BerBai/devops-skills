@@ -22,7 +22,7 @@ preference. Do not invent new top-level layout.
 devops-skills/
 ├── .claude-plugin/marketplace.json   # the marketplace entry — lists all plugins
 ├── plugins/                          # one directory per plugin
-│   ├── ssh-core/                     # v1.0 sample (full scripts + references)
+│   ├── ssh-core/                     # v1.4.0 transport sample (full scripts + references)
 │   ├── ssh-guarded/                  # v1.0 sample (safety layer)
 │   ├── remote-debug/
 │   ├── k8s-debug/                    # v0.2 scaffold sample
@@ -60,18 +60,16 @@ Notes:
 - `references/` must be non-empty — `test_references_directory_populated` fails otherwise.
 - `scripts/` may contain a `lib/` subpackage for cross-script helpers
   within one plugin. The canonical example is
-  `plugins/ssh-core/skills/ssh-core/scripts/lib/__init__.py` — 87 lines
-  defining the JSON output contract (`json_result` / `emit`), the
-  Windows MSYS safety env helper (`msys_safe_env`), per-alias state
-  paths (`alias_state_path`), and the shared scaffold stub
-  (`unimplemented`). It is the only fully-implemented Python code in
-  the v0.2.0 tree.
+  `plugins/ssh-core/skills/ssh-core/scripts/lib/` — the 1.4.0 shared
+  package contains JSON envelopes, exit codes, capture/redaction, auth,
+  askpass, retry, transfer, session, probe, and platform helpers. It is
+  private to ssh-core and is never imported by another plugin.
 
 ---
 
 ## Cross-plugin coordination
 
-Each plugin is **self-contained**. v0.2 diagnosis plugins
+Each plugin is **self-contained**. Diagnosis plugins
 (`k8s-debug` / `docker-quick` / `log-aggregator` / `iac-state` / `cicd-debug`)
 need remote execution and `ssh-guarded` needs the same, but **none of them
 import `ssh-core` Python directly**. They shell out to the user-installed
@@ -112,3 +110,9 @@ implemented scripts that depend on their plugin-local `scripts/lib` should load
 that helper by file path (or otherwise use a plugin-unique module name) instead
 of relying on a bare `from lib import ...`. This keeps full-suite import order
 from changing runtime behavior.
+
+For the ssh-core 1.4.0 runtime suites, `tests/conftest.py` intentionally loads
+`plugins/ssh-core/skills/ssh-core/scripts/lib` first as the project-wide `lib`
+module. New plugin tests must either reuse that fixture contract or load a
+different plugin by subprocess; do not import another plugin's `lib` in-process.
+

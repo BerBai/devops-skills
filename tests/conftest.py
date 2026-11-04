@@ -12,10 +12,12 @@ Both are only consumed by tests under ``@pytest.mark.live_k8s``.
 
 from __future__ import annotations
 
+import importlib.util
 import json as _json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -23,6 +25,36 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+SSH_CORE_SCRIPTS = (
+    REPO_ROOT
+    / "plugins"
+    / "ssh-core"
+    / "skills"
+    / "ssh-core"
+    / "scripts"
+)
+
+
+def _load_ssh_core_lib() -> None:
+    """Pin the plugin-private ``lib`` package before any test imports it.
+
+    Several plugins deliberately use the same bare ``lib`` package name.
+    The synced ssh-core suite needs its own package for subprocess and
+    in-process coverage; loading it once at collection avoids pytest file
+    order deciding which plugin wins.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "lib", SSH_CORE_SCRIPTS / "lib" / "__init__.py",
+        submodule_search_locations=[str(SSH_CORE_SCRIPTS / "lib")],
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load ssh-core lib package")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+
+_load_ssh_core_lib()
 FIXTURES_DIR = REPO_ROOT / "tests" / "fixtures" / "k8s"
 
 _KIND_CLUSTER_NAME = "k8s-debug-test"

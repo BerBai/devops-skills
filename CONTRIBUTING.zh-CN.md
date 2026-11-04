@@ -44,13 +44,13 @@ devops-skills/
 - 8 个 plugin 的 V1 CLI surface 均已发布。
 - 每个脚本都支持 `--help`；每个运行型脚本都支持 JSON 输出契约。
 - 已发布脚本具备 unit 覆盖；依赖环境的 integration 测试保持 skip-safe。
-- `ssh_daemon.py` 依据 ADR-001 A2 有意延后到 V1.1。V1 通过 `ssh_execute.py` 使用原生 OpenSSH subprocess；没有已发布的 V1 代码调用 daemon stub。
+- `ssh-core` 现已同步自独立版 1.4.0（ADR-004）。传输层包含 `ssh_session.py`、`ssh_daemon.py`、`selfcheck.py` 和 `audit.py`；其他 plugin 仍通过 `ssh_execute.py` shell out。
 
 V1 脚本清单：
 
 | Plugin | V1 状态 |
 |---|---|
-| `ssh-core` | `ssh_execute`、`ssh_cluster`、`ssh_tunnel`、`ssh_server_transfer`、`ssh_config_manager`、`ssh_upload`、`ssh_download`、`deploy_pubkey` 已发布；`ssh_daemon.py` 延后到 V1.1。 |
+| `ssh-core` | `ssh_execute`、`ssh_session`、`ssh_cluster`、`ssh_tunnel`、`ssh_server_transfer`、`ssh_config_manager`、`ssh_upload`、`ssh_download`、`deploy_pubkey`、`ssh_daemon`、`selfcheck`、`audit` 已发布至 1.4.0。 |
 | `ssh-guarded` | request drafters、`run_request`、`exec_detached`、`scan_software`、`redact_check` 已发布。 |
 | `remote-debug` | `diagnose_host`、`tail_log`、`port_check`、`compare_across_hosts` 已发布。 |
 | `k8s-debug` | `check_namespace`、`diagnose_pod`、`cluster_health`、`helm_status` 已发布。 |
@@ -63,8 +63,8 @@ V1 脚本清单：
 
 优先推进能解锁多个后续能力的传输层基础工作：
 
-1. `ssh-core` 连接复用：先评估 OpenSSH ControlMaster，再决定 `ssh_daemon.py` 是保留为自定义 daemon，还是变成兼容包装。
-2. `ssh_server_transfer.py`：实现真正的 `direct` / `auto` / `hybrid` 模式，以及 `--use-rsync`。
+1. `ssh-core`：保持 1.4.0 源/目标同步最新，并在发布前用插件测试验证新的运行时修复。
+2. `ssh_server_transfer.py`：在更多主机类型上验证 named-OpenSSH/tar/rsync 模式。
 3. `ssh_tunnel.py`：实现 `--idle-timeout`，并在连接复用决策后重新评估 Windows 支持。
 4. 长时间日志 follow：改进 `tail_multi.py`、`tail_log.py` 等 follow / reconnect 工作流。
 5. 脱敏强化：多行 private key 缓冲、默认 catalog 导出、可选 regex timeout 防护。

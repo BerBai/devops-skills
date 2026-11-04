@@ -45,13 +45,13 @@ V1 is complete under the accepted rollout criterion:
 - All eight plugins have shipped their V1 CLI surfaces.
 - Every shipped script accepts `--help`; every operational script supports the JSON output contract.
 - Shipped scripts have unit coverage, and environment-dependent integration tests are skip-safe.
-- `ssh_daemon.py` is intentionally deferred to V1.1 per ADR-001 A2. V1 uses native OpenSSH subprocess execution through `ssh_execute.py`; no shipped V1 code calls the daemon stub.
+- `ssh-core` is now synced from the standalone 1.4.0 tree (ADR-004). The transport includes `ssh_session.py`, `ssh_daemon.py`, `selfcheck.py`, and `audit.py`; other plugins continue to shell out through `ssh_execute.py`.
 
 V1 script inventory:
 
 | Plugin | V1 status |
 |---|---|
-| `ssh-core` | `ssh_execute`, `ssh_cluster`, `ssh_tunnel`, `ssh_server_transfer`, `ssh_config_manager`, `ssh_upload`, `ssh_download`, and `deploy_pubkey` shipped; `ssh_daemon.py` deferred to V1.1. |
+| `ssh-core` | `ssh_execute`, `ssh_session`, `ssh_cluster`, `ssh_tunnel`, `ssh_server_transfer`, `ssh_config_manager`, `ssh_upload`, `ssh_download`, `deploy_pubkey`, `ssh_daemon`, `selfcheck`, and `audit` shipped at 1.4.0. |
 | `ssh-guarded` | request drafters, `run_request`, `exec_detached`, `scan_software`, and `redact_check` shipped. |
 | `remote-debug` | `diagnose_host`, `tail_log`, `port_check`, and `compare_across_hosts` shipped. |
 | `k8s-debug` | `check_namespace`, `diagnose_pod`, `cluster_health`, and `helm_status` shipped. |
@@ -64,8 +64,8 @@ V1 script inventory:
 
 Prioritize foundational transport work before plugin-specific enhancements:
 
-1. `ssh-core` connection reuse: evaluate OpenSSH ControlMaster first, then decide whether `ssh_daemon.py` remains a custom daemon or becomes a compatibility wrapper.
-2. `ssh_server_transfer.py`: implement true `direct` / `auto` / `hybrid` modes and `--use-rsync`.
+1. `ssh-core`: keep the 1.4.0 source/target sync current and validate new runtime fixes in the plugin suite before release.
+2. `ssh_server_transfer.py`: validate named-OpenSSH/tar/rsync modes across additional host families.
 3. `ssh_tunnel.py`: implement `--idle-timeout` behavior and revisit Windows support after the connection-reuse decision.
 4. Long-running log follow behavior: improve `tail_multi.py`, `tail_log.py`, and related follow/reconnect workflows.
 5. Redaction hardening: multiline private-key buffering, default catalog export, and optional regex timeout protection.

@@ -8,7 +8,7 @@ Eight composable plugins covering the full DevOps surface — transport, audit, 
 
 | Plugin | Layer | Role |
 |---|---|---|
-| **`ssh-core`** | Transport | Fast lane — command execution, cluster broadcast, tunnels, upload/download, server-to-server transfer |
+| **`ssh-core`** | Transport | Fast lane — byte-safe command execution, key/password auth, interactive sessions, cluster broadcast, tunnels, multi-backend transfers, sudo, retries, and SSH config CRUD |
 | **`ssh-guarded`** | Safety | Slow lane — request/execute two-phase writes, redacted output, workdir sandbox |
 | **`remote-debug`** | Host debug | Playbook — symptom decision trees, incident response, Linux & network diagnostics |
 | **`k8s-debug`** | K8s | Pod/Deployment/Service diagnosis, CrashLoopBackOff/OOMKilled, Helm release health |
@@ -45,7 +45,7 @@ Install any subset. `ssh-core` is the only hard dependency for the others (used 
 
 ## Status
 
-`v1.0` — all 8 plugins have shipped their V1 CLI surfaces with unit coverage and skip-safe integration coverage. The accepted V1 closure keeps `ssh_daemon.py` deferred to V1.1 per ADR-001: V1 uses native OpenSSH subprocess execution, while V1.1 will evaluate OpenSSH ControlMaster before reviving any custom daemon.
+`v1.0` shipped all 8 plugin surfaces. `ssh-core` has since been synced to standalone version `1.4.0` (ADR-004), adding byte-safe output, password/key auth, interactive sessions, multi-backend transfers, sudo/retry, `ssh_session.py`, `ssh_daemon.py`, `selfcheck.py`, and `audit.py`. Other plugins still communicate with it only through CLI + JSON.
 
 See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the V1.1 roadmap.
 

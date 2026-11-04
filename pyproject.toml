@@ -17,8 +17,9 @@ classifiers = [
 # Runtime dependencies live in each plugin's own future requirements.txt; the
 # top-level project ships only manifests, markdown, and Python stubs, so the
 # wheel itself has no runtime deps.
-# Exception: paramiko is required by lib/sftp_transport.py (see ADR-003) for
-# ssh_upload / ssh_download chunk-level SFTP with resume + progress.
+# Exception: paramiko is optional for ssh-core 1.4.0 SFTP routes; scp/tar/
+# rsync fallbacks work without it, but the dev environment includes it for
+# SFTP path and optional-transfer coverage.
 # Exception: PyYAML is required by cicd-debug/secret_scope_audit.py to parse
 # GitHub Actions and GitLab CI workflow YAML structurally.
 # Exception: python-hcl2 is required by iac-state/module_validate.py for

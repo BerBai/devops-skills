@@ -1,7 +1,5 @@
 """sftp_transport.py — shared SFTP transport for ssh_upload / ssh_download.
 
-This module is the foundation introduced by `.trellis/spec/backend/adr-003-sftp-transport.md`.
-
 Two layers:
 
 * **Low-level** ``SftpSession`` — wraps a single ``paramiko.SSHClient`` +
@@ -18,12 +16,13 @@ Two layers:
   ``SftpSession``, call one of these, and translate the result into the
   shared JSON envelope.
 
-The four high-level functions are **placeholders** in this skeleton —
-their bodies are implemented in Phase U / R of the ssh_upload v1.0 task
-(``upload_file`` / ``upload_tree``) and in the ssh_download sibling task
-(``download_file`` / ``download_tree``).
+The four high-level functions are fully implemented (resume, sha256
+verification, tree walk, bwlimit, progress). This module is the *SFTP*
+backend only: when paramiko is unavailable the scripts fall back to
+``scp``/``rsync`` through :mod:`lib.transfer` (SSH-11), so a paramiko-less
+host still has file transfer.
 
-Helpers exposed (and used by the high-level functions when they land):
+Helpers:
 
 * ``make_pct_callback(filename, total, no_progress)`` — 5%-bucket progress
   callback printing to stderr.
@@ -32,10 +31,8 @@ Helpers exposed (and used by the high-level functions when they land):
   block size.
 
 See:
-    .trellis/spec/backend/adr-003-sftp-transport.md — design contract
-    .trellis/spec/backend/error-handling.md         — exit code 9 +
-        failure_class = "transfer_verify_failed"
-    .trellis/tasks/05-24-ssh-core-ssh-upload/design.md — module contracts
+    references/workflows.md §3 — transfer recipes and transport choice
+    references/troubleshooting.md — "dependency_missing" (no paramiko)
 """
 
 from __future__ import annotations
@@ -53,7 +50,88 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import paramiko  # type: ignore[import-untyped]
+try:  # SSHCORE-004: paramiko is a soft dependency.
+    import paramiko  # type: ignore[import-untyped]
+except ImportError:  # pragma: no cover — exercised in the dependency-missing tests
+    paramiko = None  # type: ignore[assignment]
+
+# Exception classes re-exported so scripts can write ``except`` clauses even
+# when paramiko is absent (the import at the top would otherwise abort
+# ``--help``). When paramiko is missing these stubs are never raised —
+# SftpSession raises DependencyMissingError before any I/O.
+if paramiko is not None:
+    AuthenticationException = paramiko.AuthenticationException
+    SSHException = paramiko.SSHException
+else:
+
+    class AuthenticationException(Exception):  # type: ignore[no-redef]
+        """Placeholder when paramiko is not installed."""
+
+    class SSHException(Exception):  # type: ignore[no-redef]
+        """Placeholder when paramiko is not installed."""
+
+
+PARAMIKO_INSTALL_HINT = (
+    "ssh-core: SFTP transport requires paramiko (pip install 'paramiko>=3.0,<4'). "
+    "Command execution (ssh_execute / ssh_cluster / ssh_tunnel) does not need it."
+)
+
+
+class DependencyMissingError(RuntimeError):
+    """Raised when an optional runtime dependency (paramiko) is absent."""
+
+    failure_class = "dependency_missing"
+    exit_code = 3
+
+    def __init__(self, message: str = PARAMIKO_INSTALL_HINT) -> None:
+        super().__init__(message)
+
+
+def require_paramiko() -> object:
+    """Return the paramiko module or raise :class:`DependencyMissingError`."""
+    if paramiko is None:
+        raise DependencyMissingError()
+    return paramiko
+
+
+class HostKeyRejectedError(Exception):
+    """Host key is unknown or has changed — connection refused (SSHCORE-011)."""
+
+    failure_class = "host_key"
+    exit_code = 1
+
+
+_MissingHostKeyPolicyBase = (
+    paramiko.MissingHostKeyPolicy if paramiko is not None else object
+)
+
+
+class _AcceptNewOncePolicy(_MissingHostKeyPolicyBase):  # type: ignore[misc,valid-type]
+    """Trust + persist a host key the first time only (accept-new style).
+
+    Unlike ``AutoAddPolicy`` this never overrides a *mismatch*: paramiko
+    only consults a missing-host-key policy when the host is absent from
+    known_hosts, so a changed key still raises ``BadHostKeyException``.
+    """
+
+    def __init__(self, known_hosts_path: Path) -> None:
+        self._path = known_hosts_path
+
+    def missing_host_key(self, client, hostname, key) -> None:  # type: ignore[no-untyped-def]
+        client._host_keys.add(hostname, key.get_name(), key)
+        if client._host_keys_filename is not None:
+            client.save_host_keys(client._host_keys_filename)
+        entry = f"{hostname} {key.get_name()} {key.get_base64()}\n"
+        try:
+            self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with self._path.open("a", encoding="utf-8") as fh:
+                fh.write(entry)
+            self._path.chmod(0o600)
+        except OSError:
+            # Persistence is best-effort; trusting for this connection
+            # already happened and the caller opted in.
+            pass
+
 
 DEFAULT_BLOCK_SIZE = 131072  # 128 KiB, matches ssh_upload.py surface default
 SHA256_READ_BLOCK = 131072   # 128 KiB streaming read for verify path
@@ -86,6 +164,13 @@ class TransferResult:
     failed_files: list[dict[str, Any]] | None = None
     failure_class: str | None = None
     stderr: str = ""
+    #: ``--preserve`` (DV-19): True when the local mtime/mode were applied to
+    #: the remote side, False when the server refused SETSTAT, None when the
+    #: caller did not ask for preservation.
+    preserved: bool | None = None
+    #: ``--delete`` (DV-19): paths removed on the remote side to mirror the
+    #: source, so a mirror run can be reviewed after the fact.
+    deleted_files: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -100,19 +185,36 @@ class SftpSession:
     ``ssh_config``) using ``paramiko.SSHConfig``. ``ProxyJump`` is
     supported via ``paramiko.ProxyCommand`` when present in config.
 
-    Host-key policy: ``load_system_host_keys()`` is called first so any
-    matching key in ``~/.ssh/known_hosts`` strict-matches. Unknown hosts
-    are auto-added via ``AutoAddPolicy`` — this matches the user
-    expectation set by ``ssh -o StrictHostKeyChecking=accept-new`` and is
-    recorded in ADR-003 D2's "Negative / accepted trade-offs" section.
+    Host-key policy (SSHCORE-011): identical to the exec route.
+    ``load_system_host_keys()`` strict-matches anything in
+    ``~/.ssh/known_hosts``; unknown hosts are **rejected** by default
+    (``RejectPolicy``). ``accept_new_hostkey=True`` reproduces OpenSSH's
+    ``StrictHostKeyChecking=accept-new``: trust once on first contact and
+    persist the key, but still fail when an existing key no longer
+    matches. ``AutoAddPolicy`` is never used — it would silently re-trust
+    a changed key on every connect.
 
-    Auth: ssh-agent + key auth only for v1.0. Password /
-    keyboard-interactive auth is deferred to v1.1 symmetrically with
-    ``ssh_execute``.
+    Auth: ssh-agent + key auth (password auth is the pty session's job;
+    mixing them here would need the password in process memory).
     """
 
-    def __init__(self, alias: str, *, ssh_config: str | None = None) -> None:
+    def __init__(
+        self,
+        alias: str,
+        *,
+        ssh_config: str | None = None,
+        accept_new_hostkey: bool = False,
+        known_hosts: str | None = None,
+        port: int | None = None,
+        identity: str | None = None,
+    ) -> None:
+        if paramiko is None:
+            raise DependencyMissingError()
         self.alias = alias
+        self.accept_new_hostkey = accept_new_hostkey
+        self.known_hosts_path = Path(
+            known_hosts or "~/.ssh/known_hosts"
+        ).expanduser()
         self._client: paramiko.SSHClient | None = None
         self.sftp: paramiko.SFTPClient | None = None
 
@@ -126,8 +228,14 @@ class SftpSession:
 
         hostname = resolved.get("hostname", alias)
         username = resolved.get("user")
-        port = int(resolved.get("port", 22))
-        identity_files = resolved.get("identityfile") or []
+        # FA-11: `--port` / `--identity` were accepted, documented, and then
+        # dropped on the SFTP backend — only the scp/tar branches forwarded
+        # them. The explicit flags now win over ~/.ssh/config.
+        resolved_port = port if port is not None else resolved.get("port", 22)
+        port = int(resolved_port or 22)
+        identity_files = [identity] if identity else (
+            resolved.get("identityfile") or []
+        )
         # paramiko.SSHConfig returns identityfile as a list; expand ~ ourselves.
         key_filenames = [str(Path(p).expanduser()) for p in identity_files]
 
@@ -160,8 +268,37 @@ class SftpSession:
 
         client = paramiko.SSHClient()
         client.load_system_host_keys()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(**connect_kwargs)
+        # An explicit known_hosts (tests, per-project trust store) is loaded
+        # *in addition* to the system one; parameterised host key messages
+        # would otherwise have no effect.
+        if known_hosts and self.known_hosts_path.is_file():
+            with contextlib.suppress(IOError, OSError):
+                client.load_host_keys(str(self.known_hosts_path))
+        if accept_new_hostkey:
+            # Custom policy: save unknown keys once (accept-new semantics),
+            # but keep rejecting mismatches against known hosts.
+            client.set_missing_host_key_policy(_AcceptNewOncePolicy(self.known_hosts_path))
+        else:
+            client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        try:
+            client.connect(**connect_kwargs)
+        except paramiko.BadHostKeyException as e:
+            raise HostKeyRejectedError(
+                # paramiko's BadHostKeyException repr embeds two key objects;
+                # keep the message about the *host*, not the internals.
+                f"host key for {alias} does not match known_hosts; refusing to "
+                "connect. Verify the change with `ssh-keyscan <host>`, then "
+                "remove the stale entry with `ssh-keygen -R <host>`."
+            ) from e
+        except paramiko.SSHException as e:
+            message = str(e)
+            if "not found in known_hosts" in message or "Unknown server" in message:
+                raise HostKeyRejectedError(
+                    f"host key for {alias} is not trusted ({message}). "
+                    "Rerun with --accept-new-hostkey after verifying the "
+                    "fingerprint, or add it with ssh-keyscan."
+                ) from e
+            raise
 
         self._client = client
         self.sftp = client.open_sftp()
@@ -222,6 +359,35 @@ class SftpSession:
     def chmod(self, remote_path: str, mode: int) -> None:
         assert self.sftp is not None
         self.sftp.chmod(remote_path, mode)
+
+    def utime(self, remote_path: str, times: tuple[float, float]) -> bool:
+        """Set the remote access/modify times. Returns False when unsupported.
+
+        ``--preserve`` promises "the remote mtime equals the local one". The
+        SFTP ``SETSTAT`` call that implements it is optional in the protocol
+        and some embedded servers (network appliances, busybox) answer with
+        ``Operation unsupported``; that must degrade to a reported
+        ``preserved: false`` instead of failing an otherwise good copy.
+        """
+        assert self.sftp is not None
+        try:
+            self.sftp.utime(remote_path, times)
+        except (OSError, IOError, NotImplementedError):
+            return False
+        return True
+
+    def listdir_attr(self, remote_dir: str) -> list[Any]:
+        """``listdir_attr`` with the paramiko-None guard in one place."""
+        assert self.sftp is not None
+        return self.sftp.listdir_attr(remote_dir)
+
+    def remove(self, remote_path: str) -> None:
+        assert self.sftp is not None
+        self.sftp.remove(remote_path)
+
+    def rmdir(self, remote_path: str) -> None:
+        assert self.sftp is not None
+        self.sftp.rmdir(remote_path)
 
     # ------------------------------------------------------------------
     # Hot-path I/O: chunked put / get
@@ -438,8 +604,8 @@ def sha256_streaming_remote(session: SftpSession, remote_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# High-level placeholders — bodies land in Phase U / R of the upload task
-# and in the ssh_download sibling task.
+# High-level transfer functions — upload_file / upload_tree / download_file /
+# download_tree. All four are implemented (resume, sha256, bwlimit, progress).
 # ---------------------------------------------------------------------------
 
 
@@ -453,6 +619,7 @@ def upload_file(
     block_size: int = DEFAULT_BLOCK_SIZE,
     bwlimit_kbs: int | None = None,
     progress: bool = True,
+    preserve: bool = False,
 ) -> TransferResult:
     """Single-file upload. See design.md §2.2 for the full state machine.
 
@@ -466,6 +633,11 @@ def upload_file(
       ``local_size`` if equal, refuse if larger), transfer the
       remaining bytes, then **always** sha256-verify both ends. If the
       hashes mismatch, return exit_code=9 (transfer_verify_failed).
+    * ``preserve=True`` (DV-19): after the copy, apply the local file's
+      mtime and permission bits to the remote copy, exactly like ``cp -p``.
+      ``TransferResult.preserved`` says whether the server accepted it; a
+      server without SETSTAT support yields ``preserved=False`` and a
+      ``preserve_note`` in ``stderr`` rather than a failed transfer.
 
     Defensive validation: this function is also called directly by tests
     and by ``upload_tree``, so it returns a failure ``TransferResult``
@@ -515,6 +687,11 @@ def upload_file(
         )
         if chmod is not None:
             session.chmod(remote, chmod)
+        preserved = None
+        stderr = ""
+        if preserve:
+            preserved, note = _apply_preserve(session, local_path, remote)
+            stderr = note
         return TransferResult(
             success=True,
             exit_code=0,
@@ -526,7 +703,8 @@ def upload_file(
             bytes_resumed_from=None,
             failed_files=None,
             failure_class=None,
-            stderr="",
+            stderr=stderr,
+            preserved=preserved,
         )
 
     # ------------------------------------------------------------------
@@ -599,6 +777,12 @@ def upload_file(
     if chmod is not None:
         session.chmod(remote, chmod)
 
+    preserved = None
+    stderr = ""
+    if preserve:
+        preserved, note = _apply_preserve(session, local_path, remote)
+        stderr = note
+
     return TransferResult(
         success=True,
         exit_code=0,
@@ -610,8 +794,45 @@ def upload_file(
         bytes_resumed_from=resume_offset,
         failed_files=None,
         failure_class=None,
-        stderr="",
+        stderr=stderr,
+        preserved=preserved,
     )
+
+
+def _apply_preserve(
+    session: SftpSession,
+    local_path: Path,
+    remote: str,
+) -> tuple[bool, str]:
+    """Copy the local mtime and permission bits onto ``remote``.
+
+    Returns ``(preserved, note)``. ``preserved`` is False when the server
+    rejected the metadata update, and ``note`` then carries a human sentence
+    that the caller folds into ``stderr``/``data.preserve_note`` — a copy that
+    succeeded must not be reported as failed just because SETSTAT is
+    unsupported (a lot of embedded SFTP servers do not implement it).
+    """
+    try:
+        info = local_path.stat()
+    except OSError as exc:
+        return False, f"ssh-core: --preserve could not stat the local file: {exc}"
+    ok = session.utime(remote, (info.st_atime, info.st_mtime))
+    if not ok:
+        return False, (
+            "ssh-core: --preserve: the remote SFTP server rejected the "
+            "timestamp update (SETSTAT unsupported); the file content is "
+            "intact but its mtime was not preserved."
+        )
+    # chmod is best-effort too: the remote umask/ACL may forbid it, and
+    # --chmod already has its own explicit path for callers who care.
+    try:
+        session.chmod(remote, stat_mod.S_IMODE(info.st_mode))
+    except (OSError, IOError, NotImplementedError):
+        return True, (
+            "ssh-core: --preserve: mtime preserved, but permission bits were "
+            "refused by the remote server."
+        )
+    return True, ""
 
 
 def upload_tree(
@@ -624,15 +845,23 @@ def upload_tree(
     block_size: int = DEFAULT_BLOCK_SIZE,
     bwlimit_kbs: int | None = None,
     progress: bool = True,
+    preserve: bool = False,
+    delete: bool = False,
 ) -> TransferResult:
     """Recursive directory upload. See design.md §2.3 for the contract.
 
     Walk strategy (PRD D3 — scp-like):
         * follow symlinks (``os.walk(local_dir, followlinks=True)``);
         * do not preserve link structure (resolved file is uploaded);
-        * do not preserve mtime / owner (v1.1);
+        * ``preserve=True`` applies each file's mtime/mode (DV-19);
         * apply ``chmod`` to files only — directories are created with
           mode 0o755 and rely on the remote umask, per PRD D4(b).
+
+    ``delete=True`` (DV-19) makes this a *mirror*: after the copy, anything
+    under ``remote_dir`` that does not exist under ``local_dir`` is removed.
+    That is destructive by nature, so the CLI layer demands ``--yes``; the
+    removed paths are reported in ``TransferResult.deleted_files`` and no
+    file is removed when the copy itself recorded a failure.
 
     Error policy (PRD D3 — continue-on-error):
         Per-file failures are caught (broad ``Exception`` because
@@ -706,6 +935,8 @@ def upload_tree(
     # 4) Transfer each file.
     # ------------------------------------------------------------------
     total_bytes = 0
+    preserved_any: bool | None = None
+    preserve_notes: list[str] = []
     for i, (local_file, remote_file) in enumerate(file_pairs, start=1):
         if progress:
             print(
@@ -722,9 +953,14 @@ def upload_tree(
                 block_size=block_size,
                 bwlimit_kbs=bwlimit_kbs,
                 progress=progress,
+                preserve=preserve,
             )
             if tr.success:
                 total_bytes += tr.bytes_transferred
+                if tr.preserved is not None:
+                    preserved_any = bool(preserved_any) or tr.preserved
+                if tr.preserved is False and tr.stderr:
+                    preserve_notes.append(tr.stderr.strip())
             else:
                 failed_files.append(
                     {"path": local_file, "error": tr.stderr or "upload failed"}
@@ -735,7 +971,28 @@ def upload_tree(
     elapsed = round(time.monotonic() - start, 3)
 
     # ------------------------------------------------------------------
-    # 5) Aggregate result.
+    # 5) Mirror mode: remove remote entries the source no longer has.
+    #    Never runs after a failed copy — deleting into a half-copied tree
+    #    is how a --delete run destroys data it was supposed to mirror.
+    # ------------------------------------------------------------------
+    deleted: list[str] = []
+    if delete:
+        if failed_files:
+            failed_files.append({
+                "path": remote_dir,
+                "error": (
+                    "--delete skipped: the copy recorded failures, so pruning "
+                    "the destination would leave it inconsistent"
+                ),
+            })
+        else:
+            deleted, prune_errors = _prune_remote(
+                session, local_dir, remote_dir, progress=progress
+            )
+            failed_files.extend(prune_errors)
+
+    # ------------------------------------------------------------------
+    # 6) Aggregate result.
     # ------------------------------------------------------------------
     if not failed_files:
         return TransferResult(
@@ -746,7 +1003,9 @@ def upload_tree(
             sha256_verified=False,
             failed_files=None,
             failure_class=None,
-            stderr="",
+            stderr="\n".join(preserve_notes),
+            preserved=preserved_any,
+            deleted_files=deleted or None,
         )
 
     return TransferResult(
@@ -758,7 +1017,78 @@ def upload_tree(
         failed_files=failed_files,
         failure_class="remote_error",
         stderr=f"{len(failed_files)} of {total_files} files failed to upload",
+        preserved=preserved_any,
+        deleted_files=deleted or None,
     )
+
+
+def _prune_remote(
+    session: SftpSession,
+    local_dir: str,
+    remote_dir: str,
+    *,
+    progress: bool = True,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Remove remote files/dirs under ``remote_dir`` absent from ``local_dir``.
+
+    Walks the destination, keeps a set of the relative paths that exist on
+    the source (computed with the same ``os.walk(followlinks=True)`` the
+    upload used, so the two agree), and deletes the difference bottom-up so
+    a directory can only be removed once it is empty.
+
+    Returns ``(deleted_paths, errors)``; an unreadable directory is an error,
+    not a silent skip, because a mirror that quietly misses half the tree is
+    worse than one that stops.
+    """
+    keep: set[str] = set()
+    for current_root, _subdirs, filenames in os.walk(local_dir, followlinks=True):
+        rel = os.path.relpath(current_root, local_dir)
+        rel_posix = "" if rel in (".", "") else rel.replace(os.sep, "/")
+        keep.add(rel_posix)
+        for fname in filenames:
+            keep.add(posixpath.join(rel_posix, fname) if rel_posix else fname)
+
+    remote_entries: list[tuple[str, bool]] = []  # (relative path, is_dir)
+
+    def _walk(rel_dir: str) -> None:
+        remote_here = (
+            remote_dir if not rel_dir else posixpath.join(remote_dir, rel_dir)
+        )
+        for entry in session.listdir_attr(remote_here):
+            rel_child = posixpath.join(rel_dir, entry.filename) if rel_dir else entry.filename
+            is_dir = stat_mod.S_ISDIR(entry.st_mode or 0)
+            if is_dir:
+                _walk(rel_child)
+            remote_entries.append((rel_child, is_dir))
+
+    try:
+        _walk("")
+    except Exception as exc:  # noqa: BLE001 — reported, not raised
+        return [], [
+            {"path": remote_dir, "error": f"--delete could not list: {exc}"}
+        ]
+
+    deleted: list[str] = []
+    errors: list[dict[str, Any]] = []
+    # Deeper paths first: a directory can only go once it is empty.
+    for rel_child, is_dir in sorted(
+        remote_entries, key=lambda item: item[0].count("/"), reverse=True
+    ):
+        if rel_child in keep:
+            continue
+        full = posixpath.join(remote_dir, rel_child)
+        try:
+            if is_dir:
+                session.rmdir(full)
+            else:
+                session.remove(full)
+        except Exception as exc:  # noqa: BLE001 — report and continue
+            errors.append({"path": full, "error": f"--delete failed: {exc}"})
+            continue
+        deleted.append(full)
+        if progress:
+            print(f"--- deleted (mirror): {full} ---", file=sys.stderr)
+    return deleted, errors
 
 
 def download_file(
@@ -770,6 +1100,7 @@ def download_file(
     block_size: int = DEFAULT_BLOCK_SIZE,
     bwlimit_kbs: int | None = None,
     progress: bool = True,
+    preserve: bool = False,
 ) -> TransferResult:
     """Single-file download — mirror of ``upload_file``.
 
@@ -784,6 +1115,9 @@ def download_file(
       ``remote_size`` if equal, refuse if larger than remote), transfer
       the remaining bytes, then **always** sha256-verify both ends. If
       the hashes mismatch, return exit_code=9 (transfer_verify_failed).
+    * ``preserve=True`` (DV-19): apply the remote mtime and mode to the
+      local copy after it lands, so a download is byte- *and*
+      metadata-identical to the source.
 
     Defensive validation: this function returns a failure
     ``TransferResult`` instead of raising when ``remote`` is missing or
@@ -837,6 +1171,10 @@ def download_file(
             bwlimit_kbs=bwlimit_kbs,
             progress=cb,
         )
+        preserved = None
+        stderr = ""
+        if preserve:
+            preserved, stderr = _apply_local_preserve(local_path, remote_attr)
         return TransferResult(
             success=True,
             exit_code=0,
@@ -848,7 +1186,8 @@ def download_file(
             bytes_resumed_from=None,
             failed_files=None,
             failure_class=None,
-            stderr="",
+            stderr=stderr,
+            preserved=preserved,
         )
 
     # ------------------------------------------------------------------
@@ -916,6 +1255,11 @@ def download_file(
             ),
         )
 
+    preserved = None
+    stderr = ""
+    if preserve:
+        preserved, stderr = _apply_local_preserve(local_path, remote_attr)
+
     return TransferResult(
         success=True,
         exit_code=0,
@@ -927,8 +1271,37 @@ def download_file(
         bytes_resumed_from=resume_offset,
         failed_files=None,
         failure_class=None,
-        stderr="",
+        stderr=stderr,
+        preserved=preserved,
     )
+
+
+def _apply_local_preserve(
+    local_path: Path,
+    remote_attr: Any,
+) -> tuple[bool, str]:
+    """Apply the remote file's mtime/mode to the freshly downloaded copy."""
+    mtime = getattr(remote_attr, "st_mtime", None)
+    mode = getattr(remote_attr, "st_mode", None)
+    if mtime is None:
+        return False, (
+            "ssh-core: --preserve: the SFTP server did not report an mtime "
+            "for the source; the download itself succeeded."
+        )
+    try:
+        os.utime(local_path, (mtime, mtime))
+    except OSError as exc:
+        return False, f"ssh-core: --preserve failed to set the local mtime: {exc}"
+    if mode is None:
+        return True, ""
+    try:
+        os.chmod(local_path, stat_mod.S_IMODE(mode))
+    except OSError:
+        return True, (
+            "ssh-core: --preserve: mtime applied, but the local permission "
+            "bits could not be set."
+        )
+    return True, ""
 
 
 def download_tree(
@@ -940,6 +1313,8 @@ def download_tree(
     block_size: int = DEFAULT_BLOCK_SIZE,
     bwlimit_kbs: int | None = None,
     progress: bool = True,
+    preserve: bool = False,
+    delete: bool = False,
 ) -> TransferResult:
     """Recursive directory download — mirror of ``upload_tree``.
 
@@ -1013,6 +1388,8 @@ def download_tree(
     total_files = len(file_pairs)
     start = time.monotonic()
     total_bytes = 0
+    preserved_any: bool | None = None
+    preserve_notes: list[str] = []
 
     # ------------------------------------------------------------------
     # 3) Transfer each file.
@@ -1032,9 +1409,14 @@ def download_tree(
                 block_size=block_size,
                 bwlimit_kbs=bwlimit_kbs,
                 progress=progress,
+                preserve=preserve,
             )
             if tr.success:
                 total_bytes += tr.bytes_transferred
+                if tr.preserved is not None:
+                    preserved_any = bool(preserved_any) or tr.preserved
+                if tr.preserved is False and tr.stderr:
+                    preserve_notes.append(tr.stderr.strip())
             else:
                 failed_files.append(
                     {"path": remote_file, "error": tr.stderr or "download failed"}
@@ -1043,6 +1425,25 @@ def download_tree(
             failed_files.append({"path": remote_file, "error": str(e)})
 
     elapsed = round(time.monotonic() - start, 3)
+
+    # ------------------------------------------------------------------
+    # 3b) Mirror mode: remove local entries the source no longer has.
+    # ------------------------------------------------------------------
+    deleted: list[str] = []
+    if delete:
+        if failed_files:
+            failed_files.append({
+                "path": local_dir,
+                "error": (
+                    "--delete skipped: the download recorded failures, so "
+                    "pruning the destination would leave it inconsistent"
+                ),
+            })
+        else:
+            deleted, prune_errors = _prune_local_tree(
+                local_dir, remote_dir, session, progress=progress
+            )
+            failed_files.extend(prune_errors)
 
     # ------------------------------------------------------------------
     # 4) Aggregate result.
@@ -1056,7 +1457,9 @@ def download_tree(
             sha256_verified=False,
             failed_files=None,
             failure_class=None,
-            stderr="",
+            stderr="\n".join(preserve_notes),
+            preserved=preserved_any,
+            deleted_files=deleted or None,
         )
 
     return TransferResult(
@@ -1068,7 +1471,79 @@ def download_tree(
         failed_files=failed_files,
         failure_class="remote_error",
         stderr=f"{len(failed_files)} of {total_files} files failed to download",
+        preserved=preserved_any,
+        deleted_files=deleted or None,
     )
+
+
+def _prune_local_tree(
+    local_dir: str,
+    remote_dir: str,
+    session: SftpSession,
+    *,
+    progress: bool = True,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Remove local files/dirs under ``local_dir`` that the remote tree lacks.
+
+    The keep-set is recomputed by walking the *remote* tree (the mirror
+    source), so the decision is made from the same data the download used.
+    Deletion is bottom-up so a directory is only removed once empty.
+    """
+    keep: set[str] = set()
+
+    def _collect(rel_dir: str) -> None:
+        remote_here = (
+            remote_dir if not rel_dir else posixpath.join(remote_dir, rel_dir)
+        )
+        try:
+            entries = session.listdir_attr(remote_here)
+        except Exception:  # noqa: BLE001 — the walk above already reported it
+            return
+        for entry in entries:
+            rel_child = (
+                posixpath.join(rel_dir, entry.filename) if rel_dir else entry.filename
+            )
+            keep.add(rel_child)
+            if stat_mod.S_ISDIR(entry.st_mode or 0):
+                _collect(rel_child)
+
+    _collect("")
+
+    local_root = Path(local_dir)
+    entries: list[tuple[Path, str, bool]] = []  # (absolute, rel_posix, is_dir)
+    try:
+        for current_root, subdirs, filenames in os.walk(local_root, topdown=True):
+            rel = os.path.relpath(current_root, local_root)
+            rel_posix = "" if rel in (".", "") else rel.replace(os.sep, "/")
+            for name in subdirs:
+                child_rel = posixpath.join(rel_posix, name) if rel_posix else name
+                entries.append((Path(current_root) / name, child_rel, True))
+            for name in filenames:
+                child_rel = posixpath.join(rel_posix, name) if rel_posix else name
+                entries.append((Path(current_root) / name, child_rel, False))
+    except OSError as exc:
+        return [], [{"path": local_dir, "error": f"--delete could not walk: {exc}"}]
+
+    deleted: list[str] = []
+    errors: list[dict[str, Any]] = []
+    # Deeper first: files inside a doomed directory must go before it does.
+    for path, rel_posix, is_dir in sorted(
+        entries, key=lambda item: item[1].count("/"), reverse=True
+    ):
+        if rel_posix in keep:
+            continue
+        try:
+            if is_dir:
+                path.rmdir()
+            else:
+                path.unlink()
+        except OSError as exc:
+            errors.append({"path": str(path), "error": f"--delete failed: {exc}"})
+            continue
+        deleted.append(str(path))
+        if progress:
+            print(f"--- deleted (mirror): {path} ---", file=sys.stderr)
+    return deleted, errors
 
 
 __all__ = [

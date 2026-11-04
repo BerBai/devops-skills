@@ -1,46 +1,52 @@
 #!/usr/bin/env python3
-"""deploy_pubkey.py — install your public key on a remote host (v1.0).
+"""deploy_pubkey.py — install your public key on a remote host (v1.4.0).
 
 Public surface::
 
     python deploy_pubkey.py <alias>
-        [--key PATH]                     default: ~/.ssh/id_ed25519.pub
+        [--key PATH]                     default: first of id_ed25519/ecdsa/rsa
         [--connect-timeout N]            default: 8
         [--timeout N]                    default: 180
-        [--ssh-config PATH]              default: unset (ssh-copy-id reads ~/.ssh/config)
-        [--accept-new-hostkey]           default: off (opt-in)
-        [--json]
+        [--ssh-config PATH]
+        [--accept-new-hostkey]
+        [--password]                     headless: use $SSH_PASSWORD
+        [--password-env VAR]
+        [--promote-auth]                 set # auth: key + IdentityFile on success
+        [--audit-log|--no-audit] [--redact|--no-redact]
+        [--json] [--version]
 
-Wraps the system ``ssh-copy-id`` binary. ``ssh-copy-id`` handles the
-remote ``~/.ssh`` perms, ``authorized_keys`` perms, and dedupe-before-
-append; we add the JSON envelope, preflight refusals, and failure
-classification.
+How the key gets installed (SSH-10)
+-----------------------------------
+v1.0 shelled out to ``ssh-copy-id``. That binary is awkward everywhere:
+Git-for-Windows ships it as an *extensionless shell script*, so
+``shutil.which()`` never finds it and ``CreateProcess`` cannot run it — on
+Windows the script was permanently ``tool_missing``.
 
-First-touch auth is **interactive only**: ``subprocess.run`` inherits the
-parent's stdin so the controlling tty handles the one-time password
-prompt. Non-TTY callers get a clean ``no_tty_for_password`` refusal.
+v1.1 does the install itself over a normal SSH exec channel::
 
-Idempotency: ssh-copy-id reporting "All keys were skipped because they
-already exist" maps to ``data.outcome = "already_installed"``,
-``success = True``, even when older OpenSSH builds exit non-zero on it.
+    umask 077; mkdir -p ~/.ssh; chmod 700 ~/.ssh
+    touch ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys
+    if grep -qxF '<key>' ~/.ssh/authorized_keys; then echo ssh-core:key-present
+    else echo '<key>' >> ~/.ssh/authorized_keys; echo ssh-core:key-added; fi
 
-Exit codes (per-script namespace, mirrors ssh_config_manager precedent)::
+which is idempotent, needs no helper binary, and works on Windows, Linux and
+macOS alike. The key is then **verified** with a key-only ssh call before
+success is reported, so "installed but still not usable" is a failure with a
+reason (``verify_failed``), not a false positive.
 
-    0    success (outcome=installed OR already_installed)
-    1    remote_error (ssh-copy-id non-zero, no classification match)
-    10   tool_missing — ssh-copy-id not on PATH
-    11   key_file_missing — --key file missing / unreadable / not a pubkey
-    12   no_tty_for_password — stdin not a TTY and password prompt blocked
-    13   auth — Permission denied
-    14   host_key_unknown — Host key verification failed
-    15   network — unreachable / DNS / connect timeout
-    124  timeout — subprocess.TimeoutExpired (GNU timeout(1) convention)
+Two authentication paths:
 
-See:
-    .trellis/tasks/05-24-ssh-core-deploy-pubkey/prd.md      — D1-D7 decisions
-    .trellis/tasks/05-24-ssh-core-deploy-pubkey/design.md   — regex tables, exit codes
-    .trellis/spec/backend/adr-001-ssh-execute.md            — sibling native-OpenSSH ADR
-    plugins/ssh-core/skills/ssh-core/references/safety.md   — pubkey deploy philosophy
+* **key already works** — the exec channel runs over the existing key (the
+  normal case: adding a *second* key, or re-running).
+* **``--password``** — the exec channel is opened with ``$SSH_PASSWORD``
+  through :mod:`lib.session` (pty on POSIX, ``ssh -tt`` + askpass elsewhere),
+  so a fresh Windows box can bootstrap a Linux host with no ``ssh-copy-id``,
+  no WSL and no pty.
+
+Exit codes (shared table, :mod:`lib.exit_codes`): ``key_file_missing`` 141,
+``tool_missing`` 140, ``auth`` 100, ``host_key`` 101, ``network`` 102,
+``password_required`` 105, ``unsupported_target`` 108,
+``ssh_config_unsupported`` 142, ``verify_failed`` 9, ``timeout`` 124.
 """
 
 from __future__ import annotations
@@ -48,340 +54,495 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+# Keep the tree free of __pycache__/*.pyc: a plain `python3 <script>` would
+# otherwise write bytecode into the installed (verified) skill directory.
+# Must run before `import lib` below. No-op for behaviour.
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).parent))
-from lib import emit, json_result, msys_safe_env  # noqa: E402, I001
+from lib import (  # noqa: E402, I001
+    AUTH_PATTERN,
+    CHILD_TEXT_KWARGS,
+    HOST_KEY_PATTERN,
+    NETWORK_PATTERN,
+    append_audit,
+    audit_cli_flags,
+    audit_enabled,
+    emit,
+    json_result,
+    msys_safe_env,
+)
+from lib.cli import SSHArgumentParser, handle_version  # noqa: E402
+from lib.exit_codes import (  # noqa: E402
+    EXIT_AUTH,
+    EXIT_HOST_KEY,
+    EXIT_KEY_FILE_MISSING,
+    EXIT_NETWORK,
+    EXIT_NO_TTY,
+    EXIT_OK,
+    EXIT_PASSWORD_REQUIRED,
+    EXIT_PERMISSION,
+    EXIT_REMOTE_ERROR,
+    EXIT_SSH_CONFIG_UNSUPPORTED,
+    EXIT_TIMEOUT,
+    EXIT_TOOL_MISSING,
+    EXIT_UNSUPPORTED_TARGET,
+    EXIT_VERIFY_FAILED,
+    exit_code_for,
+)
+from lib.redact import redactor_for  # noqa: E402
+from lib.pubkey import (  # noqa: E402
+    MARK_ALREADY as _LIB_MARK_ALREADY,
+    MARK_INSTALLED as _LIB_MARK_INSTALLED,
+    PUBKEY_PEEK_BYTES,
+    PubkeyError,
+    build_install_script,
+    load_pubkey,
+    looks_like_pubkey_text,
+    parse_install_output,
+    pick_default_pubkey,
+    pubkey_from_text,
+    resolve_key_path,
+    sh_quote,
+)
 
-# --- Constants --------------------------------------------------------------
-
-_DEFAULT_KEY = "~/.ssh/id_ed25519.pub"
+# SSHCORE-012 A: probe the usual pubkeys in modern-to-legacy order.
+_DEFAULT_KEY_CANDIDATES: tuple[str, ...] = (
+    "~/.ssh/id_ed25519.pub",
+    "~/.ssh/id_ecdsa.pub",
+    "~/.ssh/id_rsa.pub",
+    "~/.ssh/id_dsa.pub",
+)
+_DEFAULT_KEY = _DEFAULT_KEY_CANDIDATES[0]
 _DEFAULT_CONNECT_TIMEOUT = 8
 _DEFAULT_TIMEOUT = 180
 
-# Failure classes (per-script namespace, deploy_pubkey-local).
 FAIL_TOOL_MISSING = "tool_missing"
 FAIL_KEY_FILE_MISSING = "key_file_missing"
 FAIL_NO_TTY = "no_tty_for_password"
 FAIL_AUTH = "auth"
-FAIL_HOST_KEY_UNKNOWN = "host_key_unknown"
+FAIL_HOST_KEY_UNKNOWN = "host_key"
 FAIL_NETWORK = "network"
 FAIL_TIMEOUT = "timeout"
+FAIL_UNSUPPORTED_TARGET = "unsupported_target"
+FAIL_SSH_CONFIG_UNSUPPORTED = "ssh_config_unsupported"
+FAIL_VERIFY_FAILED = "verify_failed"
+FAIL_PASSWORD_REQUIRED = "password_required"
+FAIL_PERMISSION = "permission"
 FAIL_REMOTE_ERROR = "remote_error"
 
-# Exit codes (per design.md exit-code pin; verified non-colliding with
-# error-handling.md's documented set {0,1,2,4-9,124} on 2026-05-25).
 _EXIT_CODES: dict[str, int] = {
-    FAIL_TOOL_MISSING: 10,
-    FAIL_KEY_FILE_MISSING: 11,
-    FAIL_NO_TTY: 12,
-    FAIL_AUTH: 13,
-    FAIL_HOST_KEY_UNKNOWN: 14,
-    FAIL_NETWORK: 15,
-    FAIL_TIMEOUT: 124,
-    FAIL_REMOTE_ERROR: 1,
+    FAIL_TOOL_MISSING: EXIT_TOOL_MISSING,
+    FAIL_KEY_FILE_MISSING: EXIT_KEY_FILE_MISSING,
+    FAIL_NO_TTY: EXIT_NO_TTY,
+    FAIL_AUTH: EXIT_AUTH,
+    FAIL_HOST_KEY_UNKNOWN: EXIT_HOST_KEY,
+    FAIL_NETWORK: EXIT_NETWORK,
+    FAIL_TIMEOUT: EXIT_TIMEOUT,
+    FAIL_UNSUPPORTED_TARGET: EXIT_UNSUPPORTED_TARGET,
+    FAIL_SSH_CONFIG_UNSUPPORTED: EXIT_SSH_CONFIG_UNSUPPORTED,
+    FAIL_VERIFY_FAILED: EXIT_VERIFY_FAILED,
+    FAIL_PASSWORD_REQUIRED: EXIT_PASSWORD_REQUIRED,
+    FAIL_PERMISSION: EXIT_PERMISSION,
+    FAIL_REMOTE_ERROR: EXIT_REMOTE_ERROR,
 }
 
-# One short actionable stderr line per failure class.
 _HUMAN_HINTS: dict[str, str] = {
-    FAIL_TOOL_MISSING: "ssh-copy-id not found on PATH. Install openssh-client (linux) or openssh (macOS via brew).",
-    FAIL_KEY_FILE_MISSING: "public key not found or invalid: {path}. Generate with `ssh-keygen` or pass --key <path>.",
-    FAIL_NO_TTY: "first-touch deploy requires an interactive terminal for the password prompt. Re-run from a shell, or run `ssh-copy-id` manually then re-invoke deploy_pubkey.",
-    FAIL_AUTH: "authentication to {alias} failed. Check the password or use --accept-new-hostkey if first connection.",
-    FAIL_HOST_KEY_UNKNOWN: "{alias}'s host key is not in ~/.ssh/known_hosts. Re-run with --accept-new-hostkey to trust on first use.",
+    FAIL_TOOL_MISSING: "the ssh client is not on PATH.",
+    FAIL_KEY_FILE_MISSING: (
+        "public key not found or invalid: {path}. Generate one with `ssh-keygen` "
+        "or pass --key <path>."
+    ),
+    FAIL_NO_TTY: (
+        "this host needs a password but none is available. Export "
+        "$SSH_PASSWORD and pass --password (works on Windows too), or run from "
+        "a terminal."
+    ),
+    FAIL_AUTH: (
+        "authentication to {alias} failed. Check the password, or install the "
+        "key with --password / --accept-new-hostkey first."
+    ),
+    FAIL_HOST_KEY_UNKNOWN: (
+        "{alias}'s host key is not in known_hosts. Re-run with "
+        "--accept-new-hostkey to trust it on first use."
+    ),
     FAIL_NETWORK: "could not reach {alias}: {first_stderr_line}",
     FAIL_TIMEOUT: "deploy_pubkey timed out after {timeout}s while talking to {alias}",
-    FAIL_REMOTE_ERROR: "ssh-copy-id failed with exit {rc}. See data.raw_stderr for full output.",
+    FAIL_UNSUPPORTED_TARGET: (
+        "{alias} does not support pubkey deployment (no shell or no ~/.ssh — "
+        "typical for network devices). Use ssh_session.py with password auth."
+    ),
+    FAIL_SSH_CONFIG_UNSUPPORTED: "this ssh client does not support -F.",
+    FAIL_PASSWORD_REQUIRED: (
+        "--password needs the password in the environment: export $SSH_PASSWORD "
+        "(or name another variable with --password-env). Passwords are never "
+        "taken from the command line."
+    ),
+    FAIL_VERIFY_FAILED: (
+        "the key was appended on {alias} but key-only auth still fails: "
+        "{first_stderr_line}. Check ~/.ssh (0700) and authorized_keys (0600) "
+        "permissions, or the server's PubkeyAuthentication setting."
+    ),
+    FAIL_PERMISSION: "permission denied while writing ~/.ssh on {alias}: {first_stderr_line}",
+    FAIL_REMOTE_ERROR: "key deployment failed: {first_stderr_line}",
 }
 
-# Sentinel returncode for _run_ssh_copy_id on TimeoutExpired (real shell
-# exit codes are 0-255 so -1 is unambiguous).
-_RC_TIMEOUT_SENTINEL = -1
-_PUBKEY_PEEK_BYTES = 200
-
-# OpenSSH public-key type prefixes; first whitespace-delimited token of
-# any ``.pub`` file. Extending the tuple supports new key types without
-# any other code change.
-_PUBKEY_PREFIXES: tuple[str, ...] = (
-    "ssh-rsa",
-    "ssh-ed25519",
-    "ssh-dss",
-    "ecdsa-sha2-nistp256",
-    "ecdsa-sha2-nistp384",
-    "ecdsa-sha2-nistp521",
-    "sk-ssh-ed25519@openssh.com",
-    "sk-ecdsa-sha2-nistp256@openssh.com",
-)
-
-# Compiled regexes (per design.md "stderr parsing" + "Failure-class table").
-_INSTALLED_RE = re.compile(r"Number of key\(s\) added:\s*(\d+)")
 _ALREADY_RE = re.compile(r"All keys were skipped because they already exist")
-_AUTH_RE = re.compile(r"Permission denied \([^)]*\)")
-_HOST_KEY_RE = re.compile(r"(Host key verification failed|No matching host key)")
-_NETWORK_RE = re.compile(
-    r"(Could not resolve hostname|Connection refused|"
-    r"Connection timed out|Network is unreachable|No route to host)"
-)
-_PROMPT_FAIL_RE = re.compile(
-    r"(Permission denied, please try again|password:|Authentication failed)"
+_UNSUPPORTED_TARGET_RE = re.compile(
+    r"(subsystem request failed|scp: not found|sftp: not found|"
+    r"does not support sftp|exec request failed|"
+    r"ERROR: (?:sftp|scp) not found|sh: .*not found|command not found)",
+    re.IGNORECASE,
 )
 
 
-# --- Parser -----------------------------------------------------------------
+#: Re-exported so older tests (and any external caller) keep importing the
+#: marker names from this script. The values live in :mod:`lib.pubkey` only.
+_MARKER_ADDED = _LIB_MARK_INSTALLED
+_MARKER_PRESENT = _LIB_MARK_ALREADY
+
+
+# --- parser -----------------------------------------------------------------
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    p = SSHArgumentParser(
         prog="deploy_pubkey.py",
         description=(
-            "Bootstrap public-key auth on a remote host by wrapping system "
-            "ssh-copy-id. Inherits the controlling tty for the one-time "
-            "password prompt; emits the shared JSON envelope with --json."
+            "Install a public key on a remote host over SSH (no ssh-copy-id "
+            "needed), verify that key-only auth works, and optionally promote "
+            "the host's # auth: metadata to key."
         ),
     )
-    p.add_argument("alias", help="Host alias from ~/.ssh/config (or user@host if not aliased)")
+    p.add_argument("alias", help="Host alias from ~/.ssh/config (or user@host)")
     p.add_argument(
-        "--key", default=_DEFAULT_KEY,
-        help=f"Path to the .pub file to install (default: {_DEFAULT_KEY})",
+        "--key", default=None,
+        help="Path to the .pub file (default: first of "
+             + " / ".join(_DEFAULT_KEY_CANDIDATES) + ")",
     )
-    p.add_argument(
-        "--connect-timeout", type=int, default=_DEFAULT_CONNECT_TIMEOUT,
-        help=f"SSH connect timeout in seconds, applied as -o ConnectTimeout (default: {_DEFAULT_CONNECT_TIMEOUT})",
-    )
-    p.add_argument(
-        "--timeout", type=int, default=_DEFAULT_TIMEOUT,
-        help=f"Total wall-clock budget for ssh-copy-id, in seconds (default: {_DEFAULT_TIMEOUT})",
-    )
-    p.add_argument(
-        "--ssh-config", default=None,
-        help="Pass -F <path> to ssh-copy-id (default: ssh-copy-id reads ~/.ssh/config)",
-    )
+    p.add_argument("--connect-timeout", type=int, default=_DEFAULT_CONNECT_TIMEOUT)
+    p.add_argument("--timeout", type=int, default=_DEFAULT_TIMEOUT)
+    p.add_argument("--ssh-config", default=None, help="Pass -F <path> to ssh")
     p.add_argument(
         "--accept-new-hostkey", action="store_true",
-        help="Opt-in: pass -o StrictHostKeyChecking=accept-new for first-touch trust",
+        help="Opt-in: StrictHostKeyChecking=accept-new for first-touch trust",
     )
-    p.add_argument("--json", action="store_true", help="Emit the shared JSON output contract on stdout")
+    p.add_argument(
+        "--password", action="store_true",
+        help=(
+            "Headless bootstrap: log in with $SSH_PASSWORD, append the key, "
+            "then verify key-only auth. No TTY or ssh-copy-id needed."
+        ),
+    )
+    p.add_argument("--password-env", default="SSH_PASSWORD")
+    p.add_argument(
+        "--promote-auth", action="store_true",
+        help=(
+            "After a verified install: rewrite '# auth:' to key and add "
+            "IdentityFile/IdentitiesOnly for this alias"
+        ),
+    )
+    p.add_argument(
+        "--redact", dest="redact", action="store_true", default=True,
+        help="Hide host identifiers in the envelope (default: on)",
+    )
+    p.add_argument("--no-redact", dest="redact", action="store_false", help=argparse.SUPPRESS)
+    audit_cli_flags(p)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--version", "-V", action="store_true")
     return p
 
 
-# --- Preflight + arg munging -----------------------------------------------
+# --- preflight --------------------------------------------------------------
 
 
 def _resolve_key(path: str) -> Path:
-    """Expand ``~`` and make absolute. Does NOT check existence."""
-    return Path(path).expanduser().resolve()
+    return resolve_key_path(path)
+
+
+def _pick_default_key() -> tuple[str, str]:
+    return pick_default_pubkey()
 
 
 def _looks_like_openssh_pubkey(key_path: Path) -> bool:
-    """Read first 200 bytes; return True iff the file starts with a known
-    OpenSSH public-key type token. Catches the "user passed a private key"
-    catastrophe before ssh-copy-id appends it verbatim to authorized_keys.
+    """Read the first bytes and hand the judgement to :mod:`lib.pubkey`.
+
+    The *prefix table* lives in the library only; this function is a thin
+    file-reading adapter, because a preflight that does not read the file cannot
+    tell a public key from a private one.
     """
     try:
         with key_path.open("rb") as fh:
-            head = fh.read(_PUBKEY_PEEK_BYTES)
+            head = fh.read(PUBKEY_PEEK_BYTES)
     except OSError:
         return False
-    text = head.decode("utf-8", errors="replace").lstrip()
-    return any(text.startswith(prefix + " ") for prefix in _PUBKEY_PREFIXES)
+    return looks_like_pubkey_text(head.decode("utf-8", errors="replace"))
 
 
 def _preflight(args: argparse.Namespace) -> dict | None:
-    """Refuse before any subprocess spawn. Three refusal paths:
-    tool_missing / key_file_missing(does-not-exist) / key_file_missing(not-a-pubkey).
-    Returns None when preflight passes.
-    """
-    if shutil.which("ssh-copy-id") is None:
-        return _failure_envelope(
-            args, _resolve_key(args.key), FAIL_TOOL_MISSING, [], 0.0, "",
-        )
+    """Refuse before any network I/O."""
     key_path = _resolve_key(args.key)
     if not key_path.exists() or not os.access(key_path, os.R_OK):
-        return _failure_envelope(
-            args, key_path, FAIL_KEY_FILE_MISSING, [], 0.0, "",
-        )
+        return _failure_envelope(args, key_path, FAIL_KEY_FILE_MISSING, 0.0, "")
     if not _looks_like_openssh_pubkey(key_path):
         return _failure_envelope(
-            args, key_path, FAIL_KEY_FILE_MISSING, [], 0.0,
+            args, key_path, FAIL_KEY_FILE_MISSING, 0.0,
             f"{key_path} doesn't look like an OpenSSH public key",
         )
     return None
 
 
-# --- ssh-copy-id argv assembly ---------------------------------------------
+# --- remote install ---------------------------------------------------------
 
 
-def _build_argv(args: argparse.Namespace, key_path: Path) -> list[str]:
-    """Compose ssh-copy-id argv:
-        ssh-copy-id -i <key_path> -o ConnectTimeout=N
-            [-F <ssh_config>] [-o StrictHostKeyChecking=accept-new] <alias>
+def _install_command(pubkey_text: str) -> str:
+    """The idempotent install snippet for ``pubkey_text``.
 
-    Never adds ``-o BatchMode=yes`` — that would defeat the password prompt
-    that is the whole point of deploy_pubkey.
+    Delegates to :func:`lib.pubkey.build_install_script` so there is exactly one
+    implementation of "append this key to authorized_keys without ssh-copy-id".
+    Before 1.4.0 this function was a second, simpler copy — and the library's
+    copy was the one with the SELinux restore and the error markers.
     """
-    argv: list[str] = [
-        "ssh-copy-id", "-i", str(key_path),
-        "-o", f"ConnectTimeout={args.connect_timeout}",
-    ]
+    key = pubkey_from_text(pubkey_text)
+    return build_install_script(key)
+
+
+def _remote_install_commands(pubkey_text: str) -> str:
+    """Backwards-compatible alias for :func:`_install_command`."""
+    return _install_command(pubkey_text)
+
+
+def _ssh_base_argv(args: argparse.Namespace) -> list[str]:
+    argv = ["ssh", "-o", f"ConnectTimeout={args.connect_timeout}"]
     if args.ssh_config:
         argv += ["-F", args.ssh_config]
-    if args.accept_new_hostkey:
-        argv += ["-o", "StrictHostKeyChecking=accept-new"]
-    argv += [args.alias]
     return argv
 
 
-# --- subprocess wrapper ----------------------------------------------------
-
-
-def _run_ssh_copy_id(argv: list[str], timeout: int) -> tuple[int, str, str, float, bool]:
-    """Spawn ssh-copy-id with controlling-tty inheritance.
-
-    Returns ``(returncode, stdout, stderr, elapsed_s, timed_out)``. Raises
-    nothing — TimeoutExpired is caught and surfaced via the ``timed_out``
-    flag + sentinel returncode. ``stdin=None`` is the critical invariant:
-    ssh-copy-id's underlying ssh prompts the parent's controlling tty for
-    the password; ``stdin=PIPE`` would break that path.
-    """
-    start = time.monotonic()
+def _run_key_install(args: argparse.Namespace, command: str) -> dict:
+    """Install over the *existing* key (no password involved)."""
+    argv = _ssh_base_argv(args) + [
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=" + (
+            "accept-new" if args.accept_new_hostkey else "yes"
+        ),
+        "--", args.alias, command,
+    ]
     try:
         proc = subprocess.run(
-            argv,
-            stdin=None,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=msys_safe_env(),
-            check=False,
+            argv, capture_output=True, text=True, timeout=args.timeout,
+            check=False, env=msys_safe_env(), **CHILD_TEXT_KWARGS,
         )
     except subprocess.TimeoutExpired:
-        return _RC_TIMEOUT_SENTINEL, "", "", float(timeout), True
-
-    elapsed = round(time.monotonic() - start, 3)
-    return proc.returncode, proc.stdout, proc.stderr, elapsed, False
-
-
-# --- Result classification -------------------------------------------------
-
-
-def _parse_success_outcome(stderr: str) -> tuple[str, int | None]:
-    """For rc==0 (or the idempotency override): return (outcome, keys_added).
-
-    outcome in {'installed', 'already_installed'}; keys_added is the parsed
-    integer ("Number of key(s) added: N") or 0 for already_installed, or
-    None if ssh-copy-id stderr wording shifted and we couldn't match.
-    """
-    m = _INSTALLED_RE.search(stderr)
-    if m is not None:
-        return "installed", int(m.group(1))
-    if _ALREADY_RE.search(stderr):
-        return "already_installed", 0
-    # Fallback: success but we couldn't parse the number — null keys_added
-    # rather than misreport.
-    return "installed", None
+        return json_result(
+            False, EXIT_TIMEOUT, stderr=f"deploy_pubkey timed out after {args.timeout}s"
+        )
+    except OSError as e:
+        return json_result(
+            False, EXIT_TOOL_MISSING, stderr=f"cannot run ssh: {e}",
+            data={"failure_class": FAIL_TOOL_MISSING},
+        )
+    return json_result(
+        proc.returncode == 0,
+        EXIT_OK if proc.returncode == 0 else EXIT_AUTH,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+        data={"rc": proc.returncode},
+    )
 
 
-def _classify_failure(
-    rc: int, stderr: str, is_tty: bool, timed_out: bool
-) -> str:
-    """Map (rc, stderr, is_tty, timed_out) to one failure_class string.
+def _run_password_install(args: argparse.Namespace, command: str) -> dict:
+    """Install over a password session (works without a pty, e.g. Windows)."""
+    import ssh_session  # local import keeps --help dependency-free
 
-    Precedence (per design.md table):
-        timeout > no_tty_for_password > auth > host_key_unknown
-              > network > remote_error
-    """
-    if timed_out:
-        return FAIL_TIMEOUT
-    # no_tty special case: stdin isn't a TTY AND ssh-copy-id failed on a
-    # password-prompt-shaped stderr. Must precede the auth match so users
-    # in CI/headless contexts get the right remediation hint.
-    if not is_tty and _PROMPT_FAIL_RE.search(stderr):
-        return FAIL_NO_TTY
-    if _AUTH_RE.search(stderr):
-        return FAIL_AUTH
-    if _HOST_KEY_RE.search(stderr):
-        return FAIL_HOST_KEY_UNKNOWN
-    if _NETWORK_RE.search(stderr):
-        return FAIL_NETWORK
-    return FAIL_REMOTE_ERROR
+    password_env = getattr(args, "password_env", "SSH_PASSWORD")
+    if not os.environ.get(password_env):
+        return json_result(
+            False, EXIT_PASSWORD_REQUIRED,
+            stderr="deploy_pubkey: $%s is not set\n" % password_env,
+            data={"failure_class": FAIL_PASSWORD_REQUIRED},
+        )
+    result = ssh_session.execute_single(
+        args.alias,
+        command,
+        timeout=args.timeout,
+        connect_timeout=args.connect_timeout,
+        ssh_config=args.ssh_config,
+        password_env=password_env,
+        accept_new_hostkey=args.accept_new_hostkey,
+    )
+    return {
+        "success": result["success"],
+        "exit_code": result["exit_code"],
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", ""),
+        "data": {
+            "rc": result["exit_code"],
+            "failure_class": result.get("data", {}).get("failure_class"),
+            "auth_method": "password",
+            "transport": result.get("data", {}).get("transport"),
+        },
+    }
 
 
-# --- Envelope construction -------------------------------------------------
+def _verify_key_auth(args: argparse.Namespace, key_path: Path) -> dict:
+    """Prove the key alone can log in (no password, no agent)."""
+    private_key = key_path.with_suffix("")
+    argv = _ssh_base_argv(args) + [
+        "-o", "BatchMode=yes",
+        "-o", "PreferredAuthentications=publickey",
+        "-o", "PubkeyAuthentication=yes",
+        "-o", "StrictHostKeyChecking=" + (
+            "accept-new" if args.accept_new_hostkey else "yes"
+        ),
+        "-i", str(private_key),
+        "-o", "IdentitiesOnly=yes",
+        "--", args.alias, "true",
+    ]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True,
+            timeout=args.connect_timeout + 30, check=False, env=msys_safe_env(),
+            **CHILD_TEXT_KWARGS,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return json_result(False, EXIT_VERIFY_FAILED, stderr=str(e))
+    return json_result(
+        proc.returncode == 0,
+        EXIT_OK if proc.returncode == 0 else EXIT_VERIFY_FAILED,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+    )
+
+
+def _promote_auth_metadata(args: argparse.Namespace, key_path: Path) -> bool:
+    """Flip ``# auth:`` to key and point IdentityFile at the new key."""
+    try:
+        from lib.ssh_config import adopt_key_auth
+
+        outcome = adopt_key_auth(
+            args.alias,
+            str(key_path.with_suffix("")),
+            ssh_config=args.ssh_config,
+        )
+    except Exception:  # noqa: BLE001 — metadata promotion must never fail a deploy
+        return False
+    return outcome.changed
+
+
+# --- envelopes --------------------------------------------------------------
+
+
+def _first_meaningful_stderr_line(raw_stderr: str) -> str:
+    lines = [ln for ln in raw_stderr.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    for ln in lines:
+        if "ERROR" in ln or "error" in ln or "denied" in ln.lower():
+            return ln.strip()
+    return lines[0].strip()
 
 
 def _success_envelope(
     args: argparse.Namespace, key_path: Path, outcome: str,
     keys_added: int | None, argv: list[str], elapsed: float, raw_stderr: str,
+    extra: dict | None = None,
 ) -> dict:
-    """Build the success envelope per PRD D6."""
     if outcome == "already_installed":
         human = f"key already on {args.alias} (key={key_path.name})"
     elif keys_added is None:
         human = f"installed key on {args.alias} (key={key_path.name})"
     else:
         human = f"installed key on {args.alias} (key={key_path.name}, keys_added={keys_added})"
+    data = {
+        "alias": args.alias,
+        "key_name": key_path.name,
+        "key_path": str(key_path),
+        "key_path_source": getattr(args, "key_path_source", "explicit"),
+        "outcome": outcome,
+        "keys_added": keys_added,
+        "failure_class": None,
+        "ssh_argv": argv,
+        "elapsed_s": elapsed,
+        "raw_stderr": raw_stderr,
+    }
+    if extra:
+        data.update(extra)
     return json_result(
-        success=True, exit_code=0, stdout=human + "\n", stderr="",
-        data={
-            "alias": args.alias,
-            "key_path": str(key_path),
-            "outcome": outcome,
-            "keys_added": keys_added,
-            "failure_class": None,
-            "ssh_copy_id_argv": argv,
-            "elapsed_s": elapsed,
-            "raw_stderr": raw_stderr,
-        },
+        success=True, exit_code=EXIT_OK, stdout=human + "\n", stderr="", data=data
     )
-
-
-def _first_meaningful_stderr_line(raw_stderr: str) -> str:
-    """First ERROR-flavoured line of ssh-copy-id stderr, falling back to the
-    first non-empty line. Used for the human-mode network hint string."""
-    lines = [ln for ln in raw_stderr.splitlines() if ln.strip()]
-    if not lines:
-        return ""
-    for ln in lines:
-        if "ERROR" in ln or "error" in ln:
-            return ln.strip()
-    return lines[0].strip()
 
 
 def _failure_envelope(
     args: argparse.Namespace, key_path: Path, fclass: str,
-    argv: list[str], elapsed: float, raw_stderr: str, rc: int = 0,
+    elapsed: float, raw_stderr: str, *, argv: list[str] | None = None,
+    rc: int = 0,
 ) -> dict:
-    """Build a failure envelope per PRD D6. ``rc`` feeds the remote_error
-    hint; other hint fields come from args / key_path / raw_stderr."""
-    hint = _HUMAN_HINTS[fclass].format(
+    hint = _HUMAN_HINTS.get(fclass, "").format(
         alias=args.alias,
         path=str(key_path),
         timeout=getattr(args, "timeout", _DEFAULT_TIMEOUT),
         rc=rc,
         first_stderr_line=_first_meaningful_stderr_line(raw_stderr),
     )
-    # On the non-pubkey-content path the preflight stashed the hint into
-    # raw_stderr — preserve that detail.
-    if fclass == FAIL_KEY_FILE_MISSING and raw_stderr:
-        hint = raw_stderr
+    if fclass in (FAIL_KEY_FILE_MISSING, FAIL_PASSWORD_REQUIRED, FAIL_AUTH) and raw_stderr:
+        hint = raw_stderr.strip() or hint
     return json_result(
         success=False,
-        exit_code=_EXIT_CODES[fclass],
+        exit_code=_EXIT_CODES.get(fclass, exit_code_for(fclass)),
         stdout="",
         stderr=hint if hint.endswith("\n") else hint + "\n",
         data={
             "alias": args.alias,
+            "key_name": key_path.name,
             "key_path": str(key_path),
             "outcome": None,
             "keys_added": None,
             "failure_class": fclass,
-            "ssh_copy_id_argv": argv,
+            "ssh_argv": argv or [],
             "elapsed_s": elapsed,
             "raw_stderr": raw_stderr,
+        },
+    )
+
+
+def _classify_failure(rc: int, stderr: str, timed_out: bool) -> str:
+    """Map (rc, stderr) to one failure_class."""
+    if timed_out:
+        return FAIL_TIMEOUT
+    if _UNSUPPORTED_TARGET_RE.search(stderr):
+        return FAIL_UNSUPPORTED_TARGET
+    if NETWORK_PATTERN.search(stderr):
+        return FAIL_NETWORK
+    if AUTH_PATTERN.search(stderr):
+        return FAIL_AUTH
+    if HOST_KEY_PATTERN.search(stderr):
+        return FAIL_HOST_KEY_UNKNOWN
+    if "permission denied" in stderr.lower():
+        return FAIL_PERMISSION
+    return FAIL_REMOTE_ERROR
+
+
+def _audit(args: argparse.Namespace, result: dict) -> None:
+    if not audit_enabled(getattr(args, "audit", None), default=False):
+        return
+    data = result.get("data") or {}
+    append_audit(
+        args.alias,
+        {
+            "host": args.alias,
+            "route": "deploy_pubkey",
+            "key_name": data.get("key_name"),
+            "outcome": data.get("outcome"),
+            "auth_method": data.get("auth_method", "key"),
+            "success": result.get("success"),
+            "exit_code": result.get("exit_code"),
+            "failure_class": data.get("failure_class"),
+            "elapsed_s": data.get("elapsed_s"),
         },
     )
 
@@ -389,8 +550,19 @@ def _failure_envelope(
 # --- main -------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912
+    argv = list(sys.argv[1:] if argv is None else argv)
+    early = handle_version("deploy_pubkey.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
+
+    if args.key is None:
+        chosen, source = _pick_default_key()
+        args.key = chosen
+        args.key_path_source = source
+    else:
+        args.key_path_source = "explicit"
 
     pre = _preflight(args)
     if pre is not None:
@@ -398,27 +570,66 @@ def main(argv: list[str] | None = None) -> int:
         return int(pre["exit_code"])
 
     key_path = _resolve_key(args.key)
-    argv_list = _build_argv(args, key_path)
-    rc, _stdout, stderr, elapsed, timed_out = _run_ssh_copy_id(argv_list, args.timeout)
+    pubkey_text = key_path.read_text(encoding="utf-8", errors="replace").strip()
+    command = _remote_install_commands(pubkey_text)
 
-    if rc == 0:
-        outcome, keys_added = _parse_success_outcome(stderr)
-        result = _success_envelope(
-            args, key_path, outcome, keys_added, argv_list, elapsed, stderr
+    started = time.monotonic()
+    install = (
+        _run_password_install(args, command)
+        if getattr(args, "password", False)
+        else _run_key_install(args, command)
+    )
+    if not install.get("success"):
+        fclass = (install.get("data") or {}).get("failure_class") or _classify_failure(
+            int(install.get("exit_code", 1)), install.get("stderr", ""), False
         )
-    elif not timed_out and _ALREADY_RE.search(stderr):
-        # Idempotency override: some OpenSSH builds exit non-zero when every
-        # key is already installed. Treat as success/already_installed.
-        result = _success_envelope(
-            args, key_path, "already_installed", 0, argv_list, elapsed, stderr
+        # A key-route install that fails on auth is not necessarily fatal: the
+        # key may simply not be there yet, which is what --password is for.
+        if fclass in ("auth", "host_key") and not getattr(args, "password", False):
+            fclass = FAIL_AUTH if fclass == "auth" else FAIL_HOST_KEY_UNKNOWN
+        result = _failure_envelope(
+            args, key_path, fclass, round(time.monotonic() - started, 3),
+            install.get("stderr", ""), argv=install.get("data", {}).get("ssh_argv", []),
+            rc=int(install.get("exit_code", 1)),
         )
     else:
-        fclass = _classify_failure(rc, stderr, sys.stdin.isatty(), timed_out)
-        result = _failure_envelope(
-            args, key_path, fclass, argv_list, elapsed, stderr, rc=rc
+        output = install.get("stdout") or ""
+        parsed = parse_install_output(output)
+        outcome = (
+            "already_installed"
+            if parsed.outcome == "already_installed"
+            else "installed"
         )
+        verify = _verify_key_auth(args, key_path)
+        promoted = False
+        if verify["success"] and getattr(args, "promote_auth", False):
+            promoted = _promote_auth_metadata(args, key_path)
+        if not verify["success"]:
+            result = _failure_envelope(
+                args, key_path, FAIL_VERIFY_FAILED,
+                round(time.monotonic() - started, 3),
+                verify.get("stderr", ""),
+                rc=verify["exit_code"],
+            )
+            result["data"]["outcome"] = outcome
+        else:
+            result = _success_envelope(
+                args, key_path, outcome,
+                0 if outcome == "already_installed" else None,
+                install.get("data", {}).get("ssh_argv", []),
+                round(time.monotonic() - started, 3),
+                install.get("stderr", ""),
+                extra={
+                    "verified": True,
+                    "auth_method": "password" if getattr(args, "password", False) else "key",
+                    "transport": install.get("data", {}).get("transport"),
+                    "auth_metadata_promoted": promoted,
+                },
+            )
 
-    emit(result, as_json=args.json)
+    _audit(args, result)
+    redactor = redactor_for(args.alias, args.ssh_config, enabled=args.redact)
+    emit(result, as_json=args.json, redactor=redactor)
     return int(result["exit_code"])
 
 
