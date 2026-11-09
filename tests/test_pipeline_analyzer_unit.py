@@ -17,6 +17,14 @@ from types import SimpleNamespace
 
 import pytest
 
+# Binary names are plain strings so the assertions pass on every platform:
+# ``Path("/usr/bin/gh")`` becomes ``\usr\bin\gh`` on Windows, which made
+# these argv comparisons fail for reasons unrelated to the adapter.
+GH_BIN_NAME = "gh"
+GLAB_BIN_NAME = "glab"
+CUSTOM_GH = "custom-gh"
+ENV_GH = "env-gh"
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = (
     REPO_ROOT / "plugins" / "cicd-debug" / "skills" / "cicd-debug" / "scripts"
@@ -24,6 +32,7 @@ SCRIPTS_DIR = (
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import pipeline_analyzer  # noqa: E402, I001
+import lib_cicd  # noqa: E402
 from lib_cicd import (  # noqa: E402, I001
     ApiUnexpectedError,
     AuthError,
@@ -35,6 +44,7 @@ from lib_cicd import (  # noqa: E402, I001
     PermissionError,
     ProviderUnavailable,
     _map_gh_error,
+    preflight_provider,
     resolve_provider,
 )
 
@@ -146,8 +156,8 @@ def test_argparse_include_full_step_logs() -> None:
 
 def test_argparse_gh_bin() -> None:
     """--gh-bin parses correctly."""
-    args = pipeline_analyzer.build_parser().parse_args(["gh", "123", "--gh-bin", "/custom/gh"])
-    assert args.gh_bin == "/custom/gh"
+    args = pipeline_analyzer.build_parser().parse_args(["gh", "123", "--gh-bin", CUSTOM_GH])
+    assert args.gh_bin == CUSTOM_GH
 
 
 def test_argparse_glab_bin() -> None:
@@ -198,18 +208,18 @@ def test_resolve_provider_tool_missing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_resolve_provider_gh_bin_override(monkeypatch: pytest.MonkeyPatch) -> None:
     """--gh-bin override takes precedence."""
-    adapter = resolve_provider("gh", gh_bin="/custom/gh")
+    adapter = resolve_provider("gh", gh_bin=CUSTOM_GH)
     assert isinstance(adapter, GhAdapter)
-    assert str(adapter.binary) == "/custom/gh"
+    assert str(adapter.binary) == CUSTOM_GH
 
 
 def test_resolve_provider_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     """GH_BIN env var override works."""
-    monkeypatch.setenv("GH_BIN", "/env/gh")
+    monkeypatch.setenv("GH_BIN", ENV_GH)
     monkeypatch.setattr("shutil.which", lambda x: None)
     adapter = resolve_provider("gh")
     assert isinstance(adapter, GhAdapter)
-    assert str(adapter.binary) == "/env/gh"
+    assert str(adapter.binary) == ENV_GH
 
 
 def test_gh_adapter_fetch_run_argv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -220,10 +230,10 @@ def test_gh_adapter_fetch_run_argv(monkeypatch: pytest.MonkeyPatch) -> None:
         seen["argv"] = argv
         return _completed(0, stdout=json.dumps(GH_RUN_VIEW_FIXTURE))
 
-    monkeypatch.setattr("lib_cicd.run_cli", fake_run)
-    adapter = GhAdapter(Path("/usr/bin/gh"))
+    monkeypatch.setattr(lib_cicd, "run_cli", fake_run)
+    adapter = GhAdapter(Path(GH_BIN_NAME))
     adapter.fetch_run("12345678", "owner/repo")
-    assert seen["argv"] == ["/usr/bin/gh", "run", "view", "12345678", "--json"]
+    assert seen["argv"] == [GH_BIN_NAME, "run", "view", "12345678", "--json"]
 
 
 def test_gh_adapter_fetch_log_only_failed_argv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -234,10 +244,10 @@ def test_gh_adapter_fetch_log_only_failed_argv(monkeypatch: pytest.MonkeyPatch) 
         seen["argv"] = argv
         return _completed(0, stdout="log output")
 
-    monkeypatch.setattr("lib_cicd.run_cli", fake_run)
-    adapter = GhAdapter(Path("/usr/bin/gh"))
+    monkeypatch.setattr(lib_cicd, "run_cli", fake_run)
+    adapter = GhAdapter(Path(GH_BIN_NAME))
     adapter.fetch_log("12345678", "456", only_failed=True)
-    assert seen["argv"] == ["/usr/bin/gh", "run", "view", "12345678", "--log-failed"]
+    assert seen["argv"] == [GH_BIN_NAME, "run", "view", "12345678", "--log-failed"]
 
 
 def test_gh_adapter_fetch_log_full_argv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -248,10 +258,10 @@ def test_gh_adapter_fetch_log_full_argv(monkeypatch: pytest.MonkeyPatch) -> None
         seen["argv"] = argv
         return _completed(0, stdout="log output")
 
-    monkeypatch.setattr("lib_cicd.run_cli", fake_run)
-    adapter = GhAdapter(Path("/usr/bin/gh"))
+    monkeypatch.setattr(lib_cicd, "run_cli", fake_run)
+    adapter = GhAdapter(Path(GH_BIN_NAME))
     adapter.fetch_log("12345678", "456", only_failed=False)
-    assert seen["argv"] == ["/usr/bin/gh", "run", "view", "12345678", "--log", "--job", "456"]
+    assert seen["argv"] == [GH_BIN_NAME, "run", "view", "12345678", "--log", "--job", "456"]
 
 
 def test_gh_adapter_find_last_success_argv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -262,11 +272,11 @@ def test_gh_adapter_find_last_success_argv(monkeypatch: pytest.MonkeyPatch) -> N
         seen["argv"] = argv
         return _completed(0, stdout=json.dumps([{"databaseId": 999}]))
 
-    monkeypatch.setattr("lib_cicd.run_cli", fake_run)
-    adapter = GhAdapter(Path("/usr/bin/gh"))
+    monkeypatch.setattr(lib_cicd, "run_cli", fake_run)
+    adapter = GhAdapter(Path(GH_BIN_NAME))
     adapter.find_last_success("owner/repo", "test.yml", "main")
     expected = [
-        "/usr/bin/gh",
+        GH_BIN_NAME,
         "run",
         "list",
         "--workflow",
@@ -291,10 +301,10 @@ def test_glab_adapter_fetch_run_argv(monkeypatch: pytest.MonkeyPatch) -> None:
         seen["argv"] = argv
         return _completed(0, stdout=json.dumps({"id": 123, "status": "failed"}))
 
-    monkeypatch.setattr("lib_cicd.run_cli", fake_run)
-    adapter = GlabAdapter(Path("/usr/bin/glab"))
+    monkeypatch.setattr(lib_cicd, "run_cli", fake_run)
+    adapter = GlabAdapter(Path(GLAB_BIN_NAME))
     adapter.fetch_run("123", "group/repo")
-    assert seen["argv"] == ["/usr/bin/glab", "ci", "view", "123", "--output", "json", "--repo", "group/repo"]
+    assert seen["argv"] == [GLAB_BIN_NAME, "ci", "view", "123", "--output", "json", "--repo", "group/repo"]
 
 
 def test_glab_adapter_fetch_log_argv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -305,10 +315,10 @@ def test_glab_adapter_fetch_log_argv(monkeypatch: pytest.MonkeyPatch) -> None:
         seen["argv"] = argv
         return _completed(0, stdout="log output")
 
-    monkeypatch.setattr("lib_cicd.run_cli", fake_run)
-    adapter = GlabAdapter(Path("/usr/bin/glab"))
+    monkeypatch.setattr(lib_cicd, "run_cli", fake_run)
+    adapter = GlabAdapter(Path(GLAB_BIN_NAME))
     adapter.fetch_log("123", "456", only_failed=True)
-    assert seen["argv"] == ["/usr/bin/glab", "ci", "trace", "456"]
+    assert seen["argv"] == [GLAB_BIN_NAME, "ci", "trace", "456"]
 
 
 def test_map_gh_error_auth(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -762,3 +772,72 @@ def test_parse_duration_invalid() -> None:
     """_parse_duration returns 0.0 on invalid timestamps."""
     result = pipeline_analyzer._parse_duration("invalid", "invalid")
     assert result == 0.0
+
+
+# -----------------------------------------------------------------------------
+# Remote preflight (host routing): a remote box has its own gh install + login
+# -----------------------------------------------------------------------------
+
+
+def test_preflight_passes_when_auth_status_is_green(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["host"] = kwargs.get("host")
+        return _completed(0, stdout="github.com\n  Logged in to github.com account me")
+
+    monkeypatch.setattr(lib_cicd, "run_cli", fake_run)
+    lib_cicd.preflight_provider("gh", "lab-240")
+    assert seen["argv"] == ["gh", "auth", "status"]
+    assert seen["host"] == "lab-240"
+
+
+def test_preflight_raises_auth_error_when_not_logged_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(*_a, **_kw):
+        return _completed(1, stderr="You are not logged into any GitHub hosts.")
+
+    monkeypatch.setattr(lib_cicd, "run_cli", fake_run)
+    with pytest.raises(AuthError) as exc:
+        lib_cicd.preflight_provider("gh", "lab-240")
+    assert "lab-240" in str(exc.value)
+    assert "auth login" in str(exc.value)
+
+
+def test_preflight_raises_provider_unavailable_when_binary_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*_a, **_kw):
+        return _completed(127, stderr="bash: glab: command not found")
+
+    monkeypatch.setattr(lib_cicd, "run_cli", fake_run)
+    with pytest.raises(ProviderUnavailable):
+        lib_cicd.preflight_provider("glab", "lab-240")
+
+
+def test_preflight_lets_an_unknown_failure_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unrecognised exit must not be reported as an auth problem."""
+    def fake_run(*_a, **_kw):
+        return _completed(2, stderr="something new")
+
+    monkeypatch.setattr(lib_cicd, "run_cli", fake_run)
+    lib_cicd.preflight_provider("gh", "lab-240")  # must not raise
+
+
+def test_main_skips_preflight_for_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+
+    def fake_preflight(*_a, **_kw):
+        calls["n"] += 1
+
+    monkeypatch.setattr(pipeline_analyzer, "preflight_provider", fake_preflight, raising=False)
+    monkeypatch.setattr(
+        pipeline_analyzer, "resolve_provider",
+        lambda *_a, **_kw: GhAdapter(Path(GH_BIN_NAME)),
+    )
+    monkeypatch.setattr(
+        pipeline_analyzer, "preflight_provider", fake_preflight, raising=False
+    )
+    rc = pipeline_analyzer.main(["gh", "1"])
+    assert isinstance(rc, int)
+    assert calls["n"] == 0

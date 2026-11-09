@@ -272,16 +272,74 @@ def test_emit_json_heatmap_uses_total_lines() -> None:
 
 
 def test_emit_json_partial_fetch_marker() -> None:
+    """A failed source makes the envelope a failure, not a labelled success.
+
+    DEVOPS-BUG-012: this used to assert ``success: true`` / ``exit_code: 0``
+    with only ``data.failure_class`` carrying the bad news. A caller reading
+    ``success`` (or the process exit code) saw a clean run whose counts were
+    silently computed from a subset of the requested sources.
+    """
     buf = io.StringIO()
-    grepper._emit_json(
+    envelope = grepper._emit_json(
         [_group("a", 0)],
         [grepper.FetcherFailure("a", "boom")],
         False,
         buf,
     )
-    env = json.loads(buf.getvalue().splitlines()[-1])
-    assert env["data"]["failure_class"] == "partial_fetch"
-    assert env["data"]["failed_fetchers"] == [{"source": "a", "error": "boom"}]
+    emitted = json.loads(buf.getvalue().splitlines()[-1])
+    assert emitted == envelope
+    assert envelope["success"] is False
+    assert envelope["exit_code"] == 41
+    assert envelope["data"]["failure_class"] == "partial_fetch"
+    assert envelope["data"]["failed_fetchers"] == [{"source": "a", "error": "boom"}]
+    # The data that was collected still ships.
+    assert envelope["data"]["total_hits"] == 0
+    assert envelope["data"]["per_source"] == {"a": 0}
+
+
+def test_main_partial_fetch_exits_41_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """End to end: one dead source -> rc 41, the live source's hits survive."""
+    good = _src(tag="good/app")
+    bad = _src(host="bad", tag="bad/app")
+
+    def fake_iter(src: ResolvedSource, *_a: Any, **_kw: Any):
+        if src.host == "bad":
+            raise FetcherError("bad", ["tail"], 255, stderr_tail="no route")
+        yield _raw("ERROR", source=src, raw_ts="ts1")
+
+    monkeypatch.setattr(grepper.source_spec, "resolve", lambda _specs: [good, bad])
+    monkeypatch.setattr(grepper.fetchers, "iter_lines", fake_iter)
+
+    rc = grepper.main(["--sources", "x", "--pattern", "ERROR", "--json"])
+    lines = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln]
+    assert rc == 41
+    assert lines[-1]["success"] is False
+    assert lines[-1]["exit_code"] == 41
+    assert lines[-1]["data"]["failure_class"] == "partial_fetch"
+    assert lines[-1]["data"]["per_source"] == {"good/app": 1, "bad/app": 0}
+    assert [event["raw"] for event in lines[:-1]] == ["ERROR"]
+
+
+def test_main_partial_fetch_exit_code_in_human_formats(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """summary/raw print no envelope, so only the exit code can carry it."""
+    src = _src(tag="local/app")
+
+    def fake_iter(*_a: Any, **_kw: Any):
+        raise FetcherError("local", ["tail"], 255, stderr_tail="no route")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(grepper.source_spec, "resolve", lambda _specs: [src])
+    monkeypatch.setattr(grepper.fetchers, "iter_lines", fake_iter)
+
+    assert grepper.main(["--sources", "x", "--pattern", "ERROR"]) == 41
+    assert "failed_fetcher" in capsys.readouterr().err
+    assert grepper.main(["--sources", "x", "--format", "raw"]) == 41
 
 
 def test_main_pattern_invalid_returns_180_json(capsys: pytest.CaptureFixture[str]) -> None:
@@ -323,7 +381,20 @@ def test_main_json_alias_equals_format_json(
     out_format = capsys.readouterr().out
 
     assert rc_json == rc_format == 0
-    assert out_json == out_format
+
+    def _without_timing(text: str) -> list[dict]:
+        """The envelopes are equal apart from wall-clock ``elapsed_s``.
+
+        Comparing the raw stdout made this test flaky: two back-to-back runs
+        can round ``elapsed_s`` differently (0.0 vs 0.016) with no behavioural
+        difference. Every other field must still match exactly.
+        """
+        rows = [json.loads(line) for line in text.splitlines() if line]
+        for row in rows:
+            row.get("data", {}).pop("elapsed_s", None)
+        return rows
+
+    assert _without_timing(out_json) == _without_timing(out_format)
 
 
 def test_main_summary_zero_match(

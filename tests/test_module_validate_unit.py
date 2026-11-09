@@ -35,6 +35,23 @@ with contextlib.suppress(ValueError):
     sys.path.remove(str(SCRIPTS_DIR))
 
 
+def _hcl2_importable() -> bool:
+    """python-hcl2 pulls a compiled ``regex``; on an unsupported platform the
+    import fails and every HCL-touching case here would error out. Skipping is
+    honest: the static analyser needs the optional dependency at runtime too."""
+    try:
+        import hcl2  # noqa: F401, PLC0415
+    except Exception:  # noqa: BLE001 - any import failure means "unusable"
+        return False
+    return True
+
+
+_HCL2 = _hcl2_importable()
+requires_hcl2 = pytest.mark.skipif(
+    not _HCL2, reason="python-hcl2 is not importable on this interpreter"
+)
+
+
 def _tf(stdout: str = "", stderr: str = "", returncode: int = 0, args: list[str] | None = None) -> TfResult:
     return TfResult(stdout, stderr, returncode, 0.01, args or ["terraform"], "local")
 
@@ -101,6 +118,7 @@ def test_validate_local_module_rejects_missing_tf(tmp_path: Path) -> None:
     assert exc.value.failure_class == "module_path_invalid"
 
 
+@requires_hcl2
 def test_load_hcl_files_and_block_helpers(tmp_path: Path) -> None:
     _good_module(tmp_path)
     parsed, raw = module_validate._load_hcl_files(tmp_path)
@@ -230,6 +248,7 @@ def test_summary_scores_crit_warn_ok() -> None:
     assert module_validate._summarize([{"severity": "crit", "kind": "x"}])["modules"] == "crit"
 
 
+@requires_hcl2
 def test_success_envelope(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _good_module(tmp_path)
     monkeypatch.setattr(module_validate, "resolve_tool", lambda *_a: "terraform")
@@ -249,6 +268,7 @@ def test_success_envelope(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsy
     assert env["data"]["summary"]["modules"] == "ok"
 
 
+@requires_hcl2
 def test_fmt_failure_is_soft(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _good_module(tmp_path)
     monkeypatch.setattr(module_validate, "resolve_tool", lambda *_a: "terraform")
@@ -267,6 +287,7 @@ def test_fmt_failure_is_soft(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ca
     assert any(f["reason"] == "fmt_failed" for f in env["data"]["findings"])
 
 
+@requires_hcl2
 def test_validate_failure_is_hard(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _good_module(tmp_path)
     monkeypatch.setattr(module_validate, "resolve_tool", lambda *_a: "terraform")
@@ -285,6 +306,7 @@ def test_validate_failure_is_hard(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert env["data"]["failure_class"] == "validate_failed"
 
 
+@requires_hcl2
 def test_hcl_parse_failure_degrades(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     (tmp_path / "main.tf").write_text("not valid {")
     monkeypatch.setattr(module_validate, "resolve_tool", lambda *_a: "terraform")
@@ -295,6 +317,7 @@ def test_hcl_parse_failure_degrades(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert any(w["failure_class"] == "hcl_parse_failed" for w in env["data"]["warnings"])
 
 
+@requires_hcl2
 def test_unsupported_source_for_target_version(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -310,6 +333,7 @@ def test_unsupported_source_for_target_version(
     assert env["data"]["failure_class"] == "unsupported_source"
 
 
+@requires_hcl2
 def test_registry_version_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(module_validate.urllib.request, "urlopen", lambda *_a, **_kw: (_ for _ in ()).throw(module_validate.urllib.error.HTTPError("u", 404, "missing", {}, None)))
     with pytest.raises(module_validate.TfError) as exc:
@@ -317,8 +341,83 @@ def test_registry_version_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     assert exc.value.failure_class == "registry_version_not_found"
 
 
+@requires_hcl2
 def test_registry_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(module_validate.urllib.request, "urlopen", lambda *_a, **_kw: (_ for _ in ()).throw(OSError("offline")))
     with pytest.raises(module_validate.TfError) as exc:
         module_validate._fetch_registry_version("hashicorp/consul/aws", "1.0.0")
     assert exc.value.failure_class == "registry_unreachable"
+
+
+# -----------------------------------------------------------------------------
+# Remote module support: read the .tf files over ssh-core, parse them here
+# -----------------------------------------------------------------------------
+
+
+def test_load_remote_hcl_reads_every_tf_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_list(host: str, directory: str, pattern: str = "*.tf", timeout: int = 30):
+        calls.append(("list", directory))
+        return ["main.tf", "variables.tf"]
+
+    def fake_read(host: str, directory: str, filename: str, timeout: int = 30):
+        calls.append(("read", filename))
+        if filename == "main.tf":
+            return 'resource "terraform_data" "x" {}\n'
+        return 'variable "name" { type = string }\n'
+
+    monkeypatch.setattr(module_validate, "list_remote_files", fake_list)
+    monkeypatch.setattr(module_validate, "read_remote_text", fake_read)
+    monkeypatch.setattr(
+        module_validate,
+        "_load_hcl2",
+        lambda: __import__("types").SimpleNamespace(
+            loads=lambda raw: (
+                {"resource": [{"terraform_data": {"x": {}}}]}
+                if "resource" in raw
+                else {"variable": [{"name": {"type": "string"}}]}
+            )
+        ),
+    )
+
+    parsed, raw, names = module_validate._load_remote_hcl("pai", "/srv/modules/x")
+    assert names == ["main.tf", "variables.tf"]
+    assert "terraform_data" in raw
+    assert set(module_validate._named_blocks(parsed, "variable")) == {"name"}
+    assert calls[0] == ("list", "/srv/modules/x")
+
+
+def test_load_remote_hcl_rejects_an_empty_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        module_validate, "list_remote_files", lambda *_a, **_kw: []
+    )
+    with pytest.raises(Exception) as exc:
+        module_validate._load_remote_hcl("pai", "/srv/empty")
+    assert "no *.tf files" in str(exc.value)
+
+
+def test_load_remote_hcl_surfaces_a_parse_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        module_validate, "list_remote_files", lambda *_a, **_kw: ["main.tf"]
+    )
+    monkeypatch.setattr(
+        module_validate, "read_remote_text", lambda *_a, **_kw: "not hcl {{"
+    )
+
+    class _Boom:
+        @staticmethod
+        def loads(_raw):
+            raise ValueError("bad hcl")
+
+    monkeypatch.setattr(module_validate, "_load_hcl2", lambda: _Boom)
+    with pytest.raises(Exception) as exc:
+        module_validate._load_remote_hcl("pai", "/srv/modules/x")
+    assert "hcl_parse_failed" in str(exc.value) or "bad hcl" in str(exc.value)
+
+
+def test_structure_check_accepts_a_remote_file_list() -> None:
+    findings = module_validate._check_structure(
+        None, present=["main.tf", "variables.tf", "outputs.tf", "versions.tf"]
+    )
+    assert [f["name"] for f in findings] == ["README.md"]

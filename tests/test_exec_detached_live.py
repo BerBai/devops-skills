@@ -9,7 +9,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import uuid
@@ -18,6 +17,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+import live_support  # noqa: E402
+from live_support import require_live_ssh  # noqa: E402
 
 pytestmark = pytest.mark.live_ssh
 
@@ -31,7 +33,19 @@ SCRIPTS_DIR = (
     / "scripts"
 )
 EXEC_DETACHED = SCRIPTS_DIR / "exec_detached.py"
-JOBS_DIR = SCRIPTS_DIR.parent / "reports" / "jobs"
+POC_HOST = live_support.poc_host()
+PROJECT_ID = "exec-detached-it"
+
+
+def _state_reports_root() -> Path:
+    """Where ssh-guarded writes job state (GAP-006), mirroring lib/state.py."""
+    raw = (os.environ.get("SSH_GUARDED_HOME") or "").strip()
+    home = Path(raw).expanduser() if raw else Path.home() / ".devops" / "ssh-guarded"
+    return home / "reports"
+
+
+#: ``$SSH_GUARDED_HOME/reports/<project_id>/jobs`` — never the plugin tree.
+JOBS_DIR = _state_reports_root() / PROJECT_ID / "jobs"
 
 _SAVED_LIB_MODULES = {
     k: sys.modules[k]
@@ -51,47 +65,15 @@ sys.modules.update(_SAVED_LIB_MODULES)
 with contextlib.suppress(ValueError):
     sys.path.remove(str(SCRIPTS_DIR))
 
-POC_HOST = os.environ.get("POC_HOST", "pai")
+POC_HOST = live_support.poc_host()
 PROJECT_ID = "exec-detached-it"
 EXIT_REQUEST_NOT_EXECUTABLE = 60
 
 
-def _ssh_agent_has_key() -> bool:
-    if shutil.which("ssh-add") is None:
-        return False
-    try:
-        proc = subprocess.run(
-            ["ssh-add", "-l"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return proc.returncode == 0 and bool(proc.stdout.strip())
-
-
-def _host_reachable(host: str) -> bool:
-    try:
-        proc = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "true"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return proc.returncode == 0
-
-
 @pytest.fixture(scope="module", autouse=True)
 def _require_live_ssh() -> None:
-    if not _ssh_agent_has_key():
-        pytest.skip("ssh-agent has no loaded identity")
-    if not _host_reachable(POC_HOST):
-        pytest.skip(f"host {POC_HOST!r} not reachable; override with POC_HOST=<alias>")
+    """Module-level precondition; the shared guard names what is missing."""
+    require_live_ssh()
 
 
 def _iso(seconds: int = 3600) -> str:

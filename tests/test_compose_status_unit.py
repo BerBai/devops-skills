@@ -351,28 +351,48 @@ def test_list_services_local_argv_and_cwd(monkeypatch: pytest.MonkeyPatch) -> No
     assert captured["cwd"] == "/tmp/proj"
 
 
-def test_list_services_local_nonexistent_cwd_returns_remote_error(
+def test_list_services_local_nonexistent_cwd_returns_project_dir_invalid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A missing cwd is a bad argument, not a transport failure (DQ-01).
+
+    POSIX raises ``FileNotFoundError`` carrying the cwd in ``filename``;
+    Windows raises ``NotADirectoryError`` (errno 20).
+    """
+    def raise_fnf(*args, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "/nope")
+
+    monkeypatch.setattr(cs.subprocess, "run", raise_fnf)
+    env = cs._list_services("local", "/nope", connect_timeout=8)
+    assert env["success"] is False
+    assert env["data"]["failure_class"] == "project_dir_invalid"
+
     def raise_nadir(*args, **kw):
-        raise FileNotFoundError(2, "No such file or directory: '/nope'")
+        raise NotADirectoryError(20, "Not a directory")
 
     monkeypatch.setattr(cs.subprocess, "run", raise_nadir)
     env = cs._list_services("local", "/nope", connect_timeout=8)
-    assert env["success"] is False
-    assert env["data"]["failure_class"] == "remote_error"
+    assert env["data"]["failure_class"] == "project_dir_invalid"
 
 
-def test_list_services_local_docker_missing_returns_remote_error(
-    monkeypatch: pytest.MonkeyPatch,
+def test_list_services_local_docker_missing_returns_dependency_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """No docker binary → `dependency_missing` (exit 3), not `remote_error`.
+
+    The cwd must be a *real* directory: a spawn failure is only attributed to
+    a missing binary once the cwd is known to exist (``_runtime``
+    ``classify_spawn_failure``), because Windows raises the same
+    ``FileNotFoundError`` for both.
+    """
     def raise_fnf(*args, **kw):
         raise FileNotFoundError(2, "No such file: docker")
 
     monkeypatch.setattr(cs.subprocess, "run", raise_fnf)
-    env = cs._list_services("local", "/tmp/proj", connect_timeout=8)
+    env = cs._list_services("local", str(tmp_path), connect_timeout=8)
     assert env["success"] is False
-    assert env["data"]["failure_class"] == "remote_error"
+    assert env["data"]["failure_class"] == "dependency_missing"
+    assert env["exit_code"] == 3  # noqa: PLR2004
 
 
 # -----------------------------------------------------------------------------

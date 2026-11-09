@@ -34,6 +34,9 @@ from pathlib import Path
 
 import pytest
 
+import live_support  # noqa: E402
+from live_support import require_live_ssh  # noqa: E402
+
 pytestmark = pytest.mark.live_ssh
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -46,7 +49,7 @@ DEPLOY_PUBKEY = (
     / "scripts"
     / "deploy_pubkey.py"
 )
-POC_HOST = os.environ.get("POC_HOST", "pai")
+POC_HOST = live_support.poc_host()
 
 # Exit codes (named so PLR2004 doesn't complain).
 # deploy_pubkey moved to the shared 1.4.0 exit-code namespace.

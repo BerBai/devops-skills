@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
@@ -142,6 +143,7 @@ def _capture(
 def _fake_child_envelope(
     *, success: bool = True, exit_code: int = 0,
     stdout: str = "", stderr: str = "",
+    failure_class: str | None = None,
 ) -> dict[str, Any]:
     """Build an ssh-core-shaped envelope as a Python dict."""
     return {
@@ -149,7 +151,7 @@ def _fake_child_envelope(
         "exit_code": exit_code,
         "stdout": stdout,
         "stderr": stderr,
-        "data": {"route": "remote", "failure_class": None},
+        "data": {"route": "remote", "failure_class": failure_class},
     }
 
 
@@ -926,3 +928,283 @@ def test_execute_resolves_remote_home_and_expands_payload_paths(
     cmd = captured[0][3]
     assert "/home/jason/workspace/test-proj/staging" in cmd
     assert "~/" not in cmd
+
+# --- BUG-002: execution failure must not be reported as success -------------
+
+
+def _run_failing_child(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    art: RequestArtifact,
+    *,
+    child_exit_code: int,
+    child_stderr: str,
+    child_failure_class: str | None,
+    extra_argv: list[str] | None = None,
+) -> tuple[int, dict[str, Any] | None, Path]:
+    """Dispatch ``art`` against a failing child and return (rc, env, result)."""
+    art_path = _save_artifact(tmp_path, art)
+    fake_env = _fake_child_envelope(
+        success=False,
+        exit_code=child_exit_code,
+        stderr=child_stderr,
+        failure_class=child_failure_class,
+    )
+    monkeypatch.setattr(
+        run_request.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompletedProcess(
+            stdout=json.dumps(fake_env), stderr=child_stderr,
+            returncode=child_exit_code,
+        ),
+    )
+    rc, env, _ = _capture(
+        ["--request", str(art_path), "--execute", "--json", *(extra_argv or [])],
+        capsys,
+    )
+    result_path = tmp_path / f"{art.request_id}.result.json"
+    return rc, env, result_path
+
+
+def test_execute_failure_command_maps_exit_and_failure_class(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    _safe_payload_command: dict[str, Any],
+) -> None:
+    art = _build_artifact(operation="command", payload=_safe_payload_command)
+    rc, env, result_path = _run_failing_child(
+        tmp_path, capsys, monkeypatch, art,
+        child_exit_code=9,
+        child_stderr="boom: command failed\n",
+        child_failure_class="remote_error",
+    )
+    assert rc == 9
+    assert env is not None
+    assert env["success"] is False
+    assert env["exit_code"] == 9
+    assert env["error"]["failure_class"] == "remote_error"
+    assert env["error"]["exit_code"] == 9
+    assert env["error"]["message"] == "transport exited 9"
+    assert env["data"]["transport_exit_code"] == 9
+    assert env["data"]["failure_class"] == "remote_error"
+    assert env["stderr"].strip()
+    # Audit trail survives the failure.
+    assert result_path.exists()
+    body = json.loads(result_path.read_text())
+    assert body["exit_code"] == 9
+    assert body["transport_exit_code"] == 9
+    assert body["stderr_redacted"] == "boom: command failed\n"
+
+
+def test_execute_failure_upload_uses_child_failure_class(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local = tmp_path / "release.tar.gz"
+    local.write_bytes(b"hello world")
+    payload = {
+        "local_path": str(local),
+        "local_sha256": hashlib.sha256(b"hello world").hexdigest(),
+        "local_size": 11,
+        "remote_path": "~/workspace/test-proj/nodir/release.tar.gz",
+        "overwrite": False,
+        "sensitive_local": False,
+    }
+    art = _build_artifact(operation="upload", payload=payload)
+    rc, env, result_path = _run_failing_child(
+        tmp_path, capsys, monkeypatch, art,
+        child_exit_code=162,
+        child_stderr="scp: /root/workspace/test-proj/nodir: No such file or directory\n",
+        child_failure_class="remote_path_missing",
+    )
+    assert rc == 162
+    assert env is not None
+    assert env["success"] is False
+    assert env["data"]["transport"] == "ssh_upload"
+    assert env["data"]["failure_class"] == "remote_path_missing"
+    assert env["error"]["failure_class"] == "remote_path_missing"
+    assert json.loads(result_path.read_text())["exit_code"] == 162
+
+
+def test_execute_failure_mkdir_maps_exit(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    _safe_payload_mkdir: dict[str, Any],
+) -> None:
+    art = _build_artifact(operation="mkdir", payload=_safe_payload_mkdir)
+    rc, env, _ = _run_failing_child(
+        tmp_path, capsys, monkeypatch, art,
+        child_exit_code=1,
+        child_stderr="mkdir: cannot create directory: Permission denied\n",
+        child_failure_class="permission",
+    )
+    assert rc == 1
+    assert env is not None
+    assert env["success"] is False
+    assert env["data"]["failure_class"] == "permission"
+    assert env["error"]["failure_class"] == "permission"
+
+
+def test_execute_failure_delete_maps_exit(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    _safe_payload_delete: dict[str, Any],
+    _delete_risk: RiskSummary,
+) -> None:
+    art = _build_artifact(
+        operation="delete", payload=_safe_payload_delete, risk=_delete_risk,
+    )
+    rc, env, _ = _run_failing_child(
+        tmp_path, capsys, monkeypatch, art,
+        child_exit_code=1,
+        child_stderr="rm: cannot remove: Is a directory\n",
+        child_failure_class=None,
+        extra_argv=["--confirm-delete"],
+    )
+    assert rc == 1
+    assert env is not None
+    assert env["success"] is False
+    # No class from the child → the shared "internal" fallback.
+    assert env["data"]["failure_class"] == "internal"
+    assert env["error"]["failure_class"] == "internal"
+    assert env["error"]["message"] == "transport exited 1"
+
+
+def test_execute_failure_out_of_range_exit_becomes_one(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    _safe_payload_command: dict[str, Any],
+) -> None:
+    """A negative (signal) child code cannot be a process status: clamp to 1."""
+    art = _build_artifact(operation="command", payload=_safe_payload_command)
+    rc, env, _ = _run_failing_child(
+        tmp_path, capsys, monkeypatch, art,
+        child_exit_code=-9,
+        child_stderr="killed\n",
+        child_failure_class="remote_error",
+    )
+    assert rc == 1
+    assert env is not None
+    assert env["success"] is False
+    assert env["exit_code"] == 1
+    assert env["error"]["exit_code"] == 1
+    # The transport's own (unusable) code is still preserved for root cause.
+    assert env["data"]["transport_exit_code"] == -9
+
+
+def test_execute_success_envelope_carries_exit_code_zero(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    _safe_payload_command: dict[str, Any],
+) -> None:
+    art = _build_artifact(operation="command", payload=_safe_payload_command)
+    art_path = _save_artifact(tmp_path, art)
+    fake_env = _fake_child_envelope(stdout="hello\n")
+    monkeypatch.setattr(
+        run_request.subprocess, "run",
+        lambda *a, **k: _FakeCompletedProcess(stdout=json.dumps(fake_env)),
+    )
+    rc, env, _ = _capture(
+        ["--request", str(art_path), "--execute", "--json"], capsys,
+    )
+    assert rc == 0
+    assert env is not None
+    assert env["success"] is True
+    assert env["exit_code"] == 0
+    assert env["error"] is None
+    assert env["stderr"] == ""
+    assert isinstance(env["stdout"], str) and env["stdout"]
+
+
+# --- BUG-003: argv contract must be checked against the target parser ------
+
+
+def _upload_parser_option_strings() -> set[str]:
+    """Option strings ssh_upload.py actually accepts (its own build_parser)."""
+    upload_script = run_request._ssh_upload_path()
+    spec = importlib.util.spec_from_file_location(
+        "sshcore_ssh_upload_for_contract", upload_script,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+        parser = module.build_parser()
+    finally:
+        sys.modules.pop(spec.name, None)
+    return {
+        opt
+        for action in parser._actions
+        for opt in action.option_strings
+    }
+
+
+def test_upload_argv_option_flags_exist_in_ssh_upload_parser() -> None:
+    """Cross-check every ``--flag`` we append against ssh_upload's own parser."""
+    payload = {
+        "local_path": "/tmp/x.bin",
+        "remote_path": "~/workspace/test-proj/x.bin",
+        "local_sha256": "0" * 64,
+        "local_size": 1,
+        "overwrite": True,
+    }
+    art = _build_artifact(operation="upload", payload=payload)
+    argv = run_request._build_argv(art, remote_home="/root")
+    accepted = _upload_parser_option_strings()
+    passed_flags = [token for token in argv if token.startswith("--")]
+    assert passed_flags, argv
+    unknown = [flag for flag in passed_flags if flag not in accepted]
+    assert not unknown, (
+        f"run_request passes {unknown} but ssh_upload.py accepts "
+        f"{sorted(accepted)}"
+    )
+    assert "--overwrite" in passed_flags
+
+
+def test_upload_argv_omits_overwrite_when_payload_says_false() -> None:
+    payload = {
+        "local_path": "/tmp/x.bin",
+        "remote_path": "~/workspace/test-proj/x.bin",
+        "local_sha256": "0" * 64,
+        "local_size": 1,
+        "overwrite": False,
+    }
+    art = _build_artifact(operation="upload", payload=payload)
+    argv = run_request._build_argv(art, remote_home="/root")
+    assert "--overwrite" not in argv
+
+
+def test_command_and_execute_argv_flags_exist_in_ssh_execute_parser() -> None:
+    """Same cross-check for the ssh_execute argv shape."""
+    exec_script = run_request._ssh_execute_path()
+    spec = importlib.util.spec_from_file_location(
+        "sshcore_ssh_execute_for_contract", exec_script,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+        parser = module.build_parser()
+    finally:
+        sys.modules.pop(spec.name, None)
+    accepted = {opt for action in parser._actions for opt in action.option_strings}
+
+    art = _build_artifact(
+        operation="command",
+        payload={"command": "echo hi", "timeout": 30},
+    )
+    argv = run_request._build_argv(art)
+    unknown = [
+        token for token in argv if token.startswith("--") and token not in accepted
+    ]
+    assert not unknown, f"ssh_execute.py does not accept {unknown}"
+

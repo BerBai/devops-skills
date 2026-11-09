@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -75,6 +76,7 @@ fetchers = tail_multi.fetchers
 filters = tail_multi.filters
 time_norm = tail_multi.time_norm
 clock_skew = tail_multi.clock_skew
+envelope_lib = tail_multi.envelope_lib
 FetcherError = tail_multi.FetcherError
 RawLine = tail_multi.RawLine
 ResolvedSource = tail_multi.ResolvedSource
@@ -496,6 +498,7 @@ def test_iter_lines_dispatch_unknown_scheme_raises() -> None:
         list(fetchers.iter_lines(src, since="5min", follow=False, timeout=5))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="file:// source specs and tail are POSIX-only")
 def test_file_fetcher_local_streams_lines(tmp_path: Path) -> None:
     log = tmp_path / "x.log"
     log.write_text("line a\nline b\nline c\n")
@@ -549,9 +552,9 @@ def test_cli_help_lists_flags(capsys: pytest.CaptureFixture[str]) -> None:
     parser = tail_multi.build_parser()
     help_txt = parser.format_help()
     for flag in (
-        "--sources", "--follow", "--since", "--min-level", "--suppress",
-        "--aggressive-suppress", "--max-concurrent",
-        "--no-default-filters", "--json",
+        "--sources", "--follow", "--since", "--lines", "--min-level",
+        "--suppress", "--aggressive-suppress", "--max-concurrent",
+        "--no-default-filters", "--json", "--version",
     ):
         assert flag in help_txt
 
@@ -566,6 +569,7 @@ def test_cli_bad_spec_exits_40(capsys: pytest.CaptureFixture[str]) -> None:
     assert env["data"]["failure_class"] == "source_spec_invalid"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="file:// source specs and tail are POSIX-only")
 def test_cli_file_fixture_round_trip_envelope(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -594,12 +598,21 @@ def test_cli_file_fixture_round_trip_envelope(
         assert ev["raw"] in {"alpha", "beta", "gamma"}
 
 
-def test_cli_partial_fetch_warning(
+@pytest.mark.skipif(os.name == "nt", reason="file:// source specs and tail are POSIX-only")
+def test_cli_partial_fetch_fails_the_run(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One mocked fetcher raises; other succeeds → exit 0 + partial_fetch."""
+    """One mocked fetcher raises; the other succeeds -> exit 41 + partial_fetch.
+
+    DEVOPS-BUG-012 replaced the old contract here (``exit 0`` + ``success:
+    true`` with a ``partial_fetch`` marker buried in ``data``): a missing
+    source made the run look clean to anyone reading ``success`` or the exit
+    code, which is exactly what an orchestration layer reads. The rule is now
+    the same one ``grep_across_sources`` and ``correlate`` follow, and the
+    successfully fetched lines still ship.
+    """
     log = tmp_path / "ok.log"
     log.write_text("good\n")
 
@@ -623,18 +636,29 @@ def test_cli_partial_fetch_warning(
     out_lines = [
         ln for ln in capsys.readouterr().out.strip().split("\n") if ln
     ]
-    summary = json.loads(out_lines[-1])
-    assert rc == 0
-    assert summary["success"] is True
+    *events, summary_line = out_lines
+    summary = json.loads(summary_line)
+    assert rc == 41
+    assert summary["exit_code"] == 41
+    assert summary["success"] is False
     assert summary["data"]["failure_class"] == "partial_fetch"
     assert len(summary["data"]["failed_fetchers"]) == 1
     assert "unreachable-host" in summary["data"]["failed_fetchers"][0]["source"]
+    # The source that did work still produced its event.
+    assert [json.loads(ln)["raw"] for ln in events] == ["good"]
 
 
 def test_cli_all_fetchers_fail_exits_41(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Every fetcher dead is the same class, not a second one.
+
+    The old contract called this ``fetcher_failed`` while one dead fetcher was
+    ``partial_fetch``; two spellings of "a source could not be read" forced
+    callers to special-case. DEVOPS-BUG-012 collapsed them to one.
+    """
+
     def fake_iter(src: ResolvedSource, **_kw: Any):
         raise FetcherError(host=src.host, argv=[], returncode=255,
                            stderr_tail="boom")
@@ -650,9 +674,49 @@ def test_cli_all_fetchers_fail_exits_41(
     ]
     summary = json.loads(out_lines[-1])
     assert rc == 41
-    assert summary["data"]["failure_class"] == "fetcher_failed"
+    assert summary["success"] is False
+    assert summary["data"]["failure_class"] == "partial_fetch"
+    assert len(summary["data"]["failed_fetchers"]) == 2
 
 
+def test_fetcher_failed_is_still_accepted_as_an_alias() -> None:
+    """The v1.0 spelling keeps working for anything that stored it."""
+    assert envelope_lib.canonical_failure_class("fetcher_failed") == "partial_fetch"
+    assert envelope_lib.canonical_failure_class("partial_fetch") == "partial_fetch"
+    assert envelope_lib.canonical_failure_class(None) is None
+    assert envelope_lib.exit_code_for("fetcher_failed") == 41
+    assert envelope_lib.exit_code_for("partial_fetch") == 41
+
+
+def test_cli_passes_lines_through_to_the_fetcher(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEVOPS-GAP-007: --lines reaches lib.fetchers, default stays 10000."""
+    seen: list[Any] = []
+
+    def fake_iter(src: ResolvedSource, **kw: Any):
+        seen.append(kw.get("lines"))
+        return iter(())
+
+    monkeypatch.setattr(tail_multi.fetchers, "iter_lines", fake_iter)
+
+    assert tail_multi.main(["--sources", "journal://a/x", "--lines", "20", "--json"]) == 0
+    assert tail_multi.main(["--sources", "journal://a/x", "--json"]) == 0
+    capsys.readouterr()
+    assert seen == [20, 10000]
+
+
+def test_cli_rejects_a_non_integer_lines_value(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        tail_multi.main(["--sources", "journal://a/x", "--lines", "lots"])
+    assert excinfo.value.code == 2
+    assert "--lines" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="file:// source specs and tail are POSIX-only")
 def test_cli_json_summary_has_no_source_key(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

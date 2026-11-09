@@ -1,12 +1,19 @@
 """Integration tests for ssh_tunnel v1.0 — runs real ssh against POC_HOST.
 
-Marker: ``live_ssh`` — skipped by default. Run with::
+Markers: ``live_ssh`` + ``needs_posix`` — skipped by default. Run with::
 
     pytest tests/test_ssh_tunnel_integration.py -v -m live_ssh
 
-Default target host is ``pai`` (the PoC reference host). Override with
-``POC_HOST=<alias>`` if you need to point at a different machine. See
+The target host comes from ``POC_HOST`` (no committed default). See
 ``tests/README.md`` for prerequisites.
+
+The whole module is POSIX-only, and the marker is module-level rather than
+per-case because every case shares the same two facilities: detached tunnels
+are started with ``setsid`` and stopped with ``os.killpg``/``SIGTERM``, neither
+of which exists on Windows (``os.killpg`` is absent and ``os.kill(pid, 0)``
+raises ``WinError 87``). Marking it here is what keeps a Windows run honest:
+the module used to error in its cleanup fixture before any assertion ran
+(GAP-002).
 
 Cleanup is paramount: each test wraps its lifecycle in a try/finally
 and an autouse fixture sweeps any leftover state files / detached
@@ -30,7 +37,15 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.live_ssh
+import live_support  # noqa: E402
+from live_support import require_live_ssh  # noqa: E402
+
+# Read from the shipped table instead of copying a number: 1.4.0 renumbered the
+# tunnel block from 36-39 to 126-129, which silently invalidated the literal.
+# ``lib`` is pinned to ssh-core's own package by tests/conftest.py.
+from lib import exit_codes as _codes  # noqa: E402
+
+pytestmark = [pytest.mark.live_ssh, pytest.mark.needs_posix]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SSH_TUNNEL = (
@@ -42,10 +57,10 @@ SSH_TUNNEL = (
     / "scripts"
     / "ssh_tunnel.py"
 )
-POC_HOST = os.environ.get("POC_HOST", "pai")
+POC_HOST = live_support.poc_host()
 
-EXIT_OK = 0
-EXIT_TUNNEL_NOT_FOUND = 36
+EXIT_OK = _codes.EXIT_OK
+EXIT_TUNNEL_NOT_FOUND = _codes.EXIT_TUNNEL_NOT_FOUND
 
 START_WAIT_BUDGET_S = 25
 IDLE_TIMEOUT_GRACE_S = 10
@@ -56,44 +71,10 @@ IDLE_TIMEOUT_GRACE_S = 10
 # -----------------------------------------------------------------------------
 
 
-def _ssh_agent_has_key() -> bool:
-    if shutil.which("ssh-add") is None:
-        return False
-    try:
-        proc = subprocess.run(
-            ["ssh-add", "-l"],
-            capture_output=True, text=True, timeout=5, check=False,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return proc.returncode == 0 and bool(proc.stdout.strip())
-
-
-def _host_reachable(host: str) -> bool:
-    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "true"]
-    try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=10, check=False,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return proc.returncode == 0
-
-
-def _posix_ok() -> bool:
-    return sys.platform != "win32" and hasattr(os, "setsid")
-
-
 @pytest.fixture(scope="module", autouse=True)
 def _require_live_ssh() -> None:
-    if not _posix_ok():
-        pytest.skip("ssh_tunnel start is POSIX-only; skipping on this platform")
-    if not _ssh_agent_has_key():
-        pytest.skip("ssh-agent has no loaded identity (run `ssh-add ~/.ssh/id_ed25519`)")
-    if not _host_reachable(POC_HOST):
-        pytest.skip(
-            f"host '{POC_HOST}' not reachable (override with POC_HOST=<alias>)"
-        )
+    """Module-level precondition; the shared guard names what is missing."""
+    require_live_ssh()
 
 
 # -----------------------------------------------------------------------------
@@ -201,6 +182,17 @@ def _local_port_listening(port: int) -> bool:
     return True
 
 
+def _pid_alive(pid: int) -> bool:
+    """Return True while ``pid`` is still a live process."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # exists, owned by someone else
+        return True
+    return True
+
+
 # -----------------------------------------------------------------------------
 # Cases
 # -----------------------------------------------------------------------------
@@ -280,43 +272,41 @@ def test_status_empty() -> None:
 
 
 def test_stop_not_found() -> None:
-    """Stop without any active forward -> exit 36 tunnel_not_found."""
+    """Stop without any active forward -> 126 tunnel_not_found."""
     _kill_alias_tunnels(POC_HOST)
     rc, env, _ = _run("stop", POC_HOST)
     assert rc == EXIT_TUNNEL_NOT_FOUND, env
     assert env["data"]["failure_class"] == "tunnel_not_found"
 
 
-def test_idle_timeout_noop() -> None:
-    """--idle-timeout is accepted, warns, but the tunnel survives past the value."""
+def test_idle_timeout_is_honoured() -> None:
+    """--idle-timeout is real: the watchdog stops an idle tunnel.
+
+    1.4.0 replaced the old no-op flag with a detached watchdog that polls the
+    OS socket table and stops the forward after N idle seconds. A 1 s timeout
+    plus a grace window therefore ends the tunnel, which is the opposite of the
+    v1.0 assertion this test used to make.
+    """
     rc, env, stderr = _run(
         "start", POC_HOST, "--remote-port", "22",
-        "--idle-timeout", "3",
+        "--idle-timeout", "1",
         timeout=START_WAIT_BUDGET_S,
     )
     assert rc == EXIT_OK, env
     pid = env["data"]["pid"]
     lport = env["data"]["local_port"]
     state_file = Path(env["data"]["state_file"])
+    assert env["data"].get("watchdog_pid"), "no idle watchdog was started"
     try:
-        # Wait longer than the user-supplied idle-timeout to prove it's a no-op
         time.sleep(IDLE_TIMEOUT_GRACE_S)
-        # Tunnel must still be alive
-        try:
-            os.kill(pid, 0)
-            still_alive = True
-        except ProcessLookupError:
-            still_alive = False
-        assert still_alive, (
-            "ssh_tunnel respected --idle-timeout (it should be a v1.0 no-op)"
+        assert not _local_port_listening(lport), (
+            "ssh_tunnel ignored --idle-timeout: the forward is still listening "
+            f"{IDLE_TIMEOUT_GRACE_S}s after a 1s idle limit"
         )
-        assert _local_port_listening(lport)
-        # The deferral marker is visible in data.flag_deferred
-        assert env["data"].get("flag_deferred") == ["--idle-timeout"]
-        # And in the stderr warning text
-        assert "--idle-timeout is a no-op" in (env.get("stderr") or "")
+        assert not _pid_alive(pid), f"tunnel pid {pid} survived the idle stop"
+        # The state file is removed once the watchdog stops the tunnel.
+        assert not state_file.exists(), "stale state file left after idle stop"
     finally:
-        # Belt-and-braces cleanup; the autouse fixture also runs.
         _run("stop", POC_HOST, "--port", str(lport))
         with contextlib.suppress(FileNotFoundError):
             state_file.unlink()

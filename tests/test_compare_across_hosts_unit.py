@@ -242,10 +242,10 @@ def test_fetch_packages_no_manager_flagged(monkeypatch: pytest.MonkeyPatch) -> N
 def test_build_file_comparison_identical(monkeypatch: pytest.MonkeyPatch) -> None:
     _mock_per_host(monkeypatch, {
         "pai": _envelope_json(exit_code=0, stdout="alpha.example.com\n"),
-        "local": _envelope_json(exit_code=0, stdout="alpha.example.com\n"),
+        "web-2": _envelope_json(exit_code=0, stdout="alpha.example.com\n"),
     })
     cell = cah._build_file_comparison(
-        Path("/x"), "pai", "local", "/etc/hostname", 8, 3
+        Path("/x"), "pai", "web-2", "/etc/hostname", 8, 3
     )
     assert cell["kind"] == "file"
     assert cell["target"] == "/etc/hostname"
@@ -257,14 +257,14 @@ def test_build_file_comparison_identical(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_build_file_comparison_differs(monkeypatch: pytest.MonkeyPatch) -> None:
     _mock_per_host(monkeypatch, {
         "pai": _envelope_json(exit_code=0, stdout="alpha\n"),
-        "local": _envelope_json(exit_code=0, stdout="bravo\n"),
+        "web-2": _envelope_json(exit_code=0, stdout="bravo\n"),
     })
     cell = cah._build_file_comparison(
-        Path("/x"), "pai", "local", "/etc/hostname", 8, 3
+        Path("/x"), "pai", "web-2", "/etc/hostname", 8, 3
     )
     assert cell["differs"] is True
     assert "pai:/etc/hostname" in cell["unified_diff"]
-    assert "local:/etc/hostname" in cell["unified_diff"]
+    assert "web-2:/etc/hostname" in cell["unified_diff"]
 
 
 def test_build_file_comparison_baseline_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -274,10 +274,10 @@ def test_build_file_comparison_baseline_error(monkeypatch: pytest.MonkeyPatch) -
             stderr="cat: /missing: No such file",
             data={"failure_class": "remote_error"},
         ),
-        "local": _envelope_json(exit_code=0, stdout="bravo\n"),
+        "web-2": _envelope_json(exit_code=0, stdout="bravo\n"),
     })
     cell = cah._build_file_comparison(
-        Path("/x"), "pai", "local", "/missing", 8, 3
+        Path("/x"), "pai", "web-2", "/missing", 8, 3
     )
     assert cell["differs"] is False
     assert "error" in cell
@@ -288,14 +288,14 @@ def test_build_file_comparison_baseline_error(monkeypatch: pytest.MonkeyPatch) -
 def test_build_file_comparison_other_error(monkeypatch: pytest.MonkeyPatch) -> None:
     _mock_per_host(monkeypatch, {
         "pai": _envelope_json(exit_code=0, stdout="alpha\n"),
-        "local": _envelope_json(
+        "web-2": _envelope_json(
             success=False, exit_code=1,
             stderr="cat: /missing: No such file",
             data={"failure_class": "remote_error"},
         ),
     })
     cell = cah._build_file_comparison(
-        Path("/x"), "pai", "local", "/missing", 8, 3
+        Path("/x"), "pai", "web-2", "/missing", 8, 3
     )
     assert cell["error"]["side"] == "other"
 
@@ -305,9 +305,9 @@ def test_build_file_comparison_both_error(monkeypatch: pytest.MonkeyPatch) -> No
         success=False, exit_code=1, stderr="err",
         data={"failure_class": "remote_error"},
     )
-    _mock_per_host(monkeypatch, {"pai": err_payload, "local": err_payload})
+    _mock_per_host(monkeypatch, {"pai": err_payload, "web-2": err_payload})
     cell = cah._build_file_comparison(
-        Path("/x"), "pai", "local", "/missing", 8, 3
+        Path("/x"), "pai", "web-2", "/missing", 8, 3
     )
     assert cell["error"]["side"] == "both"
 
@@ -320,10 +320,10 @@ def test_build_file_comparison_both_error(monkeypatch: pytest.MonkeyPatch) -> No
 def test_build_command_comparison_same(monkeypatch: pytest.MonkeyPatch) -> None:
     _mock_per_host(monkeypatch, {
         "pai": _envelope_json(exit_code=0, stdout="Linux\n"),
-        "local": _envelope_json(exit_code=0, stdout="Linux\n"),
+        "web-2": _envelope_json(exit_code=0, stdout="Linux\n"),
     })
     cell = cah._build_command_comparison(
-        Path("/x"), "pai", "local", "uname -s", 8, 3
+        Path("/x"), "pai", "web-2", "uname -s", 8, 3
     )
     assert cell["kind"] == "command"
     assert cell["target"] == "uname -s"
@@ -333,10 +333,10 @@ def test_build_command_comparison_same(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_build_command_comparison_differs(monkeypatch: pytest.MonkeyPatch) -> None:
     _mock_per_host(monkeypatch, {
         "pai": _envelope_json(exit_code=0, stdout="Linux\n"),
-        "local": _envelope_json(exit_code=0, stdout="Darwin\n"),
+        "web-2": _envelope_json(exit_code=0, stdout="Darwin\n"),
     })
     cell = cah._build_command_comparison(
-        Path("/x"), "pai", "local", "uname -s", 8, 3
+        Path("/x"), "pai", "web-2", "uname -s", 8, 3
     )
     assert cell["differs"] is True
     assert "Linux" in cell["unified_diff"]
@@ -355,8 +355,8 @@ def test_build_packages_comparison_same_distro_identical(
         exit_code=0,
         stdout="__PKG_MANAGER=dpkg\nbash=5.1\ncoreutils=8.32\n",
     )
-    _mock_per_host(monkeypatch, {"pai": pkg_dpkg, "local": pkg_dpkg})
-    cell = cah._build_packages_comparison(Path("/x"), "pai", "local", 8, 3)
+    _mock_per_host(monkeypatch, {"pai": pkg_dpkg, "web-2": pkg_dpkg})
+    cell = cah._build_packages_comparison(Path("/x"), "pai", "web-2", 8, 3)
     assert cell["differs"] is False
     assert cell["baseline_pkg_manager"] == "dpkg"
     assert cell["other_pkg_manager"] == "dpkg"
@@ -369,11 +369,11 @@ def test_build_packages_comparison_same_distro_differs(
         "pai": _envelope_json(
             exit_code=0, stdout="__PKG_MANAGER=dpkg\nbash=5.1\n"
         ),
-        "local": _envelope_json(
+        "web-2": _envelope_json(
             exit_code=0, stdout="__PKG_MANAGER=dpkg\nbash=5.2\n"
         ),
     })
-    cell = cah._build_packages_comparison(Path("/x"), "pai", "local", 8, 3)
+    cell = cah._build_packages_comparison(Path("/x"), "pai", "web-2", 8, 3)
     assert cell["differs"] is True
     assert "bash=5.1" in cell["unified_diff"]
     assert "bash=5.2" in cell["unified_diff"]
@@ -386,11 +386,11 @@ def test_build_packages_comparison_cross_distro_marks_mismatch(
         "pai": _envelope_json(
             exit_code=0, stdout="__PKG_MANAGER=dpkg\nbash=5.1\n"
         ),
-        "local": _envelope_json(
+        "web-2": _envelope_json(
             exit_code=0, stdout="__PKG_MANAGER=rpm\nbash=5.1\n"
         ),
     })
-    cell = cah._build_packages_comparison(Path("/x"), "pai", "local", 8, 3)
+    cell = cah._build_packages_comparison(Path("/x"), "pai", "web-2", 8, 3)
     assert cell["differs"] is True
     assert "distro mismatch" in cell["unified_diff"]
     assert cell["baseline_pkg_manager"] == "dpkg"
@@ -404,13 +404,13 @@ def test_build_packages_comparison_no_manager_one_side(
         "pai": _envelope_json(
             exit_code=0, stdout="__PKG_MANAGER=dpkg\nbash=5.1\n"
         ),
-        "local": _envelope_json(
+        "web-2": _envelope_json(
             success=False, exit_code=NO_PKG_EXIT,
             stderr="__PKG_MANAGER=none",
             data={"failure_class": "remote_error"},
         ),
     })
-    cell = cah._build_packages_comparison(Path("/x"), "pai", "local", 8, 3)
+    cell = cah._build_packages_comparison(Path("/x"), "pai", "web-2", 8, 3)
     assert "error" in cell
     assert cell["error"]["side"] == "other"
 
@@ -460,7 +460,7 @@ def test_main_precondition_when_ssh_execute_missing(
         raise AssertionError("subprocess.run must not be called")
 
     monkeypatch.setattr(cah.subprocess, "run", fail)
-    rc = cah.main(["pai", "local", "--files", "/etc/hostname", "--json"])
+    rc = cah.main(["pai", "web-2", "--files", "/etc/hostname", "--json"])
     assert rc == EXIT_FAIL
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["data"]["failure_class"] == "precondition"
@@ -478,7 +478,7 @@ def test_main_rejects_single_alias(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_main_rejects_no_comparison_mode(capsys: pytest.CaptureFixture[str]) -> None:
-    rc = cah.main(["pai", "local"])
+    rc = cah.main(["pai", "web-2"])
     assert rc == EXIT_ARGS
     assert "--files" in capsys.readouterr().err
 
@@ -494,10 +494,10 @@ def test_main_files_identical_exits_zero(
 ) -> None:
     _mock_per_host(monkeypatch, {
         "pai": _envelope_json(exit_code=0, stdout="alpha\n"),
-        "local": _envelope_json(exit_code=0, stdout="alpha\n"),
+        "web-2": _envelope_json(exit_code=0, stdout="alpha\n"),
     })
     rc = cah.main([
-        "pai", "local", "--files", "/etc/hostname", "--json",
+        "pai", "web-2", "--files", "/etc/hostname", "--json",
     ])
     assert rc == EXIT_OK
     parsed = json.loads(capsys.readouterr().out)
@@ -512,9 +512,9 @@ def test_main_files_differs_exits_one(
 ) -> None:
     _mock_per_host(monkeypatch, {
         "pai": _envelope_json(exit_code=0, stdout="alpha\n"),
-        "local": _envelope_json(exit_code=0, stdout="bravo\n"),
+        "web-2": _envelope_json(exit_code=0, stdout="bravo\n"),
     })
-    rc = cah.main(["pai", "local", "--files", "/etc/hostname", "--json"])
+    rc = cah.main(["pai", "web-2", "--files", "/etc/hostname", "--json"])
     assert rc == EXIT_FAIL
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["success"] is False
@@ -552,8 +552,8 @@ def test_main_packages_mode_smoke(
         exit_code=0,
         stdout="__PKG_MANAGER=dpkg\nbash=5.1\n",
     )
-    _mock_per_host(monkeypatch, {"pai": pkg_payload, "local": pkg_payload})
-    rc = cah.main(["pai", "local", "--packages", "--json"])
+    _mock_per_host(monkeypatch, {"pai": pkg_payload, "web-2": pkg_payload})
+    rc = cah.main(["pai", "web-2", "--packages", "--json"])
     assert rc == EXIT_OK
     parsed = json.loads(capsys.readouterr().out)
     cell = parsed["data"]["comparisons"][0]
@@ -574,13 +574,13 @@ def test_main_mixed_files_commands_packages(
             # test since we only count cells, not validate diff contents.
             stdout="__PKG_MANAGER=dpkg\nbash=5.1\n",
         ),
-        "local": _envelope_json(
+        "web-2": _envelope_json(
             exit_code=0,
             stdout="__PKG_MANAGER=dpkg\nbash=5.1\n",
         ),
     })
     rc = cah.main([
-        "pai", "local",
+        "pai", "web-2",
         "--files", "/etc/hostname",
         "--commands", "uname -s",
         "--packages",
@@ -603,9 +603,9 @@ def test_main_envelope_shape(
 ) -> None:
     _mock_per_host(monkeypatch, {
         "pai": _envelope_json(exit_code=0, stdout="x\n"),
-        "local": _envelope_json(exit_code=0, stdout="x\n"),
+        "web-2": _envelope_json(exit_code=0, stdout="x\n"),
     })
-    cah.main(["pai", "local", "--files", "/etc/hostname", "--json"])
+    cah.main(["pai", "web-2", "--files", "/etc/hostname", "--json"])
     parsed = json.loads(capsys.readouterr().out)
     assert set(parsed.keys()) >= {"success", "exit_code", "stdout", "stderr", "data"}
     data = parsed["data"]
@@ -619,9 +619,9 @@ def test_main_non_json_writes_human_summary(
 ) -> None:
     _mock_per_host(monkeypatch, {
         "pai": _envelope_json(exit_code=0, stdout="alpha\n"),
-        "local": _envelope_json(exit_code=0, stdout="bravo\n"),
+        "web-2": _envelope_json(exit_code=0, stdout="bravo\n"),
     })
-    rc = cah.main(["pai", "local", "--files", "/etc/hostname"])
+    rc = cah.main(["pai", "web-2", "--files", "/etc/hostname"])
     assert rc == EXIT_FAIL
     out = capsys.readouterr().out
     assert "file" in out

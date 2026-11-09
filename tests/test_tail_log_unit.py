@@ -9,6 +9,7 @@ lives in ``tests/test_tail_log_integration.py`` (marker: ``live_ssh``).
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -23,6 +24,7 @@ SCRIPTS_DIR = (
 )
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+import _local_exec  # noqa: E402, I001
 import tail_log  # noqa: E402, I001
 
 EXIT_OK = 0
@@ -435,21 +437,69 @@ def test_main_grep_filters_locally(
     assert parsed["data"]["filter"]["total"] == expected_total
 
 
-def test_main_follow_writes_deferred_warning(
+def test_main_follow_streams_instead_of_snapshotting(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    payload = _envelope_json(exit_code=0, stdout="x\n")
-    monkeypatch.setattr(
-        tail_log.subprocess, "run",
-        lambda *_a, **_k: _completed(0, stdout=payload, stderr=""),
-    )
+    """--follow switches to the streaming route and reports what it saw."""
+    seen: dict[str, object] = {}
 
-    rc = tail_log.main(["pai", "/etc/hosts", "--follow", "--json"])
-    cap = capsys.readouterr()
+    def fake_follow(ssh_exec, hosts, command, connect_timeout, follow_timeout, grep_pattern, *, echo=True, local_spec=None):
+        seen["hosts"] = list(hosts)
+        seen["command"] = command
+        seen["timeout"] = follow_timeout
+        seen["local_spec"] = local_spec
+        return {
+            host: {
+                "alias": host,
+                "success": True,
+                "remote_exit_code": 0,
+                "failure_class": None,
+                "raw_text": "line-1\nline-2\n",
+                "lines": ["line-1", "line-2"],
+                "total_lines_before_grep": 2,
+                "matched_lines": 2,
+                "remote_stderr": "",
+                "follow": True,
+            }
+            for host in hosts
+        }
+
+    monkeypatch.setattr(tail_log, "_run_follow_stream", fake_follow)
+
+    rc = tail_log.main(["pai", "/var/log/app.log", "--follow", "--json"])
+    parsed = json.loads(capsys.readouterr().out)
     assert rc == EXIT_OK
-    assert "follow" in cap.err.lower()
-    assert "deferred" in cap.err.lower()
+    assert seen["hosts"] == ["pai"]
+    assert "-F" in str(seen["command"]), "path mode must use `tail -F`"
+    assert seen["timeout"] == tail_log.FOLLOW_DEFAULT_TIMEOUT_S
+    assert parsed["data"]["lines"] == ["line-1", "line-2"]
+
+
+def test_follow_command_uses_journalctl_f_in_unit_mode() -> None:
+    cmd = tail_log._build_remote_command(
+        path=None, unit="nginx", lines=100, since=None, follow=True
+    )
+    assert cmd.endswith("-f")
+    assert "journalctl" in cmd
+
+
+def test_follow_command_uses_tail_dash_f_in_path_mode() -> None:
+    cmd = tail_log._build_remote_command(
+        path="/var/log/app.log", unit=None, lines=100, since=None, follow=True
+    )
+    assert "-F" in cmd
+    assert "tail -n 100" in cmd
+
+
+def test_follow_timeout_below_the_floor_is_an_argv_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = tail_log.main(
+        ["pai", "/var/log/app.log", "--follow", "--follow-timeout", "1"]
+    )
+    assert rc == EXIT_ARGS
+    assert "follow-timeout" in capsys.readouterr().err
 
 
 def test_main_multi_host_concurrent(
@@ -459,7 +509,7 @@ def test_main_multi_host_concurrent(
     """Two hosts pulled concurrently; combined stdout has both prefixes."""
     payload_a = _envelope_json(exit_code=0, stdout="alpha-1\nalpha-2\n")
     payload_b = _envelope_json(exit_code=0, stdout="bravo-1\n")
-    payloads = {"pai": payload_a, "local": payload_b}
+    payloads = {"pai": payload_a, "web-2": payload_b}
 
     def fake_run(argv, **_kwargs):
         alias = argv[2]
@@ -468,17 +518,17 @@ def test_main_multi_host_concurrent(
     monkeypatch.setattr(tail_log.subprocess, "run", fake_run)
 
     rc = tail_log.main(
-        ["--hosts", "pai,local", "/etc/hosts", "--lines", "5", "--json"]
+        ["--hosts", "pai,web-2", "/etc/hosts", "--lines", "5", "--json"]
     )
     assert rc == EXIT_OK
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["success"] is True
-    assert set(parsed["data"]["hosts"].keys()) == {"pai", "local"}
+    assert set(parsed["data"]["hosts"].keys()) == {"pai", "web-2"}
     assert parsed["data"]["hosts"]["pai"]["lines"] == ["alpha-1", "alpha-2"]
-    assert parsed["data"]["hosts"]["local"]["lines"] == ["bravo-1"]
+    assert parsed["data"]["hosts"]["web-2"]["lines"] == ["bravo-1"]
     # Combined human stdout has both alias prefixes (order: sorted by alias).
     assert "pai| alpha-1" in parsed["stdout"]
-    assert "local| bravo-1" in parsed["stdout"]
+    assert "web-2| bravo-1" in parsed["stdout"]
 
 
 def test_main_multi_host_one_fails(
@@ -492,7 +542,7 @@ def test_main_multi_host_one_fails(
         stderr="permission denied",
         data={"failure_class": "remote_error"},
     )
-    payloads = {"pai": payload_ok, "local": payload_bad}
+    payloads = {"pai": payload_ok, "web-2": payload_bad}
 
     def fake_run(argv, **_kwargs):
         alias = argv[2]
@@ -502,15 +552,15 @@ def test_main_multi_host_one_fails(
     monkeypatch.setattr(tail_log.subprocess, "run", fake_run)
 
     rc = tail_log.main(
-        ["--hosts", "pai,local", "/etc/hosts", "--json"]
+        ["--hosts", "pai,web-2", "/etc/hosts", "--json"]
     )
     assert rc == EXIT_FAIL
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["success"] is False
     # Both hosts present in data.
     assert "pai" in parsed["data"]["hosts"]
-    assert "local" in parsed["data"]["hosts"]
-    assert parsed["data"]["hosts"]["local"]["failure_class"] == "remote_error"
+    assert "web-2" in parsed["data"]["hosts"]
+    assert parsed["data"]["hosts"]["web-2"]["failure_class"] == "remote_error"
     assert parsed["data"]["hosts"]["pai"]["lines"] == ["ok"]
 
 
@@ -536,18 +586,18 @@ def test_main_non_json_writes_prefixed_lines(
 ) -> None:
     payload_a = _envelope_json(exit_code=0, stdout="alpha-1\n")
     payload_b = _envelope_json(exit_code=0, stdout="bravo-1\n")
-    payloads = {"pai": payload_a, "local": payload_b}
+    payloads = {"pai": payload_a, "web-2": payload_b}
 
     def fake_run(argv, **_kwargs):
         return _completed(0, stdout=payloads[argv[2]], stderr="")
 
     monkeypatch.setattr(tail_log.subprocess, "run", fake_run)
 
-    rc = tail_log.main(["--hosts", "pai,local", "/etc/hosts"])
+    rc = tail_log.main(["--hosts", "pai,web-2", "/etc/hosts"])
     assert rc == EXIT_OK
     out = capsys.readouterr().out
     assert "pai| alpha-1" in out
-    assert "local| bravo-1" in out
+    assert "web-2| bravo-1" in out
 
 
 # -----------------------------------------------------------------------------
@@ -621,7 +671,7 @@ def test_main_multi_host_one_failure_only_failing_alias_in_stderr(
         stderr="permission denied",
         data={"failure_class": "remote_error"},
     )
-    payloads = {"pai": payload_ok, "local": payload_bad}
+    payloads = {"pai": payload_ok, "web-2": payload_bad}
 
     def fake_run(argv, **_kwargs):
         alias = argv[2]
@@ -630,10 +680,10 @@ def test_main_multi_host_one_failure_only_failing_alias_in_stderr(
 
     monkeypatch.setattr(tail_log.subprocess, "run", fake_run)
 
-    rc = tail_log.main(["--hosts", "pai,local", "/etc/hosts", "--json"])
+    rc = tail_log.main(["--hosts", "pai,web-2", "/etc/hosts", "--json"])
     assert rc == EXIT_FAIL
     parsed = json.loads(capsys.readouterr().out)
-    assert "tail_log: local: permission denied" in parsed["stderr"]
+    assert "tail_log: web-2: permission denied" in parsed["stderr"]
     assert "tail_log: pai:" not in parsed["stderr"]
 
 
@@ -725,3 +775,274 @@ def test_main_empty_remote_stderr_falls_back_to_failure_class(
     assert "tail_log: pai:" in parsed["stderr"]
     assert "failure_class=remote_error" in parsed["stderr"]
     assert "remote_exit=1" in parsed["stderr"]
+
+
+# -----------------------------------------------------------------------------
+# OPT-004: the local route is platform-aware
+#
+# `/etc/hostname` on a Windows local route used to become `\etc\hostname` and
+# be reported `local_not_found` -- a platform mismatch dressed up as a
+# missing file, which also turned a multi-host run red. These tests simulate
+# the platform (``_local_exec.is_windows`` is the module's own test hook, same
+# pattern as ``run_shell(windows=...)``) so the Windows branch runs on Linux CI
+# and the POSIX branch runs on this Windows box.
+# -----------------------------------------------------------------------------
+
+
+def _fake_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the local route believe it is on Windows."""
+    monkeypatch.setattr(_local_exec, "is_windows", lambda: True)
+
+
+def _drive_letter_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[str, Path]:
+    """Create a file reachable through a drive-letter spelling of its path.
+
+    On Windows a real temporary file already has a drive-letter path
+    (``C:/Users/.../win.ini``), so the test reads the genuine thing. On POSIX
+    the same spelling is a *relative* path, so the file is created under the
+    temporary cwd -- which is what lets the Windows branch be exercised on
+    Linux CI without pretending ``C:`` is mounted.
+    """
+    parts = ("C:", "Windows", "win.ini")
+    target = tmp_path.joinpath(*parts)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("alpha\nbeta\n", encoding="utf-8")
+    if os.name == "nt":
+        return target.as_posix(), target
+    monkeypatch.chdir(tmp_path)
+    return "/".join(parts), target
+
+
+def test_local_posix_path_on_windows_is_a_skip_not_a_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reproducer: `local` + `/etc/hostname` on Windows is skipped."""
+    _fake_windows(monkeypatch)
+    env = _local_exec.tail_file("/etc/hostname", 10)
+
+    assert env["success"] is False
+    assert env["exit_code"] == 0, "a skip is not a failure exit"
+    assert env["data"]["skipped"] is True
+    assert env["data"]["skipped_reason"] == "posix_path_on_windows"
+    assert env["data"]["failure_class"] is None
+    assert "local_not_found" not in json.dumps(env)
+    # The message must name the path and the remedy, not blame a missing file.
+    assert "/etc/hostname" in env["stderr"]
+    assert "C:/Windows/win.ini" in env["stderr"]
+
+
+def test_local_posix_path_on_posix_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The POSIX branch keeps working exactly as before (simulated on Windows)."""
+    monkeypatch.setattr(_local_exec, "is_windows", lambda: False)
+    target = tmp_path / "app.log"
+    target.write_text("one\ntwo\nthree\n", encoding="utf-8")
+
+    env = _local_exec.tail_file(str(target), 2)
+
+    assert env["success"] is True
+    assert env["stdout"] == "two\nthree\n"
+    assert "skipped" not in env["data"]
+    assert env["data"]["failure_class"] is None
+
+
+def test_drive_letter_path_reads_the_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`C:/Windows/win.ini` is a normal source on the Windows local route."""
+    drive_path, target = _drive_letter_file(tmp_path, monkeypatch)
+    _fake_windows(monkeypatch)
+
+    env = _local_exec.tail_file(drive_path, 10)
+
+    assert env["success"] is True, env
+    assert env["stdout"] == "alpha\nbeta\n"
+    assert env["data"].get("skipped") is not True
+    assert target.exists()
+
+
+def test_file_url_local_drive_letter_reads_the_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`file://local/C:/...` (log-aggregator's spelling) also resolves."""
+    drive_path, _target = _drive_letter_file(tmp_path, monkeypatch)
+    _fake_windows(monkeypatch)
+
+    env = _local_exec.tail_file("file://local/" + drive_path, 10)
+
+    assert env["success"] is True, env
+    assert env["stdout"] == "alpha\nbeta\n"
+
+
+def test_backslash_drive_letter_path_is_not_mangled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Windows-native spelling passes through untouched."""
+    _fake_windows(monkeypatch)
+    assert _local_exec.local_path_payload(
+        "C:\\Windows\\win.ini", windows=True
+    ) == "C:\\Windows\\win.ini"
+    assert _local_exec.is_posix_path_on_windows(
+        "C:\\Windows\\win.ini", windows=True
+    ) is False
+
+
+def test_missing_local_file_still_names_the_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only the platform mismatch is a skip; a real missing file still fails."""
+    monkeypatch.setattr(_local_exec, "is_windows", lambda: False)
+    missing = tmp_path / "gone.log"
+
+    env = _local_exec.tail_file(str(missing), 3)
+
+    assert env["success"] is False
+    assert env["data"]["failure_class"] == "local_not_found"
+    assert env["data"].get("skipped") is not True
+    assert "gone.log" in env["stderr"]
+    assert "no such file" in env["stderr"].lower()
+
+
+def test_main_multi_host_posix_path_on_windows_local_is_not_red(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every non-skipped host succeeded -> success true, exit 0, host listed."""
+    _fake_windows(monkeypatch)
+    payload = _envelope_json(exit_code=0, stdout="localhost.localdomain\n")
+    monkeypatch.setattr(
+        tail_log.subprocess,
+        "run",
+        lambda *_a, **_k: _completed(0, stdout=payload, stderr=""),
+    )
+
+    rc = tail_log.main(["--hosts", "lab-240,local", "/etc/hostname", "--json"])
+
+    assert rc == EXIT_OK
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is True
+    assert parsed["exit_code"] == EXIT_OK
+    assert parsed["data"]["ok_hosts"] == ["lab-240"]
+    assert parsed["data"]["failed_hosts"] == []
+    assert parsed["data"]["skipped_hosts"] == ["local"]
+
+    local = parsed["data"]["hosts"]["local"]
+    assert local["skipped"] is True
+    assert local["skipped_reason"] == "posix_path_on_windows"
+    assert local["failure_class"] is None
+    assert local["lines"] == []
+
+    remote = parsed["data"]["hosts"]["lab-240"]
+    assert remote["success"] is True
+    assert remote["lines"] == ["localhost.localdomain"]
+    # The skip is reported, but as a skip -- not as a failure line.
+    assert "tail_log: local: skipped (posix_path_on_windows)" in parsed["stderr"]
+    assert "local_not_found" not in parsed["stderr"]
+
+
+def test_main_multi_host_real_failure_is_still_red(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A genuine failure still fails the run, even next to a skip."""
+    _fake_windows(monkeypatch)
+
+    def fake_run(argv, **_kwargs):
+        if argv[2] == "local":
+            raise AssertionError("the local route must not shell out")
+        return _completed(0, stdout=_envelope_json(
+            success=False,
+            exit_code=1,
+            stderr="tail: cannot open '/etc/hostname': No such file",
+            data={"failure_class": "remote_error"},
+        ), stderr="")
+
+    monkeypatch.setattr(tail_log.subprocess, "run", fake_run)
+
+    rc = tail_log.main(["--hosts", "pai,local", "/etc/hostname", "--json"])
+
+    assert rc == EXIT_FAIL
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is False
+    assert parsed["data"]["failed_hosts"] == ["pai"]
+    assert parsed["data"]["skipped_hosts"] == ["local"]
+
+
+def test_main_single_local_posix_path_on_windows_is_a_skip(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Single-host local: the skip is structured, not a local_not_found."""
+    _fake_windows(monkeypatch)
+
+    rc = tail_log.main(["local", "/etc/hostname", "--json"])
+
+    assert rc == EXIT_OK
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is True
+    assert parsed["data"]["skipped"] is True
+    assert parsed["data"]["skipped_reason"] == "posix_path_on_windows"
+    assert "failure_class" not in parsed["data"]
+    assert parsed["data"]["skipped_hosts"] == ["local"]
+
+
+def test_main_local_drive_letter_path_reads_the_file(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """`--hosts local C:/Windows/win.ini` works on the native local reader."""
+    drive_path, _target = _drive_letter_file(tmp_path, monkeypatch)
+    _fake_windows(monkeypatch)
+    monkeypatch.setattr(
+        tail_log.subprocess,
+        "run",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("local path mode shelled out")
+        ),
+    )
+
+    rc = tail_log.main(["--hosts", "local", drive_path, "--json"])
+
+    assert rc == EXIT_OK
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is True
+    assert parsed["data"]["lines"] == ["alpha", "beta"]
+    assert parsed["data"]["skipped_hosts"] == []
+    assert parsed["data"]["ok_hosts"] == ["local"]
+
+
+def test_main_follow_local_posix_path_on_windows_is_a_skip(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The `--follow` local route reports the same skip, not a failure."""
+    _fake_windows(monkeypatch)
+
+    rc = tail_log.main(
+        ["--hosts", "local", "/etc/hostname", "--follow",
+         "--follow-timeout", "5", "--json"]
+    )
+
+    assert rc == EXIT_OK
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["success"] is True
+    assert parsed["data"]["skipped_hosts"] == ["local"]
+    assert parsed["data"]["skipped_reason"] == "posix_path_on_windows"
+
+
+def test_bucket_hosts_is_disjoint_and_total_preserving() -> None:
+    """`ok + failed + skipped == total`, like ssh_cluster._bucket_hosts."""
+    per_host = {
+        "a": {"success": True, "skipped": False},
+        "b": {"success": False, "skipped": True},
+        "c": {"success": False, "skipped": False},
+    }
+    ok_hosts, failed_hosts, skipped_hosts = tail_log._bucket_hosts(per_host)
+    assert ok_hosts == ["a"]
+    assert failed_hosts == ["c"]
+    assert skipped_hosts == ["b"]
+    assert len(ok_hosts) + len(failed_hosts) + len(skipped_hosts) == len(per_host)

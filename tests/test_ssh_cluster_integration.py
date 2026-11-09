@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+import live_support  # noqa: E402
+from live_support import require_live_ssh  # noqa: E402
 
 pytestmark = pytest.mark.live_ssh
 
@@ -37,42 +39,16 @@ SSH_CLUSTER = (
     / "scripts"
     / "ssh_cluster.py"
 )
-POC_HOST = os.environ.get("POC_HOST", "pai")
+POC_HOST = live_support.poc_host()
 
 EXIT_OK = 0
 EXIT_FAIL = 1
 
 
-def _ssh_agent_has_key() -> bool:
-    if shutil.which("ssh-add") is None:
-        return False
-    try:
-        proc = subprocess.run(
-            ["ssh-add", "-l"],
-            capture_output=True, text=True, timeout=5, check=False,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return proc.returncode == 0 and bool(proc.stdout.strip())
-
-
-def _host_reachable(host: str) -> bool:
-    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "true"]
-    try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=10, check=False
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return proc.returncode == 0
-
-
 @pytest.fixture(scope="module", autouse=True)
 def _require_live_ssh() -> None:
-    if not _ssh_agent_has_key():
-        pytest.skip("ssh-agent has no loaded identity")
-    if not _host_reachable(POC_HOST):
-        pytest.skip(f"host '{POC_HOST}' not reachable")
+    """Module-level precondition; the shared guard names what is missing."""
+    require_live_ssh()
 
 
 def _run_envelope(*args: str, timeout: int = 60) -> dict:
@@ -130,17 +106,60 @@ def test_cluster_partial_failure_on_bogus_alias() -> None:
 
 
 def test_cluster_health_check_passes_through_to_command() -> None:
-    """With --health-check, both hosts should still run the business cmd."""
+    """With --health-check, a host that passes runs the business command.
+
+    A host the health check cannot run on is **skipped**, not failed
+    (DEVOPS-BUG-010). The canonical case is the ``local`` route on a Windows
+    box with no POSIX shell: the probe exits 127, so the host is skipped and
+    the batch still succeeds. Before that fix this module reported
+    ``partial_failure`` with ``summary.fail == 0``.
+    """
     result = _run_envelope(
         "ls /", "--hosts", f"{POC_HOST},local",
         "--health-check",
     )
     assert result["success"] is True, result
-    pai_env = result["data"]["results"][POC_HOST]
-    local_env = result["data"]["results"]["local"]
+    assert result["exit_code"] == EXIT_OK
+    data = result["data"]
+    assert data["health_check"] is True
+    assert POC_HOST in data["ok_hosts"], result
+    assert data["failed_hosts"] == [], result
+    assert data["summary"]["fail"] == 0
+
+    pai_env = data["results"][POC_HOST]
     assert pai_env["success"] is True
-    assert local_env["success"] is True
     # The business command's stdout should be non-empty for `ls /`
     assert pai_env["stdout"].strip(), pai_env
-    assert local_env["stdout"].strip(), local_env
-    assert result["data"]["health_check"] is True
+
+    local_env = data["results"]["local"]
+    if local_env["skipped"]:
+        # The skip is reported truthfully and does not fail the batch.
+        assert local_env["skipped_reason"] == "health_check_failed"
+        assert "local" in data["skipped_hosts"]
+        assert "skipped_reason" in local_env
+    else:
+        assert local_env["success"] is True, local_env
+        assert local_env["stdout"].strip(), local_env
+
+
+def test_cluster_health_check_false_skips_every_host_without_failing() -> None:
+    """`--health-check-command false` on every host is a skip, not a failure."""
+    result = _run_envelope(
+        "uptime", "--hosts", f"{POC_HOST},local",
+        "--health-check", "--health-check-command", "false",
+    )
+    assert result["success"] is True, result
+    assert result["exit_code"] == EXIT_OK
+    data = result["data"]
+    assert data["failure_class"] is None
+    assert data["ok_hosts"] == []
+    assert data["failed_hosts"] == []
+    assert set(data["skipped_hosts"]) == {POC_HOST, "local"}
+    assert data["summary"] == {
+        "total": 2, "ok": 0, "fail": 0, "skipped": 2,
+        "elapsed_ms": data["summary"]["elapsed_ms"],
+    }
+    for alias in (POC_HOST, "local"):
+        env = data["results"][alias]
+        assert env["skipped"] is True
+        assert env["skipped_reason"] == "health_check_failed"

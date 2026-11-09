@@ -11,6 +11,14 @@ from typing import Any
 
 import pytest
 
+# Binary names are plain strings so the assertions pass on every platform:
+# ``Path("/usr/bin/gh")`` becomes ``\usr\bin\gh`` on Windows, which made
+# these argv comparisons fail for reasons unrelated to the adapter.
+GH_BIN_NAME = "gh"
+GLAB_BIN_NAME = "glab"
+CUSTOM_GH = "custom-gh"
+ENV_GH = "env-gh"
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = (
     REPO_ROOT / "plugins" / "cicd-debug" / "skills" / "cicd-debug" / "scripts"
@@ -94,7 +102,7 @@ def test_argparse_surface() -> None:
             "--queue-cap",
             "5",
             "--gh-bin",
-            "/custom/gh",
+            CUSTOM_GH,
             "--timeout",
             "9",
             "--json",
@@ -104,7 +112,7 @@ def test_argparse_surface() -> None:
     assert args.repo == "owner/repo"
     assert args.pool_cap == 10
     assert args.queue_cap == 5
-    assert args.gh_bin == "/custom/gh"
+    assert args.gh_bin == CUSTOM_GH
     assert args.timeout == 9
     assert args.json is True
 
@@ -323,13 +331,13 @@ def test_gh_adapter_runner_and_queue_argv(monkeypatch: pytest.MonkeyPatch) -> No
         return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
 
     monkeypatch.setattr("lib_cicd.run_cli", fake_run)
-    adapter = GhAdapter(Path("/usr/bin/gh"))
+    adapter = GhAdapter(Path(GH_BIN_NAME))
     assert adapter.list_runners(runner_check.Scope("repo", "owner/repo"))[0].name == "runner-a"
     assert adapter.list_queued_runs(runner_check.Scope("repo", "owner/repo"))[0].name == "build"
     assert seen == [
-        ["/usr/bin/gh", "api", "repos/owner/repo/actions/runners", "--paginate"],
+        [GH_BIN_NAME, "api", "repos/owner/repo/actions/runners", "--paginate"],
         [
-            "/usr/bin/gh",
+            GH_BIN_NAME,
             "api",
             "repos/owner/repo/actions/runs?status=queued&per_page=100",
             "--paginate",
@@ -362,15 +370,15 @@ def test_glab_adapter_runner_and_queue_argv(monkeypatch: pytest.MonkeyPatch) -> 
         return type("Result", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
 
     monkeypatch.setattr("lib_cicd.run_cli", fake_run)
-    adapter = GlabAdapter(Path("/usr/bin/glab"))
+    adapter = GlabAdapter(Path(GLAB_BIN_NAME))
     assert adapter.list_runners(runner_check.Scope("project", "group/proj"))[0].last_heartbeat
     assert adapter.list_queued_runs(runner_check.Scope("project", "group/proj"))[0].labels == (
         "docker",
     )
     assert seen == [
-        ["/usr/bin/glab", "runner", "list", "--repo", "group/proj", "--output", "json"],
+        [GLAB_BIN_NAME, "runner", "list", "--repo", "group/proj", "--output", "json"],
         [
-            "/usr/bin/glab",
+            GLAB_BIN_NAME,
             "api",
             "projects/group%2Fproj/jobs?scope[]=pending&per_page=100",
         ],

@@ -1,0 +1,46 @@
+# IaC fixture for the iac-state live suite: an S3-compatible state backend.
+#
+#   docker compose -f tests/fixtures/backends/compose.iac.yml up -d
+#   export AWS_ACCESS_KEY_ID=devops-skills
+#   export AWS_SECRET_ACCESS_KEY=devops-skills
+#   export AWS_ENDPOINT_URL=http://127.0.0.1:9000
+#   pytest tests/ -m live_iac -q
+#
+# Terraform/OpenTofu itself is NOT containerised here: the scripts run the
+# local `terraform`/`tofu` binary against the state this backend holds, and the
+# pytest cases skip when neither binary is on PATH (naming both).
+services:
+  minio:
+    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+    container_name: devops-skills-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: devops-skills
+      MINIO_ROOT_PASSWORD: devops-skills
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio-state:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  # Creates the state bucket once, then exits. Terraform needs it to exist.
+  create-bucket:
+    image: minio/mc:RELEASE.2024-06-12T14-34-03Z
+    container_name: devops-skills-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 devops-skills devops-skills &&
+      mc mb --ignore-existing local/tfstate &&
+      echo 'bucket tfstate ready'
+      "
+
+volumes:
+  minio-state:

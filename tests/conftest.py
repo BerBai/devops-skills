@@ -1,4 +1,4 @@
-"""Shared test fixtures.
+"""Shared test fixtures and suite-wide guards.
 
 * ``kind_cluster`` (session-scoped): spins up / reuses a kind cluster
   named ``k8s-debug-test`` and sets KUBECONFIG. Skipped if ``kind`` is
@@ -6,8 +6,11 @@
 * ``fixture_pods``: applies three Pods to the ``live-k8s-debug`` namespace
   (crashloop / healthy / pending) and waits for them to reach their
   target phases.
+* ``pytest_collection_modifyitems``: applies the capability skips once, for the
+  whole suite, instead of asking 26 integration modules to copy a guard
+  (DEVOPS-GAP-001 / DEVOPS-GAP-010).
 
-Both are only consumed by tests under ``@pytest.mark.live_k8s``.
+Both fixtures are only consumed by tests under ``@pytest.mark.live_k8s``.
 """
 
 from __future__ import annotations
@@ -33,6 +36,60 @@ SSH_CORE_SCRIPTS = (
     / "ssh-core"
     / "scripts"
 )
+
+sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import live_support  # noqa: E402  (needs the path above)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip capability-gated cases once, centrally.
+
+    Three markers, three meanings, and one precedence rule:
+
+    * ``live_ssh`` -- needs a reachable host. Skipped when ``POC_HOST`` is
+      unset or no credential works, with a message that names what is missing.
+      Individual modules may add their own finer-grained preconditions, but
+      they no longer all invent a slightly different copy of this one.
+    * ``sftp_only`` -- asserts the paramiko/SFTP backend. Skipped when
+      paramiko is not importable; the scp/tar fallback has its own cases, so a
+      paramiko-free machine still exercises a real transport.
+    * ``needs_posix`` -- needs a POSIX shell (setsid, mode bits, /tmp paths).
+      Skipped on Windows.
+
+    **Precedence: live first.** With no host configured nothing else can run, so
+    that is the only reason worth reporting; otherwise a Windows box with no
+    paramiko reported "needs a POSIX shell" (or "paramiko is not installed")
+    for cases whose real blocker was the missing `POC_HOST`, and the run read
+    as if the suite had tested a capability it never reached. When the live
+    group *can* run, the two capability markers behave exactly as before.
+    """
+    has_paramiko = live_support.has_paramiko()
+    is_posix = live_support.posix_shell_ok()
+    live_reason = None
+    live_checked = False
+
+    for item in items:
+        keywords = item.keywords
+        if "live_ssh" in keywords:
+            if not live_checked:
+                live_reason = live_support.live_skip_reason()
+                live_checked = True
+            if live_reason is not None:
+                item.add_marker(pytest.mark.skip(reason=live_reason))
+                continue
+        if "sftp_only" in keywords and not has_paramiko:
+            item.add_marker(
+                pytest.mark.skip(
+                    reason="paramiko is not installed; this case asserts the SFTP "
+                    "backend (the scp/tar fallback is covered separately)"
+                )
+            )
+        if "needs_posix" in keywords and not is_posix:
+            item.add_marker(
+                pytest.mark.skip(reason="needs a POSIX shell (setsid, mode bits, /tmp)")
+            )
 
 
 def _load_ssh_core_lib() -> None:

@@ -316,3 +316,123 @@ def test_job_stuck_uses_current_time(monkeypatch: pytest.MonkeyPatch) -> None:
     start = datetime.fromtimestamp(now - 600, tz=timezone.utc).isoformat().replace("+00:00", "Z")
     payload = {"items": [{"metadata": {"name": "hook"}, "status": {"active": 1, "succeeded": 0, "startTime": start}}]}
     assert helm_status._normalize_jobs(payload)["stuck"][0]["name"] == "hook"
+
+
+# -----------------------------------------------------------------------------
+# stuck_resources: a pending release must name the workloads it is waiting on
+# -----------------------------------------------------------------------------
+
+
+def test_normalize_pods_keeps_only_unhealthy_ones() -> None:
+    payload = {
+        "items": [
+            {
+                "metadata": {"name": "api-0"},
+                "status": {
+                    "phase": "Running",
+                    "containerStatuses": [{"restartCount": 0, "state": {"running": {}}}],
+                },
+                "spec": {"nodeName": "node-a"},
+            },
+            {
+                "metadata": {"name": "api-1"},
+                "status": {
+                    "phase": "Pending",
+                    "containerStatuses": [
+                        {"restartCount": 3, "state": {"waiting": {"reason": "ImagePullBackOff"}}}
+                    ],
+                },
+                "spec": {"nodeName": "node-b"},
+            },
+            {"metadata": {"name": "api-2"}, "status": {"phase": "Failed"}},
+        ]
+    }
+    rows = helm_status._normalize_pods(payload)
+    assert [r["name"] for r in rows] == ["api-1", "api-2"]
+    assert rows[0]["reasons"] == ["ImagePullBackOff"]
+    assert rows[0]["restarts"] == 3
+    assert rows[0]["node"] == "node-b"
+
+
+def test_stuck_findings_name_the_pod_and_the_reason() -> None:
+    findings = helm_status._stuck_findings(
+        "prod",
+        "api",
+        [
+            {"name": "api-1", "phase": "Pending", "reasons": ["ImagePullBackOff"], "restarts": 0, "node": "n1"},
+            {"name": "api-2", "phase": "Running", "reasons": [], "restarts": 0, "node": "n2"},
+        ],
+    )
+    assert [f["name"] for f in findings] == ["api-1", "api-2"]
+    assert findings[0]["severity"] == "crit"
+    assert findings[0]["reason"] == "ImagePullBackOff"
+    # A Running pod without a waiting container is still listed (a pending
+    # release is not healthy until every workload is up), but only as a warn.
+    assert findings[1]["severity"] == "warn"
+
+
+def test_pending_release_reports_stuck_resources(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(helm_status, "run_helm", lambda *_a, **_kw: helm_status.HelmResult(
+        stdout=json.dumps({"name": "api", "info": {"status": "pending-upgrade"}}),
+        stderr="",
+        returncode=0,
+        elapsed_s=0.01,
+        argv=[],
+        route="local",
+    ))
+    pods = {
+        "items": [
+            {
+                "metadata": {"name": "api-1"},
+                "status": {"phase": "Pending", "containerStatuses": []},
+                "spec": {},
+            }
+        ]
+    }
+    monkeypatch.setattr(helm_status, "run_kubectl", lambda *_a, **_kw: KubectlResult(
+        stdout=json.dumps(pods),
+        stderr="",
+        returncode=0,
+        elapsed_s=0.01,
+        failure_class=None,
+        route="local",
+    ))
+    args = helm_status.build_parser().parse_args(["pai", "prod", "api", "--json"])
+    data = helm_status._per_release(args, helm_status.HelmResult(
+        stdout='{"version":"v3.14.0"}', stderr="", returncode=0, elapsed_s=0.01,
+        argv=[], route="local"
+    ))["data"]
+    assert data["status"] == "pending-upgrade"
+    assert [r["name"] for r in data["stuck_resources"]] == ["api-1"]
+    assert "stuck_resources_deferred" not in data
+
+
+def test_healthy_release_does_not_probe_pods(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pod sweep only runs for a pending release; ``jobs`` always runs."""
+    calls: list[list[str]] = []
+
+    def fake_kubectl(_host, _ns, argv, **_kw):
+        calls.append(list(argv))
+        if argv[:2] == ["get", "pods"]:
+            raise AssertionError(f"pods probed for a deployed release: {argv}")
+        return KubectlResult(
+            stdout=json.dumps({"items": []}),
+            stderr="",
+            returncode=0,
+            elapsed_s=0.01,
+            failure_class=None,
+            route="local",
+        )
+
+    monkeypatch.setattr(helm_status, "run_helm", lambda *_a, **_kw: helm_status.HelmResult(
+        stdout=json.dumps({"name": "api", "info": {"status": "deployed"}}),
+        stderr="", returncode=0, elapsed_s=0.01, argv=[], route="local",
+    ))
+    monkeypatch.setattr(helm_status, "run_kubectl", fake_kubectl)
+    args = helm_status.build_parser().parse_args(["pai", "prod", "api", "--json"])
+    data = helm_status._per_release(args, helm_status.HelmResult(
+        stdout='{"version":"v3.14.0"}', stderr="", returncode=0, elapsed_s=0.01,
+        argv=[], route="local"
+    ))["data"]
+    assert data["stuck_resources"] == []
+    assert calls == [] or all("jobs" in c for c in calls)

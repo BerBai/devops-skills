@@ -10,6 +10,14 @@ from typing import Any
 
 import pytest
 
+# Binary names are plain strings so the assertions pass on every platform:
+# ``Path("/usr/bin/gh")`` becomes ``\usr\bin\gh`` on Windows, which made
+# these argv comparisons fail for reasons unrelated to the adapter.
+GH_BIN_NAME = "gh"
+GLAB_BIN_NAME = "glab"
+CUSTOM_GH = "custom-gh"
+ENV_GH = "env-gh"
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = (
     REPO_ROOT / "plugins" / "cicd-debug" / "skills" / "cicd-debug" / "scripts"
@@ -74,7 +82,7 @@ def test_argparse_surface() -> None:
             "--workflow-fetch-cap",
             "9",
             "--gh-bin",
-            "/custom/gh",
+            CUSTOM_GH,
             "--timeout",
             "10",
         ]
@@ -85,7 +93,7 @@ def test_argparse_surface() -> None:
     assert args.workflow_scan is False
     assert args.unused_flag is False
     assert args.workflow_fetch_cap == 9
-    assert args.gh_bin == "/custom/gh"
+    assert args.gh_bin == CUSTOM_GH
 
 
 @pytest.mark.parametrize(
@@ -317,10 +325,10 @@ def test_glab_adapter_drops_value(monkeypatch: pytest.MonkeyPatch) -> None:
         )()
 
     monkeypatch.setattr("lib_cicd.run_cli", fake_run)
-    adapter = GlabAdapter(Path("/usr/bin/glab"))
+    adapter = GlabAdapter(Path(GLAB_BIN_NAME))
     secrets = adapter.list_secrets(secret_scope_audit.Scope("project", "group/project"))
     assert seen["argv"] == [
-        "/usr/bin/glab",
+        GLAB_BIN_NAME,
         "variable",
         "list",
         "--repo",

@@ -10,26 +10,26 @@ These cases exercise the full chain end-to-end:
     pytest -> tail_multi.py (subprocess) -> native ssh / local subprocess
            -> remote journalctl / local tail
 
-The default target host is ``pai`` (the PoC reference host). Override
-with ``POC_HOST=<alias>`` if you need to point at a different machine.
-See ``tests/README.md`` for prerequisites.
+The target host comes from ``POC_HOST``; there is no default. See
+``tests/README.md`` for prerequisites.
 
-Network-skip rule (per CLAUDE.md): when the local machine is not on the
-192.168.2.0/24 subnet, ``pai`` is unreachable and the *remote* fixtures
-skip automatically through the existing _host_reachable guard. The
-local file-fetcher test runs regardless.
+A module that cannot reach the host skips through the shared guard in
+``tests/live_support.py``, which probes reachability instead of assuming a
+subnet. Cases that only need a local file run regardless.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+import live_support  # noqa: E402
+from live_support import require_live_ssh  # noqa: E402
 
 pytestmark = pytest.mark.live_ssh
 
@@ -43,32 +43,7 @@ SCRIPT_PATH = (
     / "scripts"
     / "tail_multi.py"
 )
-POC_HOST = os.environ.get("POC_HOST", "pai")
-
-
-def _ssh_agent_has_key() -> bool:
-    if shutil.which("ssh-add") is None:
-        return False
-    try:
-        proc = subprocess.run(
-            ["ssh-add", "-l"],
-            capture_output=True, text=True, timeout=5, check=False,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return proc.returncode == 0 and bool(proc.stdout.strip())
-
-
-def _host_reachable(host: str) -> bool:
-    try:
-        proc = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-             host, "true"],
-            capture_output=True, text=True, timeout=10, check=False,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return proc.returncode == 0
+POC_HOST = live_support.poc_host()
 
 
 def _run_envelope(*args: str, timeout: int = 60) -> tuple[list[dict], dict]:
@@ -102,6 +77,7 @@ def _run_envelope(*args: str, timeout: int = 60) -> tuple[list[dict], dict]:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(os.name == "nt", reason="file:// source specs and tail are POSIX-only")
 def test_file_local_fixture_round_trip(tmp_path: Path) -> None:
     """Local file:// fetcher: 50 lines in → 50 events out, exit 0, no skew."""
     log = tmp_path / "test.log"
@@ -124,16 +100,9 @@ def test_file_local_fixture_round_trip(tmp_path: Path) -> None:
 
 
 def test_journal_remote_poc_host() -> None:
-    """journal:// against the PoC host: events_emitted >= 0, exit 0,
+    """journal:// against the live host: events_emitted >= 0, exit 0,
     clock_skew_ms includes POC_HOST."""
-    if not _ssh_agent_has_key():
-        pytest.skip(
-            "ssh-agent has no loaded identity (run `ssh-add ~/.ssh/id_ed25519`)"
-        )
-    if not _host_reachable(POC_HOST):
-        pytest.skip(
-            f"host '{POC_HOST}' not reachable (override with POC_HOST=<alias>)"
-        )
+    live_support.require_live_ssh()
 
     events, summary = _run_envelope(
         "--sources", f"journal://{POC_HOST}/ssh",

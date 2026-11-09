@@ -1,0 +1,37 @@
+# Docker daemon fixture for the docker-quick live suite.
+#
+#   docker compose -f tests/fixtures/backends/compose.docker.yml up -d
+#   export DOCKER_HOST=tcp://127.0.0.1:2375
+#   pytest tests/ -m live_docker -q
+#
+# The plain (non-TLS) TCP listener is bound to loopback only. Do not publish it
+# on a routable interface: an open Docker API is a remote-root hole.
+services:
+  dind:
+    image: docker:dind
+    container_name: devops-skills-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+    ports:
+      - "127.0.0.1:2375:2375"
+    volumes:
+      - dind-state:/var/lib/docker
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # A container the inspect/compose cases can look at without starting their
+  # own: exit code 0, one log line, nothing to clean up.
+  sample:
+    image: busybox:1.36
+    container_name: devops-skills-sample
+    command: ["sh", "-c", "echo 'sample container for docker-quick live tests'; sleep 3600"]
+    depends_on:
+      - dind
+
+volumes:
+  dind-state:

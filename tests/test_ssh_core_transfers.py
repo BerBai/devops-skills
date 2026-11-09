@@ -195,6 +195,118 @@ class ServerTransferModes(unittest.TestCase):
         # No bare `src:/a` operand can appear: rsync would reject two remotes.
         self.assertNotIn("src:/a", remote_command)
 
+    def test_rsync_asks_for_stats_and_parses_them(self) -> None:
+        """BUG-007: --use-rsync must report real counts, not invented ones."""
+        stats = (
+            "Number of files: 5 (reg: 2, dir: 3)\n"
+            "Number of regular files transferred: 2\n"
+            "Total file size: 4 bytes\n"
+            "Total bytes sent: 231\n"
+        )
+        with mock.patch.object(transfer, "have", return_value=True), mock.patch.object(
+            transfer.subprocess, "run"
+        ) as run:
+            run.return_value = mock.Mock(returncode=0, stdout=stats, stderr="")
+            outcome = transfer.run_rsync("src", "/a", "dst", "/b", recursive=True)
+        self.assertIn("--stats", run.call_args.args[0][-1])
+        self.assertEqual(outcome.files_transferred, 2)
+        # Content bytes (4), not wire bytes (231): every other transport in
+        # this skill reports content bytes.
+        self.assertEqual(outcome.bytes_transferred, 4)
+
+    def test_rsync_stats_parser_tolerates_missing_output(self) -> None:
+        self.assertEqual(transfer.parse_rsync_stats(""), (0, 0))
+        self.assertEqual(
+            transfer.parse_rsync_stats(
+                "Number of regular files transferred: 1,234\nTotal file size: 9,000 bytes\n"
+            ),
+            (1234, 9000),
+        )
+
+
+class TransferOutcomeCounts(unittest.TestCase):
+    """BUG-007: ``files_transferred`` lives on the outcome, not in the caller."""
+
+    def test_the_dataclass_carries_the_file_count(self) -> None:
+        outcome = transfer.TransferOutcome(
+            success=True, transport="direct", bytes_transferred=8,
+            files_transferred=2,
+        )
+        self.assertEqual(outcome.files_transferred, 2)
+        # `files` is the deprecated alias the old caller used.
+        self.assertEqual(outcome.files, 2)
+        self.assertEqual(outcome.as_data()["files_transferred"], 2)
+
+    def test_default_is_one_file(self) -> None:
+        outcome = transfer.TransferOutcome(success=True, transport="scp")
+        self.assertEqual(outcome.files_transferred, 1)
+
+    def test_tar_stream_reports_measured_counts_through_a_real_pipe(self) -> None:
+        """``pump_stream`` over real bytes: the counts must be measured.
+
+        The producer/consumer pair of ``run_tar_stream`` is two ``ssh``
+        processes, which a host-free test cannot spawn; what it *can* pin is the
+        accounting stage those processes feed, and that is where the fake zero
+        came from (the counter was never incremented).
+        """
+        import io
+        import shutil
+        import tarfile
+        import tempfile
+
+        if shutil.which("tar") is None:  # pragma: no cover - platform guard
+            self.skipTest("tar is not installed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sub").mkdir()
+            (root / "a.txt").write_bytes(b"AAA\n")
+            (root / "sub" / "b.txt").write_bytes(b"BBB\n")
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode="w") as archive:
+                archive.add(str(root / "a.txt"), arcname="a.txt")
+                archive.add(str(root / "sub" / "b.txt"), arcname="sub/b.txt")
+            blob = buffer.getvalue()
+
+            counter = transfer.TarEntryCounter()
+            written = transfer.pump_stream(
+                io.BytesIO(blob), _UnclosableSink(io.BytesIO()), counter=counter
+            )
+            self.assertEqual(written, len(blob))
+            self.assertEqual(counter.files, 2)
+            self.assertEqual(counter.bytes, 8)
+
+    def test_pump_stream_survives_a_consumer_that_went_away(self) -> None:
+        """A dead consumer must not turn into an unhandled BrokenPipeError."""
+        import io
+
+        class Exploding(io.BytesIO):
+            def write(self, _data):  # noqa: D102 - test double
+                raise BrokenPipeError("consumer exited")
+
+        counter = transfer.TarEntryCounter()
+        written = transfer.pump_stream(
+            io.BytesIO(b"x" * 4096), Exploding(), counter=counter
+        )
+        # Nothing was accepted by the sink, so nothing is claimed.
+        self.assertEqual(written, 0)
+
+
+class _UnclosableSink:
+    """``pump_stream`` closes its sink; the assertion needs it afterwards."""
+
+    def __init__(self, inner) -> None:
+        self.inner = inner
+
+    def write(self, data) -> int:  # noqa: D102 - test double
+        return self.inner.write(data)
+
+    def flush(self) -> None:  # noqa: D102 - test double
+        pass
+
+    def close(self) -> None:  # noqa: D102 - test double
+        pass
+
 
 if __name__ == "__main__":
     unittest.main()

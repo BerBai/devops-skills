@@ -378,15 +378,20 @@ def test_logs_one_local_argv_shape(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_local_command_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
-    """If `docker` is missing on local PATH, _run_local returns a clean
-    failure envelope rather than raising."""
+    """If `docker` is missing on local PATH, _run_local reports
+    `dependency_missing` (exit 3) rather than raising.
+
+    DQ-01: this used to be `remote_error`, which sent the operator to check
+    the network and the SSH alias for what is a local install problem.
+    """
     def raise_fnf(*_args, **_kwargs):
         raise FileNotFoundError("docker")
 
     monkeypatch.setattr(ic.subprocess, "run", raise_fnf)
     env = ic._inspect_one("local", "x", "docker", 8)
     assert env["success"] is False
-    assert env["data"]["failure_class"] == "remote_error"
+    assert env["data"]["failure_class"] == "dependency_missing"
+    assert env["exit_code"] == 3  # noqa: PLR2004
 
 
 # -----------------------------------------------------------------------------

@@ -4,13 +4,18 @@ Marker: ``live_ssh`` — skipped by default. Run with::
 
     pytest tests/test_ssh_download_integration.py -v -m live_ssh
 
-Default target host is ``pai`` (the PoC reference host). Override with
-``POC_HOST=<alias>`` if you need to point at a different machine. See
+The target host comes from ``POC_HOST`` (no committed default). See
 ``tests/README.md`` for prerequisites.
 
-These tests gate quality, not infrastructure: if ssh-agent has no key
-or the host is unreachable, the entire module is skipped instead of
-failing.
+Exit codes are imported from the product's own table
+(``plugins/ssh-core/.../scripts/lib/exit_codes.py``), never re-declared here:
+the transfer family has lived at 160-168 for releases, and a local
+``EXIT_GENERIC_FAILURE = 1`` was asserting a contract the product had already
+dropped (GAP-002).
+
+Capability split: ``sftp_only`` marks the cases whose subject *is* the paramiko
+backend (resume offsets, ``--bwlimit`` pacing, ``failed_files`` aggregation).
+Cases the scp/tar fallback can answer assert the fallback instead of skipping.
 
 Each test owns a unique ``/tmp/download-fixture-<uuid>`` path on the
 remote host and cleans up after itself in a ``finally`` block.
@@ -21,8 +26,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
-import shutil
 import subprocess
 import sys
 import time
@@ -30,6 +33,12 @@ import uuid
 from pathlib import Path
 
 import pytest
+
+import live_support  # noqa: E402
+from live_support import require_live_ssh  # noqa: E402
+
+# ``lib`` is pinned to ssh-core's own package by tests/conftest.py.
+from lib import exit_codes as _codes  # noqa: E402
 
 pytestmark = pytest.mark.live_ssh
 
@@ -43,12 +52,22 @@ SSH_DOWNLOAD = (
     / "scripts"
     / "ssh_download.py"
 )
-POC_HOST = os.environ.get("POC_HOST", "pai")
+POC_HOST = live_support.poc_host()
 
-# Well-known exit codes.
-EXIT_OK = 0
-EXIT_GENERIC_FAILURE = 1
-EXIT_VERIFY_FAILED = 9
+# Exit codes, read from lib/exit_codes.py.
+EXIT_OK = _codes.EXIT_OK
+EXIT_LOCAL_PATH_IS_DIRECTORY = _codes.EXIT_LOCAL_PATH_IS_DIRECTORY
+EXIT_REMOTE_PATH_MISSING = _codes.EXIT_REMOTE_PATH_MISSING
+EXIT_TRANSFER_IO = _codes.EXIT_TRANSFER_IO
+EXIT_MODE_UNSUPPORTED = _codes.EXIT_MODE_UNSUPPORTED
+EXIT_VERIFY_FAILED = _codes.EXIT_VERIFY_FAILED
+
+#: Flags only the SFTP backend can honour; the scp/tar fallback must refuse
+#: them with 166 instead of silently doing less.
+SFTP_ONLY_FLAGS: dict[str, list[str]] = {
+    "--bwlimit": ["100"],
+    "--resume": [],
+}
 
 # 1 MB and helpers for resume / bwlimit tests.
 ONE_MIB = 1024 * 1024
@@ -67,46 +86,10 @@ BWLIMIT_MAX_S = 14
 # -----------------------------------------------------------------------------
 
 
-def _ssh_agent_has_key() -> bool:
-    """Return True iff ssh-add -l reports at least one loaded identity."""
-    if shutil.which("ssh-add") is None:
-        return False
-    try:
-        proc = subprocess.run(
-            ["ssh-add", "-l"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return proc.returncode == 0 and bool(proc.stdout.strip())
-
-
-def _host_reachable(host: str) -> bool:
-    """Quick `ssh <host> true` probe with a short timeout."""
-    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "true"]
-    try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=10, check=False
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return proc.returncode == 0
-
-
 @pytest.fixture(scope="module", autouse=True)
 def _require_live_ssh() -> None:
-    """Skip the whole module unless agent + host are usable."""
-    if not _ssh_agent_has_key():
-        pytest.skip(
-            "ssh-agent has no loaded identity (run `ssh-add ~/.ssh/id_ed25519`)"
-        )
-    if not _host_reachable(POC_HOST):
-        pytest.skip(
-            f"host '{POC_HOST}' not reachable (override with POC_HOST=<alias>)"
-        )
+    """Module-level precondition; the shared guard names what is missing."""
+    require_live_ssh()
 
 
 # -----------------------------------------------------------------------------
@@ -118,7 +101,8 @@ def _run_envelope(*args: str, timeout: int = 60) -> tuple[dict, str]:
     """Invoke ssh_download.py as a subprocess; return (parsed_json, stderr_text)."""
     argv = [sys.executable, str(SSH_DOWNLOAD), *args, "--json"]
     proc = subprocess.run(
-        argv, capture_output=True, text=True, timeout=timeout, check=False
+        argv, capture_output=True, text=True, timeout=timeout, check=False,
+        encoding="utf-8", errors="replace",
     )
     try:
         return json.loads(proc.stdout), proc.stderr
@@ -137,6 +121,8 @@ def _ssh(host: str, command: str, timeout: int = 30) -> subprocess.CompletedProc
         text=True,
         timeout=timeout,
         check=False,
+        encoding="utf-8",
+        errors="replace",
     )
 
 
@@ -170,7 +156,7 @@ def _unique_remote(prefix: str = "download-fixture") -> str:
 
 
 def test_single_file_happy_path(tmp_path: Path) -> None:
-    """`/etc/hostname` → local; content matches `ssh pai cat`."""
+    """`/etc/hostname` → local; content matches `ssh <host> cat`."""
     expected = _ssh(POC_HOST, "cat /etc/hostname").stdout
     if not expected.strip():
         pytest.skip("remote /etc/hostname is empty or unreadable")
@@ -179,16 +165,20 @@ def test_single_file_happy_path(tmp_path: Path) -> None:
     env, _ = _run_envelope(POC_HOST, "/etc/hostname", str(local))
     assert env["success"] is True, env
     assert env["exit_code"] == EXIT_OK
-    assert env["data"]["route"] == "sftp"
-    assert env["data"]["direction"] == "download"
+    # sftp on a paramiko box, scp here: both are real transports.
+    transport = env["data"]["transport"]
+    expected_transport = "sftp" if live_support.has_paramiko() else "scp"
+    assert transport == expected_transport, env["data"]
+    assert env["data"]["route"] == transport, env["data"]
     assert local.read_text() == expected
 
 
 # -----------------------------------------------------------------------------
-# Resume path
+# Resume path (SFTP only: the scp fallback refuses --resume with 166)
 # -----------------------------------------------------------------------------
 
 
+@pytest.mark.sftp_only
 def test_resume_partial_then_complete(tmp_path: Path) -> None:
     """Build 2MB remote fixture; pre-seed local with first 1MB; resume."""
     remote = _unique_remote()
@@ -230,7 +220,8 @@ def test_resume_partial_then_complete(tmp_path: Path) -> None:
         _remote_cleanup(POC_HOST, remote)
 
 
-def test_resume_sha256_mismatch_returns_9(tmp_path: Path) -> None:
+@pytest.mark.sftp_only
+def test_resume_sha256_mismatch_returns_verify_failed(tmp_path: Path) -> None:
     """Tampered local partial → resume exits 9 with both sha256s present."""
     remote = _unique_remote()
     try:
@@ -246,7 +237,7 @@ def test_resume_sha256_mismatch_returns_9(tmp_path: Path) -> None:
 
         env_resume, _ = _run_envelope(POC_HOST, remote, str(partial), "--resume")
         assert env_resume["success"] is False, env_resume
-        assert env_resume["exit_code"] == EXIT_VERIFY_FAILED
+        assert env_resume["exit_code"] == EXIT_VERIFY_FAILED, env_resume
         assert "sha256_local" in env_resume["data"]
         assert "sha256_remote" in env_resume["data"]
         assert (
@@ -263,7 +254,12 @@ def test_resume_sha256_mismatch_returns_9(tmp_path: Path) -> None:
 
 
 def test_recursive_simple_tree(tmp_path: Path) -> None:
-    """3 files (one in a subdir) on remote → all downloaded, structure matches."""
+    """3 files (one in a subdir) on remote → all downloaded, structure matches.
+
+    The layout assertion is also the regression test for the tar fallback's
+    extra-leaf-directory bug (BUG-006): the *contents* must land directly under
+    the destination, exactly as SFTP and ``scp -r`` put them.
+    """
     remote_dir = _unique_remote("tree-dl")
     try:
         setup = _ssh(
@@ -281,6 +277,7 @@ def test_recursive_simple_tree(tmp_path: Path) -> None:
         local_dir = tmp_path / "out"
         env, _ = _run_envelope(POC_HOST, remote_dir, str(local_dir), "--recursive")
         assert env["success"] is True, env
+        assert env["data"]["transport"] in {"sftp", "tar"}, env["data"]
         assert (local_dir / "a.txt").read_text() == "AAA\n"
         assert (local_dir / "sub" / "b.txt").read_text() == "BBB\n"
         assert (local_dir / "sub" / "c.txt").read_text() == "CCC\n"
@@ -288,16 +285,19 @@ def test_recursive_simple_tree(tmp_path: Path) -> None:
         _remote_cleanup(POC_HOST, remote_dir)
 
 
-def test_recursive_partial_failure_returns_1_with_failed_files(
+@pytest.mark.sftp_only
+def test_recursive_partial_failure_aggregates_failed_files(
     tmp_path: Path,
 ) -> None:
     """One un-readable remote file → other two succeed, failed_files lists it.
 
-    Skipped when the remote user is root, since ``chmod 000`` does not
-    block root reads on Linux and the test cannot construct a reliably
-    unreadable file without sudo / chown to another user. The mocked
-    unit-test counterpart ``test_recursive_continues_on_error_aggregates_failed_files``
-    covers the same code path deterministically.
+    Skipped twice over, each with its own reason: the remote user may be root
+    (``chmod 000`` does not block root reads on Linux, so the unreadable file
+    cannot be constructed), and ``failed_files`` only exists on the SFTP tree
+    walker — ``scp -r``/tar report one status for the whole tree. The mocked
+    unit-test counterpart
+    ``test_recursive_continues_on_error_aggregates_failed_files`` covers the
+    same code path deterministically.
     """
     remote_user = _ssh(POC_HOST, "whoami").stdout.strip()
     if remote_user == "root":
@@ -325,7 +325,7 @@ def test_recursive_partial_failure_returns_1_with_failed_files(
         local_dir = tmp_path / "out"
         env, _ = _run_envelope(POC_HOST, remote_dir, str(local_dir), "--recursive")
         assert env["success"] is False, env
-        assert env["exit_code"] == EXIT_GENERIC_FAILURE
+        assert env["exit_code"] != EXIT_OK, env
         failed = env["data"].get("failed_files") or []
         assert any("blocked.txt" in entry["path"] for entry in failed), failed
         # The two readable files made it down.
@@ -342,6 +342,7 @@ def test_recursive_partial_failure_returns_1_with_failed_files(
 # -----------------------------------------------------------------------------
 
 
+@pytest.mark.sftp_only
 def test_bwlimit_100kbs_roughly_10s(tmp_path: Path) -> None:
     """1MB at 100 KB/s ≈ 10s wall-clock (allow 8-14s for CI noise)."""
     remote = _unique_remote("bwlimit-dl")
@@ -377,29 +378,68 @@ def test_no_progress_suppresses_stderr_lines(tmp_path: Path) -> None:
     assert "Downloading" not in stderr, f"unexpected progress lines: {stderr!r}"
 
 
-def test_remote_not_found_returns_1(tmp_path: Path) -> None:
-    """Non-existent remote path → exit 1, failure_class=remote_error."""
+# -----------------------------------------------------------------------------
+# Guards
+# -----------------------------------------------------------------------------
+
+
+def test_remote_not_found_is_classified_remote_path_missing(tmp_path: Path) -> None:
+    """Non-existent remote path → 162 remote_path_missing."""
     local = tmp_path / "x"
     env, _ = _run_envelope(POC_HOST, "/no/such/remote/xyz123", str(local))
-    assert env["success"] is False
-    assert env["exit_code"] == EXIT_GENERIC_FAILURE
-    assert env["data"]["failure_class"] == "remote_error"
-    assert "remote path not found" in env["stderr"]
+    assert env["success"] is False, env
+    assert env["exit_code"] == EXIT_REMOTE_PATH_MISSING, env
+    assert env["data"]["failure_class"] == "remote_path_missing"
 
 
-def test_remote_dir_without_recursive_returns_1(tmp_path: Path) -> None:
-    """Remote directory without --recursive → exit 1."""
+def test_remote_dir_without_recursive_is_classified_transfer_io(
+    tmp_path: Path,
+) -> None:
+    """Remote directory without --recursive → 164 transfer_io, not a merge.
+
+    Long ago this returned the generic 1 ``remote_error``; the transfer family
+    reports "the copy could not be performed" as 164 on every transport.
+    """
     local = tmp_path / "etc-out"
     env, _ = _run_envelope(POC_HOST, "/etc", str(local))
-    assert env["success"] is False
-    assert env["exit_code"] == EXIT_GENERIC_FAILURE
-    assert "--recursive" in env["stderr"]
+    assert env["success"] is False, env
+    assert env["exit_code"] == EXIT_TRANSFER_IO, env
+    assert env["data"]["failure_class"] == "transfer_io"
 
 
-def test_local_dir_without_recursive_returns_1(tmp_path: Path) -> None:
-    """Local existing directory without --recursive → exit 1 (CLI guard)."""
+def test_local_dir_without_recursive_is_classified_local_path_is_directory(
+    tmp_path: Path,
+) -> None:
+    """Local existing directory without --recursive → 161 (CLI guard, pre-ssh)."""
     # tmp_path is already an existing directory.
     env, _ = _run_envelope(POC_HOST, "/etc/hostname", str(tmp_path))
-    assert env["success"] is False
-    assert env["exit_code"] == EXIT_GENERIC_FAILURE
+    assert env["success"] is False, env
+    assert env["exit_code"] == EXIT_LOCAL_PATH_IS_DIRECTORY, env
+    assert env["data"]["failure_class"] == "local_path_is_directory"
     assert "directory" in env["stderr"]
+
+
+@pytest.mark.parametrize("flag", sorted(SFTP_ONLY_FLAGS))
+def test_sftp_only_flag_is_refused_on_the_fallback(
+    tmp_path: Path, flag: str
+) -> None:
+    """A paramiko-free machine refuses these loudly instead of ignoring them.
+
+    The fallback-side counterpart of the ``sftp_only`` cases: ``scp``/``tar``
+    cannot pace a transfer or resume one, so the product answers 166
+    ``mode_deferred`` and names the refused flag (SSHCORE-026).
+    """
+    if live_support.has_paramiko():
+        pytest.skip(
+            "paramiko is installed, so the sftp transport honours "
+            f"{flag}; the refusal path only exists on the scp/tar fallback"
+        )
+
+    env, _ = _run_envelope(
+        POC_HOST, "/etc/hostname", str(tmp_path / "x"), flag, *SFTP_ONLY_FLAGS[flag]
+    )
+    assert env["success"] is False, env
+    assert env["exit_code"] == EXIT_MODE_UNSUPPORTED, env
+    assert env["data"]["failure_class"] == "mode_deferred", env["data"]
+    assert flag in env["data"]["deferred_flags"], env["data"]
+    assert env["data"]["deferred_transport"] == "sftp"

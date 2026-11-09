@@ -30,9 +30,11 @@ for _k in list(_SAVED_LIB_MODULES):
     del sys.modules[_k]
 
 sys.path.insert(0, str(SCRIPTS_DIR))
-from lib.redact import Redactor as _Redactor  # noqa: E402, I001
+from lib.redact import _DEFAULT_PATTERNS as _DEFAULTS  # noqa: E402, I001
+from lib.redact import Redactor as _Redactor  # noqa: E402
 
 Redactor = _Redactor
+DEFAULT_PATTERN_COUNT = len(_DEFAULTS)
 
 for _k in list(sys.modules):
     if _k == "lib" or _k.startswith("lib."):
@@ -46,14 +48,14 @@ with contextlib.suppress(ValueError):
 
 def test_default_catalog_loaded_when_path_none() -> None:
     r = Redactor(None)
-    # All 4 default patterns compile and survive init.
-    assert len(r._compiled) == 4  # noqa: SLF001 — internal but acceptable in unit test
+    # Every documented default pattern compiles and survives init.
+    assert len(r._compiled) == DEFAULT_PATTERN_COUNT  # noqa: SLF001
 
 
 def test_default_catalog_used_when_file_missing(tmp_path: Path) -> None:
     missing = tmp_path / "does-not-exist.json"
     r = Redactor(missing)
-    assert len(r._compiled) == 4  # noqa: SLF001
+    assert len(r._compiled) == DEFAULT_PATTERN_COUNT  # noqa: SLF001
 
 
 def test_corrupt_json_falls_back_to_default(
@@ -62,7 +64,7 @@ def test_corrupt_json_falls_back_to_default(
     bad = tmp_path / "redact.json"
     bad.write_text("not json {{{")
     r = Redactor(bad)
-    assert len(r._compiled) == 4  # noqa: SLF001
+    assert len(r._compiled) == DEFAULT_PATTERN_COUNT  # noqa: SLF001
     # Warn lands on stderr (logging-guidelines.md).
     assert "not valid JSON" in capsys.readouterr().err
 
@@ -136,12 +138,27 @@ def test_apply_redacts_jwt() -> None:
     assert hits[0]["kind"] == "jwt"
 
 
-def test_apply_redacts_rsa_private_header() -> None:
+def test_apply_redacts_private_key_header() -> None:
+    """A truncated transcript (header only) still gets redacted."""
     r = Redactor(None)
     text = "-----BEGIN OPENSSH PRIVATE KEY-----\nb64...\n"
     out, hits = r.apply(text)
     assert "[REDACTED-PRIVATE-KEY-HEADER]" in out
-    assert hits and hits[0]["kind"] == "rsa_private"
+    assert hits and hits[0]["kind"] == "private_key_header"
+
+
+def test_apply_redacts_a_whole_private_key_block() -> None:
+    """The key body must not survive: only the header used to be replaced."""
+    r = Redactor(None)
+    text = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "SUPERSECRETBODYMATERIAL\n"
+        "-----END OPENSSH PRIVATE KEY-----\n"
+    )
+    out, hits = r.apply(text)
+    assert out == "[REDACTED-PRIVATE-KEY-BLOCK]\n"
+    assert "SUPERSECRETBODYMATERIAL" not in out
+    assert hits and hits[0]["kind"] == "private_key_block"
 
 
 def test_apply_empty_text_is_pass_through() -> None:

@@ -770,6 +770,8 @@ def test_failure_class_permission(tmp_path: Path) -> None:
     PermissionError that our handler maps to FAIL_PERMISSION. The test
     is skipped when run as root (chmod is meaningless then).
     """
+    if not hasattr(os, "geteuid"):
+        pytest.skip("POSIX permission bits are not enforced on this platform")
     if os.geteuid() == 0:
         pytest.skip("permission test is meaningless as root (chmod ignored)")
     cfg = _write_config(tmp_path, "Host A\n    HostName 1.1.1.1\n")

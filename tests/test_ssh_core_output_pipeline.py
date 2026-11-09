@@ -734,7 +734,9 @@ class StdinFile(unittest.TestCase):
                 argv, 30, stdin_text=payload.read_bytes(),
             )
         self.assertFalse(timed_out)
-        self.assertEqual(out.text(), "HELLO\n")
+        # Windows' CRT translates the piped stdin newline to CRLF; the content
+        # is what this test is about, not the platform's line ending.
+        self.assertEqual(out.text().replace("\r\n", "\n"), "HELLO\n")
     def test_stdin_pipe_is_closed_so_readers_see_eof(self) -> None:
         # Windows OpenSSH treats an inherited NUL handle as "no EOF yet", so an
         # empty stdin must be a *closed pipe* (SSHCORE-024).

@@ -25,12 +25,14 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+import live_support  # noqa: E402
+from live_support import require_live_ssh  # noqa: E402
 
 pytestmark = pytest.mark.live_ssh
 
@@ -44,7 +46,7 @@ PORT_CHECK = (
     / "scripts"
     / "port_check.py"
 )
-POC_HOST = os.environ.get("POC_HOST", "pai")
+POC_HOST = live_support.poc_host()
 
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -55,49 +57,10 @@ EXIT_FAIL = 1
 # -----------------------------------------------------------------------------
 
 
-def _ssh_agent_has_key() -> bool:
-    if shutil.which("ssh-add") is None:
-        return False
-    try:
-        proc = subprocess.run(
-            ["ssh-add", "-l"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return proc.returncode == 0 and bool(proc.stdout.strip())
-
-
-def _host_reachable(host: str) -> bool:
-    argv = [
-        "ssh",
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=5",
-        host,
-        "true",
-    ]
-    try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=10, check=False
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return proc.returncode == 0
-
-
 @pytest.fixture(scope="module", autouse=True)
 def _require_live_ssh() -> None:
-    if not _ssh_agent_has_key():
-        pytest.skip(
-            "ssh-agent has no loaded identity (run `ssh-add ~/.ssh/id_ed25519`)"
-        )
-    if not _host_reachable(POC_HOST):
-        pytest.skip(
-            f"host '{POC_HOST}' not reachable (override with POC_HOST=<alias>)"
-        )
+    """Module-level precondition; the shared guard names what is missing."""
+    require_live_ssh()
 
 
 def _run_envelope(*args: str, timeout: int = 60) -> dict:

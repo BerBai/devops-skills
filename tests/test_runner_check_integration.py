@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,7 @@ SCRIPT = (
 
 def test_runner_check_help_smoke() -> None:
     result = subprocess.run(
-        ["python3", str(SCRIPT), "--help"],
+        [sys.executable, str(SCRIPT), "--help"],
         text=True,
         capture_output=True,
         check=False,
@@ -47,7 +48,7 @@ def test_runner_check_gh_repo_smoke() -> None:
         pytest.skip("gh auth is not configured")
 
     result = subprocess.run(
-        ["python3", str(SCRIPT), "gh", "--repo", repo, "--json"],
+        [sys.executable, str(SCRIPT), "gh", "--repo", repo, "--json"],
         text=True,
         capture_output=True,
         check=False,
@@ -69,7 +70,7 @@ def test_runner_check_gh_org_optional_smoke() -> None:
         pytest.skip("gh is not installed")
 
     result = subprocess.run(
-        ["python3", str(SCRIPT), "gh", "--org", org, "--json"],
+        [sys.executable, str(SCRIPT), "gh", "--org", org, "--json"],
         text=True,
         capture_output=True,
         check=False,
@@ -85,7 +86,7 @@ def test_runner_check_glab_help_smoke() -> None:
     if not shutil.which("glab"):
         pytest.skip("glab is not installed")
     result = subprocess.run(
-        ["python3", str(SCRIPT), "glab", "--help"],
+        [sys.executable, str(SCRIPT), "glab", "--help"],
         text=True,
         capture_output=True,
         check=False,

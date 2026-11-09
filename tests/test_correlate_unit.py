@@ -332,10 +332,17 @@ def test_cli_success_json_envelope(
     assert env["data"]["summary"]["likely_root_cause_hint"]["body"] == "ERROR root"
 
 
-def test_cli_partial_fetch_still_succeeds_when_anchor_found(
+def test_cli_partial_fetch_fails_the_run_when_anchor_found(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A failed source is reported in the envelope, not hidden in ``data``.
+
+    DEVOPS-BUG-011: this used to assert ``rc == 0`` with ``success: true``
+    and ``failure_class: null``. An operator doing root-cause analysis was
+    shown a confident window built from a subset of the requested sources,
+    with nothing above ``data.failed_fetchers`` saying so.
+    """
     monkeypatch.setattr(correlate.clock_skew, "probe", lambda *_a, **_kw: {})
     failure = correlate.FetcherFailure("bad/source", "rc=255 boom")
     monkeypatch.setattr(
@@ -345,6 +352,72 @@ def test_cli_partial_fetch_still_succeeds_when_anchor_found(
     )
     rc = correlate.main(["--sources", "file://local/tmp/x.log", "--anchor", "MATCH", "--json"])
     env = json.loads(capsys.readouterr().out)
-    assert rc == 0
+    assert rc == 41
+    assert env["success"] is False
+    assert env["exit_code"] == 41
+    assert env["data"]["failure_class"] == "partial_fetch"
     assert env["data"]["summary"]["partial_fetch"] is True
     assert env["data"]["failed_fetchers"][0]["source"] == "bad/source"
+    # The partial result still ships: the anchor and its window are present.
+    assert env["data"]["anchor"]["body"] == "MATCH survives"
+    assert [line["body"] for line in env["data"]["window_lines"]] == ["MATCH survives"]
+
+
+def test_build_success_envelope_without_failures_stays_clean() -> None:
+    lines = [_line("MATCH", 0)]
+    env = correlate._build_success_envelope(
+        anchor=correlate.Anchor(lines[0].source_tag, lines[0].norm_time, "MATCH", "info", 0),
+        window_lines=lines,
+        window_s=5,
+        sources=[_src(tag="local/app")],
+        skew={},
+        failed_fetchers=[],
+        elapsed_s=0.01,
+    )
+    assert env["success"] is True
+    assert env["exit_code"] == 0
+    assert env["data"]["failure_class"] is None
+    assert env["data"]["failed_fetchers"] == []
+
+
+def test_cli_anchor_not_found_stays_90_when_all_sources_answered(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(correlate.clock_skew, "probe", lambda *_a, **_kw: {})
+    monkeypatch.setattr(
+        correlate, "_collect_all_lines", lambda *_a, **_kw: ([ _line("nope", 0) ], [])
+    )
+    rc = correlate.main(["--sources", "file://local/tmp/x.log", "--anchor", "MATCH", "--json"])
+    env = json.loads(capsys.readouterr().out)
+    assert rc == 90
+    assert env["data"]["failure_class"] == "anchor_not_found"
+
+
+def test_cli_no_anchor_with_a_failed_source_is_partial_fetch(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """"Not found" is only sound if every source answered.
+
+    The missing source may hold the anchor, so the run reports ``partial_fetch``
+    and keeps the specific reason in ``data.summary.reason``.
+    """
+    monkeypatch.setattr(correlate.clock_skew, "probe", lambda *_a, **_kw: {})
+    failure = correlate.FetcherFailure("bad/source", "rc=255 boom")
+    monkeypatch.setattr(
+        correlate,
+        "_collect_all_lines",
+        lambda *_a, **_kw: ([ _line("nope", 0) ], [failure]),
+    )
+    rc = correlate.main(["--sources", "file://local/tmp/x.log", "--anchor", "MATCH", "--json"])
+    env = json.loads(capsys.readouterr().out)
+    assert rc == 41
+    assert env["success"] is False
+    assert env["exit_code"] == 41
+    assert env["data"]["failure_class"] == "partial_fetch"
+    assert env["data"]["summary"]["anchor_found"] is False
+    assert env["data"]["summary"]["reason"] == "anchor_not_found"
+    assert env["data"]["failed_fetchers"] == [
+        {"source": "bad/source", "error": "rc=255 boom"}
+    ]

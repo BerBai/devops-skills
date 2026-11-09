@@ -61,14 +61,27 @@ with contextlib.suppress(ValueError):
 
 @pytest.fixture
 def tmp_requests_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    rd = tmp_path / "reports" / "requests"
-    monkeypatch.setattr(request_delete, "_resolve_requests_dir", lambda: rd)
-    return rd
+    """Point ``$SSH_GUARDED_HOME`` at tmp_path (real resolution, no patching)."""
+    state = tmp_path / "state"
+    monkeypatch.setenv("SSH_GUARDED_HOME", str(state))
+    return state / "reports" / "test-proj" / "requests"
 
 
 @pytest.fixture(autouse=True)
 def _stable_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SSH_GUARDED_PROJECT_ID", "test-proj")
+
+
+@pytest.fixture(autouse=True)
+def _stub_remote_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default-stub only the remote ``$HOME`` lookup, not the command build.
+
+    ``test_remote_stat_command_*`` cases restore the real implementation to
+    assert the generated ``remote_cmd`` itself.
+    """
+    monkeypatch.setattr(
+        request_delete, "_resolve_home_for_precheck", lambda _alias: "/root",
+    )
 
 
 def _make_stat_run(envelope: dict[str, Any], rc: int = 0) -> Any:
@@ -292,8 +305,166 @@ def test_envelope_shape(
     )
     assert rc == 0
     assert env is not None
-    assert set(env.keys()) == {"success", "data", "error"}
+    assert set(env.keys()) == {
+        "success", "exit_code", "stdout", "stderr", "data", "error",
+    }
     assert {"artifact_path", "request_id", "risk_summary"}.issubset(env["data"])
+
+
+# --- BUG-001: tilde expansion in the remote pre-check -----------------------
+
+
+def _capture_stat_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[list[str]]:
+    """Install a fake subprocess.run, return the argv it was called with."""
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kw: Any) -> Any:
+        calls.append(list(argv))
+        completed = MagicMock()
+        completed.returncode = 0
+        completed.stdout = json.dumps(_env_ok("dir"))
+        completed.stderr = ""
+        return completed
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return calls
+
+
+def test_remote_stat_command_quotes_resolved_absolute_path() -> None:
+    """The generated remote_cmd must contain no ``'~`` and use the real home."""
+    cmd = request_delete._build_remote_stat_command(
+        "/root/workspace/test-proj/exists-probe"
+    )
+    assert "'~" not in cmd, cmd
+    assert "/root/workspace/test-proj/exists-probe" in cmd
+    assert "-d /root/workspace/test-proj/exists-probe" in cmd
+    # A path that *needs* quoting still gets quoted, after expansion.
+    spaced = request_delete._build_remote_stat_command(
+        "/root/workspace/test-proj/my dir"
+    )
+    assert "'/root/workspace/test-proj/my dir'" in spaced
+    assert "'~" not in spaced
+
+
+def test_remote_stat_kind_expands_tilde_through_resolved_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``~/x`` and ``/root/x`` must produce the same probe (BUG-001)."""
+    calls = _capture_stat_argv(monkeypatch)
+    kind_tilde = request_delete._remote_stat_kind(
+        "pai", "~/workspace/test-proj/exists-probe", remote_home="/root",
+    )
+    kind_abs = request_delete._remote_stat_kind(
+        "pai", "/root/workspace/test-proj/exists-probe", remote_home="/root",
+    )
+    assert kind_tilde == kind_abs == "dir"
+    assert len(calls) == 2
+    # Identical remote command for both spellings; no quoted tilde anywhere.
+    assert calls[0][3] == calls[1][3]
+    assert "'~" not in calls[0][3]
+    assert "'~/workspace" not in calls[0][3]
+
+
+def test_remote_stat_kind_calls_home_resolver_when_tilde_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a pre-resolved home, the SSH ``$HOME`` probe runs first."""
+    calls = _capture_stat_argv(monkeypatch)
+    seen: list[str] = []
+
+    def fake_resolve(alias: str) -> str:
+        seen.append(alias)
+        return "/home/jason"
+
+    monkeypatch.setattr(request_delete, "_resolve_home_for_precheck", fake_resolve)
+    kind = request_delete._remote_stat_kind("pai", "~/workspace/test-proj/x")
+    assert kind == "dir"
+    assert seen == ["pai"]
+    assert "/home/jason/workspace/test-proj/x" in calls[0][3]
+    assert "'~" not in calls[0][3]
+
+
+def test_home_resolution_failure_is_49_not_none(
+    tmp_requests_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failed pre-check must not masquerade as "the path does not exist"."""
+    _ArtifactError = request_delete.ArtifactError
+
+    def boom(_alias: str) -> str:
+        raise _ArtifactError(
+            failure_class="pre_check_stat_failed",
+            exit_code=49,
+            message="ssh unreachable",
+        )
+
+    monkeypatch.setattr(request_delete, "_resolve_home_for_precheck", boom)
+    rc, env, err = _capture(
+        ["pai", "--remote", "~/workspace/test-proj/mystery",
+         "--reason", "x", "--json"],
+        capsys,
+    )
+    assert rc == 49
+    assert env is not None
+    assert env["error"]["failure_class"] == "pre_check_stat_failed"
+    assert "does not exist" not in err
+
+
+def test_tilde_directory_without_recursive_exits_46(
+    tmp_requests_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """BUG-001 acceptance: ``~/...`` dir + no --recursive → 46, not a draft."""
+    calls = _capture_stat_argv(monkeypatch)
+    rc, env, _ = _capture(
+        ["pai", "--remote", "~/workspace/test-proj/exists-probe",
+         "--reason", "repro", "--json"],
+        capsys,
+    )
+    assert rc == 46
+    assert env is not None
+    assert env["error"]["failure_class"] == "recursive_required_for_directory"
+    assert "/root/workspace/test-proj/exists-probe" in calls[0][3]
+
+
+def test_tilde_directory_with_recursive_reports_tree_scope(
+    tmp_requests_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """BUG-001 acceptance: risk_summary.scope must be ``tree`` for a directory."""
+    _capture_stat_argv(monkeypatch)
+    rc, env, _ = _capture(
+        ["pai", "--remote", "~/workspace/test-proj/exists-probe",
+         "--reason", "repro", "--recursive", "--json"],
+        capsys,
+    )
+    assert rc == 0
+    assert env is not None
+    body = json.loads(Path(env["data"]["artifact_path"]).read_text())
+    assert body["payload"]["is_directory_pre_check"] is True
+    assert body["risk_summary"]["scope"] == "tree"
+    assert body["risk_summary"]["irreversible"] is True
+
+
+def test_no_recursive_note_only_when_truly_absent(
+    tmp_requests_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The misleading ``does not exist`` note is gone for a real directory."""
+    _capture_stat_argv(monkeypatch)
+    rc, _env, err = _capture(
+        ["pai", "--remote", "~/workspace/test-proj/exists-probe",
+         "--reason", "x", "--recursive", "--json"],
+        capsys,
+    )
+    assert rc == 0
+    assert "does not exist" not in err
 
 
 def test_suppress_pattern_no_redact(

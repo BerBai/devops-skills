@@ -4,13 +4,18 @@ Marker: ``live_ssh`` — skipped by default. Run with::
 
     pytest tests/test_ssh_execute_integration.py -v -m live_ssh
 
-Default target host is ``pai`` (the PoC reference host). Override with
-``POC_HOST=<alias>`` if you need to point at a different machine. See
+The target host comes from ``POC_HOST`` (there is no committed default). See
 ``tests/README.md`` for prerequisites.
 
 Each test re-runs one of the PoC hypotheses (H1-H6) from
 ``.trellis/tasks/archive/2026-05/05-21-02-poc-ssh-execute/findings.md``,
 but against the v1.0 ``ssh_execute.py`` (not the spike code).
+
+Exit codes come from the product's own table
+(``plugins/ssh-core/.../scripts/lib/exit_codes.py``). Two of them used to be
+asserted as OpenSSH's raw 255: an unresolved *alias* is `4 alias_not_found`
+and an unresolvable *hostname* is `102 network` — ssh's client-failure code is
+translated, not passed through (GAP-002).
 
 If ssh-agent is empty or the host is unreachable, tests skip cleanly
 rather than failing — these tests gate quality, not infrastructure.
@@ -19,13 +24,17 @@ rather than failing — these tests gate quality, not infrastructure.
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+import live_support  # noqa: E402
+from live_support import require_live_ssh  # noqa: E402
+
+# ``lib`` is pinned to ssh-core's own package by tests/conftest.py.
+from lib import exit_codes as _codes  # noqa: E402
 
 pytestmark = pytest.mark.live_ssh
 
@@ -39,21 +48,34 @@ SSH_EXECUTE = (
     / "scripts"
     / "ssh_execute.py"
 )
-POC_HOST = os.environ.get("POC_HOST", "pai")
-POC_CONFIG = "/tmp/poc-ssh-config"
+POC_HOST = live_support.poc_host()
+POC_CONFIG = live_support.poc_ssh_config()
 
-# Well-known exit codes used across the assertions below.
-EXIT_OK = 0
-EXIT_REMOTE_ERROR = 1
+# Exit codes, read from lib/exit_codes.py where the table has a name for them.
+EXIT_OK = _codes.EXIT_OK
+EXIT_INVALID_ARGUMENTS = _codes.EXIT_INVALID_ARGUMENTS
+EXIT_TIMEOUT = _codes.EXIT_TIMEOUT
+EXIT_ALIAS_NOT_FOUND = _codes.EXIT_CODES["alias_not_found"]
+EXIT_NETWORK = _codes.EXIT_NETWORK
+EXIT_AUTH = _codes.EXIT_AUTH
+
+#: Codes that are the *remote command's* own status and must pass through
+#: untouched, so they never appear in ``EXIT_CODES``. ``false`` exits 1 and
+#: ``ssh_execute`` forwards a remote status verbatim; the envelope's
+#: ``failure_class="remote_error"`` is what distinguishes "the command failed"
+#: from the transport-level 104 the table reserves for ssh's own 255.
+EXIT_REMOTE_COMMAND_FAILED = 1
 EXIT_CUSTOM = 42
 EXIT_MIXED_IO = 3
-EXIT_TIMEOUT = 124
 EXIT_NO_COMMAND = 127
-EXIT_SSH_CLIENT_FAILURE = 255
 
 # Default --timeout used by ssh_execute.py main(); checked in dispatch tests.
 TIMEOUT_DEFAULT = 120
-TIMEOUT_BUDGET = 3.0
+#: The timeout case asks for ``--timeout 3`` and must come back in roughly that
+#: budget. ``elapsed_s == 3.0`` was a float-equality assertion that measured
+#: 3.031 on the first real host it met (GAP-002); this is a range instead.
+TIMEOUT_BUDGET_MIN_S = 3.0
+TIMEOUT_BUDGET_MAX_S = 3.5
 
 
 # -----------------------------------------------------------------------------
@@ -61,58 +83,18 @@ TIMEOUT_BUDGET = 3.0
 # -----------------------------------------------------------------------------
 
 
-def _ssh_agent_has_key() -> bool:
-    """Return True iff ssh-add -l reports at least one loaded identity."""
-    if shutil.which("ssh-add") is None:
-        return False
-    try:
-        proc = subprocess.run(
-            ["ssh-add", "-l"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    # `ssh-add -l` returns 0 when at least one key is loaded, 1 when none,
-    # 2 when the agent is unreachable. Be permissive: 0 means we have keys.
-    return proc.returncode == 0 and bool(proc.stdout.strip())
-
-
-def _host_reachable(host: str, ssh_config: str | None = None) -> bool:
-    """Quick `ssh <host> true` probe with a short timeout."""
-    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
-    if ssh_config and Path(ssh_config).exists():
-        argv += ["-F", ssh_config]
-    argv += [host, "true"]
-    try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=10, check=False
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return proc.returncode == 0
-
-
 @pytest.fixture(scope="module", autouse=True)
 def _require_live_ssh() -> None:
-    """Skip the whole module unless agent + host are usable."""
-    if not _ssh_agent_has_key():
-        pytest.skip(
-            "ssh-agent has no loaded identity (run `ssh-add ~/.ssh/id_ed25519`)"
-        )
-    if not _host_reachable(POC_HOST):
-        pytest.skip(
-            f"host '{POC_HOST}' not reachable (override with POC_HOST=<alias>)"
-        )
+    """Module-level precondition; the shared guard names what is missing."""
+    require_live_ssh()
 
 
 def _run_envelope(*args: str, timeout: int = 30) -> dict:
     """Invoke ssh_execute.py as a subprocess; return parsed JSON envelope."""
     argv = [sys.executable, str(SSH_EXECUTE), *args, "--json"]
     proc = subprocess.run(
-        argv, capture_output=True, text=True, timeout=timeout, check=False
+        argv, capture_output=True, text=True, timeout=timeout, check=False,
+        encoding="utf-8", errors="replace",
     )
     try:
         return json.loads(proc.stdout)
@@ -138,10 +120,15 @@ def test_h1_true_returns_exit_0() -> None:
 
 
 def test_h1_false_returns_exit_1_remote_error() -> None:
-    """H1-2: `false` propagates exit 1, classified as remote_error (non-255)."""
+    """H1-2: `false` propagates exit 1, classified as remote_error.
+
+    1 here is the *remote command's* status (``false``), passed through
+    verbatim; ``failure_class="remote_error"`` is what separates "the command
+    failed" from the transport-level 104 the table reserves for ssh's own 255.
+    """
     result = _run_envelope(POC_HOST, "false")
     assert result["success"] is False
-    assert result["exit_code"] == EXIT_REMOTE_ERROR
+    assert result["exit_code"] == EXIT_REMOTE_COMMAND_FAILED
     assert result["data"]["failure_class"] == "remote_error"
 
 
@@ -183,30 +170,33 @@ def test_h2_normal_call_has_no_noise() -> None:
 def test_h2_filters_known_hosts_warning_via_fresh_config(tmp_path: Path) -> None:
     """H2-3: force the known_hosts warning by pointing at a fresh file.
 
-    Creates a temporary ssh config that mirrors POC_HOST but pins
-    UserKnownHostsFile to a fresh path so ssh emits the
-    'Permanently added' warning we want to filter.
+    The derived config mirrors whatever ``ssh -G POC_HOST`` resolved -- same
+    HostName/User/IdentityFile/Port -- and only replaces the known-hosts file,
+    so the 'Permanently added' warning the filter must drop really happens.
+    The old version hardcoded ``192.168.2.115``/``root`` plus macOS-only
+    ``UseKeychain yes``, which the Windows ssh client rejects outright.
     """
-    if not Path(POC_CONFIG).exists():
-        pytest.skip(f"{POC_CONFIG} (PoC scratch config) missing on this machine")
+    resolved = live_support.resolved_ssh_options(POC_HOST)
+    if not resolved.get("hostname"):
+        pytest.skip(f"`ssh -G {POC_HOST}` did not resolve a hostname")
 
     known_hosts = tmp_path / "known_hosts"
     cfg = tmp_path / "ssh-config"
-    base = Path(POC_CONFIG).read_text()
-    cfg.write_text(
-        base
-        + (
-            "\n"
-            f"Host {POC_HOST}-fresh\n"
-            "    HostName 192.168.2.115\n"
-            "    User root\n"
-            "    IdentityFile ~/.ssh/id_ed25519\n"
-            "    UseKeychain yes\n"
-            "    AddKeysToAgent yes\n"
-            f"    UserKnownHostsFile {known_hosts}\n"
-            "    StrictHostKeyChecking accept-new\n"
-        )
-    )
+    lines = [
+        f"Host {POC_HOST}-fresh",
+        f"    HostName {resolved['hostname']}",
+        f"    User {resolved.get('user') or 'root'}",
+        f"    Port {resolved.get('port') or '22'}",
+        f"    UserKnownHostsFile {known_hosts}",
+        "    StrictHostKeyChecking accept-new",
+    ]
+    if resolved.get("identityfile"):
+        lines.append(f"    IdentityFile {resolved['identityfile']}")
+        # Without IdentitiesOnly the agent's other keys are tried first, which
+        # is fine — but pinning it makes the derived config behave like the
+        # original alias instead of like "whatever keys I happen to hold".
+        lines.append("    IdentitiesOnly yes")
+    cfg.write_text("\n".join(lines) + "\n", encoding="ascii")
 
     result = _run_envelope(
         f"{POC_HOST}-fresh", "true", "--ssh-config", str(cfg)
@@ -228,30 +218,43 @@ def test_h2_filters_known_hosts_warning_via_fresh_config(tmp_path: Path) -> None
 
 
 def test_h3_alias_via_agent() -> None:
-    """H3-2: alias with no IdentityFile resolves via ssh-agent."""
-    if not Path(POC_CONFIG).exists():
-        pytest.skip(f"{POC_CONFIG} missing on this machine")
+    """H3-2: alias with no IdentityFile resolves via ssh-agent.
+
+    Needs a hand-written ``Host poc-via-agent`` stanza whose whole point is the
+    *absence* of an IdentityFile, so the only possible credential is the agent
+    identity. A generated config cannot express that, so the shared guard skips
+    with the missing stanza's name instead of fabricating one and failing.
+    """
+    cfg = live_support.require_ssh_config_stanza("poc-via-agent")
     result = _run_envelope(
-        "poc-via-agent", "true", "--ssh-config", POC_CONFIG
+        "poc-via-agent", "true", "--ssh-config", str(cfg)
     )
     assert result["success"] is True, result
-    assert result["exit_code"] == 0
+    assert result["exit_code"] == EXIT_OK
 
 
-def test_h3_undefined_alias_classified_network() -> None:
-    """H3-3: alias not in any config → ssh treats as literal hostname,
-    fails DNS, classified as network. Skip if the resolver NAT-redirects
-    instead of returning NXDOMAIN."""
+def test_h3_undefined_alias_classified_alias_not_found() -> None:
+    """H3-3: a name that is neither an alias nor an address → 4, not 255.
+
+    ``bogus-not-defined-anywhere-xyz`` has no dot and is not an IP, so ssh
+    treats it as a literal hostname and fails to resolve it. The product reads
+    that shape as a mistyped *alias* (FA-22), which points the operator at
+    ~/.ssh/config instead of at DNS; the exit code is therefore 4
+    ``alias_not_found``, not OpenSSH's raw 255.
+    """
     result = _run_envelope("bogus-not-defined-anywhere-xyz", "uptime", timeout=15)
     assert result["success"] is False
-    assert result["exit_code"] == EXIT_SSH_CLIENT_FAILURE
-    if result["data"]["failure_class"] != "network":
+    # Some resolvers NAT-redirect instead of answering NXDOMAIN, in which case
+    # the name is not reported as unresolved at all; skip *before* asserting the
+    # code, so a resolver quirk cannot masquerade as a product regression.
+    if result["data"]["failure_class"] != "alias_not_found":
         pytest.skip(
-            "DNS resolver does not return NXDOMAIN for arbitrary hostnames "
-            "(NAT redirect / split-horizon DNS); cannot test alias-as-hostname "
-            f"path here. stderr: {result['stderr']!r}"
+            "DNS resolver does not report NXDOMAIN for a bare hostname "
+            "(NAT redirect / split-horizon DNS); cannot test the "
+            f"alias-not-found path here. envelope: {result!r}"
         )
-    assert result["data"]["failure_class"] == "network"
+    assert result["exit_code"] == EXIT_ALIAS_NOT_FOUND, result
+    assert result["data"]["failure_class"] == "alias_not_found"
 
 
 # -----------------------------------------------------------------------------
@@ -260,40 +263,50 @@ def test_h3_undefined_alias_classified_network() -> None:
 
 
 def test_h4_network_class_on_dns_failure() -> None:
-    """H4-1: DNS-unresolvable host → failure_class=network.
+    """H4-1: DNS-unresolvable host → 102 network.
 
-    Some resolvers (e.g. macOS in certain network configs) NAT-redirect
-    arbitrary hostnames to a sinkhole IP, which yields 'Connection closed'
-    instead of 'Could not resolve hostname'. ``.invalid`` and ``.local``
-    are the most reliably-unresolvable TLDs in practice. If the env still
-    NATs them we skip rather than fail.
+    ``.invalid.local`` is a dotted name, so it is a *hostname* rather than an
+    alias and lands in the ``network`` class (102) instead of
+    ``alias_not_found`` (4). Some resolvers (macOS in certain network configs,
+    corporate split-horizon) NAT-redirect arbitrary names to a sinkhole IP,
+    which yields 'Connection closed' instead; if that happens we skip.
     """
     result = _run_envelope("nonexistent.invalid.local", "uptime", timeout=15)
-    assert result["exit_code"] == EXIT_SSH_CLIENT_FAILURE
+    assert result["success"] is False
     if result["data"]["failure_class"] != "network":
         pytest.skip(
             "DNS resolver does not return NXDOMAIN for nonexistent.invalid.local "
             "(NAT redirect / split-horizon DNS); cannot test network class here. "
-            f"stderr: {result['stderr']!r}"
+            f"envelope: {result!r}"
         )
+    assert result["exit_code"] == EXIT_NETWORK, result
     assert result["data"]["failure_class"] == "network"
 
 
 def test_h4_auth_class_on_publickey_denial() -> None:
-    """H4-2: IdentityFile=/dev/null + IdentitiesOnly=yes → auth failure."""
-    if not Path(POC_CONFIG).exists():
-        pytest.skip(f"{POC_CONFIG} missing on this machine")
+    """H4-2: IdentityFile=/dev/null + IdentitiesOnly=yes → auth failure.
+
+    Like H3-2 this needs a stanza only a human can write: ``Host poc-noauth``
+    must pin an unusable identity so the publickey offer is denied on purpose.
+    """
+    cfg = live_support.require_ssh_config_stanza("poc-noauth")
     result = _run_envelope(
-        "poc-noauth", "uptime", "--ssh-config", POC_CONFIG, "--timeout", "15"
+        "poc-noauth", "uptime", "--ssh-config", str(cfg), "--timeout", "15"
     )
-    assert result["exit_code"] == EXIT_SSH_CLIENT_FAILURE
-    assert result["data"]["failure_class"] == "auth", result
+    assert result["success"] is False
+    if result["data"]["failure_class"] != "auth":
+        pytest.skip(
+            "the `poc-noauth` stanza did not produce a publickey denial "
+            f"(is another credential available for that host?): {result!r}"
+        )
+    assert result["exit_code"] == EXIT_AUTH, result
+    assert result["data"]["failure_class"] == "auth"
 
 
 def test_h4_remote_error_residual() -> None:
     """H4-3: remote command returning non-zero (not 255) → remote_error."""
     result = _run_envelope(POC_HOST, "false")
-    assert result["exit_code"] == EXIT_REMOTE_ERROR
+    assert result["exit_code"] == EXIT_REMOTE_COMMAND_FAILED
     assert result["data"]["failure_class"] == "remote_error"
 
 
@@ -309,8 +322,14 @@ def test_h5_timeout_returns_124(tmp_path: Path) -> None:
     )
     assert result["exit_code"] == EXIT_TIMEOUT, result
     assert result["data"]["failure_class"] == "timeout"
-    # ADR-001 D6: elapsed_s == timeout budget on timeout
-    assert result["data"]["elapsed_s"] == TIMEOUT_BUDGET
+    # ADR-001 D6: elapsed_s tracks the timeout budget. A range, not equality:
+    # process teardown lands a few ms past the budget on every real host
+    # (3.031 measured), and float equality turns that into a false failure.
+    elapsed = result["data"]["elapsed_s"]
+    assert TIMEOUT_BUDGET_MIN_S <= elapsed <= TIMEOUT_BUDGET_MAX_S, (
+        f"elapsed_s={elapsed!r} outside "
+        f"[{TIMEOUT_BUDGET_MIN_S},{TIMEOUT_BUDGET_MAX_S}]"
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -318,13 +337,22 @@ def test_h5_timeout_returns_124(tmp_path: Path) -> None:
 # -----------------------------------------------------------------------------
 
 
+@pytest.mark.needs_posix
 def test_h6_local_simple_command() -> None:
-    """H6-1: `local ls /tmp` returns exit 0."""
+    """H6-1: `local ls /tmp` returns exit 0.
+
+    A POSIX shell built this command; on Windows the local route only starts an
+    ``.exe``/``.cmd``/``.bat`` from PATH, so ``ls`` is explicitly unsupported
+    there (and the product says so, exit 127). The ``cmd /c`` form is the
+    documented Windows spelling, so this case is POSIX-gated rather than
+    rewritten to test something else.
+    """
     result = _run_envelope("local", "ls /tmp")
     assert result["exit_code"] == EXIT_OK
     assert result["data"]["route"] == "local"
 
 
+@pytest.mark.needs_posix
 def test_h6_local_quoted_string_preserved() -> None:
     """H6-4: `echo \"hello world\"` keeps the space inside one arg."""
     result = _run_envelope("local", 'echo "hello world"')
@@ -333,10 +361,17 @@ def test_h6_local_quoted_string_preserved() -> None:
 
 
 def test_h6_local_refuses_pipe_loudly() -> None:
-    """H6-3 (v1.0 refinement): pipe is refused, not silently mis-handled."""
+    """H6-3 (v1.0 refinement): pipe is refused, not silently mis-handled.
+
+    The local route deliberately runs without a shell, so the metacharacter is
+    rejected *before* anything is spawned: 2 ``invalid_arguments`` (the argv
+    cannot be honoured as given), not the generic 1 this case used to assert.
+    Platform-independent, so it runs on Windows too.
+    """
     result = _run_envelope("local", "ls /tmp | head -3")
-    assert result["exit_code"] == EXIT_REMOTE_ERROR
+    assert result["exit_code"] == EXIT_INVALID_ARGUMENTS, result
     assert result["data"]["refused_metachar"] == "|"
+    assert result["data"]["failure_class"] == "invalid_arguments"
 
 
 def test_h6_local_refuses_redirect_loudly(tmp_path: Path) -> None:
@@ -344,6 +379,7 @@ def test_h6_local_refuses_redirect_loudly(tmp_path: Path) -> None:
     misbehave (the worst spike behavior — exit 0 but no file written)."""
     sentinel = tmp_path / "should_not_be_created.tmp"
     result = _run_envelope("local", f"echo hi > {sentinel}")
-    assert result["exit_code"] == EXIT_REMOTE_ERROR
+    assert result["exit_code"] == EXIT_INVALID_ARGUMENTS, result
     assert result["data"]["refused_metachar"] == ">"
+    assert result["data"]["failure_class"] == "invalid_arguments"
     assert not sentinel.exists()

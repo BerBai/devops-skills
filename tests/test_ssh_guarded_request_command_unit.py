@@ -66,10 +66,10 @@ with contextlib.suppress(ValueError):
 
 @pytest.fixture
 def tmp_requests_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Re-route ``_resolve_requests_dir`` so tests don't touch the real reports/."""
-    rd = tmp_path / "reports" / "requests"
-    monkeypatch.setattr(request_command, "_resolve_requests_dir", lambda: rd)
-    return rd
+    """Point ``$SSH_GUARDED_HOME`` at tmp_path (real resolution, no patching)."""
+    state = tmp_path / "state"
+    monkeypatch.setenv("SSH_GUARDED_HOME", str(state))
+    return state / "reports" / "test-proj" / "requests"
 
 
 @pytest.fixture(autouse=True)
@@ -280,7 +280,11 @@ def test_envelope_shape_happy_path_keys(
     )
     assert rc == 0
     assert env is not None
-    assert set(env.keys()) == {"success", "data", "error"}
+    assert set(env.keys()) == {
+        "success", "exit_code", "stdout", "stderr", "data", "error",
+    }
+    assert env["exit_code"] == 0
+    assert env["error"] is None
     assert set(env["data"].keys()) >= {
         "artifact_path", "request_id", "risk_summary",
     }

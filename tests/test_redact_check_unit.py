@@ -96,13 +96,19 @@ def test_help_surface_lists_four_flags() -> None:
     ("secret", "replacement", "kind"),
     [
         ("AKIAABCDEFGHIJKLMNOP", "[REDACTED-AWS-ACCESS-KEY]", "aws_access_key"),
-        ("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij", "[REDACTED-GH-TOKEN]", "github_token"),
+        ("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij", "[REDACTED-GH-TOKEN]", "github_pat"),
         (
             "eyJhbGciOiJIUzI1.eyJzdWIiOjEyMzQ1.signaturepayload",
             "[REDACTED-JWT]",
             "jwt",
         ),
-        ("-----BEGIN OPENSSH PRIVATE KEY-----", "[REDACTED-PRIVATE-KEY-HEADER]", "rsa_private"),
+        (
+            "-----BEGIN OPENSSH PRIVATE KEY-----",
+            "[REDACTED-PRIVATE-KEY-HEADER]",
+            "private_key_header",
+        ),
+        ("glpat-ABCDEFGHIJKLMNOPQRST", "[REDACTED-GITLAB-TOKEN]", "gitlab_pat"),
+        ("xoxb-1234567890-abcdefghij", "[REDACTED-SLACK-TOKEN]", "slack_token"),
     ],
 )
 def test_builtin_patterns_redact(
@@ -148,7 +154,7 @@ def test_builtin_catalog_redacts_multiple_kinds_in_one_input(
     assert "[REDACTED-PRIVATE-KEY-HEADER]" in out
     assert err == (
         "redact_check: 4 hits "
-        "(aws_access_key=1, github_token=1, jwt=1, rsa_private=1)\n"
+        "(aws_access_key=1, github_pat=1, jwt=1, private_key_header=1)\n"
     )
 
 

@@ -381,6 +381,7 @@ def test_check_filter_runs_only_listed_probes(
     monkeypatch.setattr(
         diagnose_host, "_ssh_execute_path", lambda: Path(__file__)
     )  # any existing file
+    monkeypatch.setattr(diagnose_host, "_detect_target_os", lambda *_a: diagnose_host.OS_LINUX)
     captured: list[list[str]] = []
 
     def fake_run(argv, **_kwargs):
@@ -417,6 +418,8 @@ def test_check_filter_rejects_unknown_probe(
     """--check with a name not in PROBES must short-circuit with a
     precondition envelope before any ssh_execute call."""
     monkeypatch.setattr(diagnose_host, "_ssh_execute_path", lambda: Path(__file__))
+    # --target-os linux skips the auto detector, which would add one probe
+    monkeypatch.setattr(diagnose_host, "_detect_target_os", lambda *_a: diagnose_host.OS_LINUX)
 
     def fail_if_called(*_args, **_kwargs):
         raise AssertionError("subprocess.run must not run when --check is invalid")
@@ -453,6 +456,8 @@ def test_main_aggregates_envelope_with_all_probes_ok(
 ) -> None:
     """End-to-end main() with all probes returning healthy envelopes."""
     monkeypatch.setattr(diagnose_host, "_ssh_execute_path", lambda: Path(__file__))
+    # --target-os linux skips the auto detector, which would add one probe
+    monkeypatch.setattr(diagnose_host, "_detect_target_os", lambda *_a: diagnose_host.OS_LINUX)
 
     healthy: dict[str, str] = {
         "uptime": " 13:00:00 up 1 day,  load average: 0.10, 0.05, 0.01\n",
@@ -491,6 +496,8 @@ def test_main_failure_when_probe_returns_network(
     """If a probe envelope carries failure_class=network, overall success
     is False and the failure_class surfaces on the per-probe record."""
     monkeypatch.setattr(diagnose_host, "_ssh_execute_path", lambda: Path(__file__))
+    # --target-os linux skips the auto detector, which would add one probe
+    monkeypatch.setattr(diagnose_host, "_detect_target_os", lambda *_a: diagnose_host.OS_LINUX)
 
     def fake_run(*_args, **_kwargs):
         return _completed(
@@ -522,6 +529,8 @@ def test_main_failure_when_severity_crit(
 ) -> None:
     """Even with all probes returning exit 0, severity=crit forces success=False."""
     monkeypatch.setattr(diagnose_host, "_ssh_execute_path", lambda: Path(__file__))
+    # --target-os linux skips the auto detector, which would add one probe
+    monkeypatch.setattr(diagnose_host, "_detect_target_os", lambda *_a: diagnose_host.OS_LINUX)
 
     # Tuned outputs: huge load + high disk usage to drive both into crit.
     canned: dict[str, str] = {
@@ -546,3 +555,84 @@ def test_main_failure_when_severity_crit(
     out = json.loads(capsys.readouterr().out)
     assert out["success"] is False
     assert out["data"]["severity"] == "crit"
+
+
+# -----------------------------------------------------------------------------
+# Windows target family (--target-os) — added when remote-debug learned that a
+# Windows host has no nproc/free/df/proc
+# -----------------------------------------------------------------------------
+
+
+def test_target_os_auto_detects_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(diagnose_host, "_detect_target_os", lambda *_a: diagnose_host.OS_WINDOWS)
+    assert diagnose_host.PROBES_BY_OS[diagnose_host.OS_WINDOWS] is diagnose_host.PROBES_WINDOWS
+
+
+def test_windows_probe_table_is_powershell(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, cmd in diagnose_host.PROBES_WINDOWS.items():
+        assert "powershell" in cmd.lower(), name
+        assert "-EncodedCommand" in cmd, name
+        assert "-NoProfile" in cmd, name
+
+
+def test_windows_probes_avoid_a_posix_shell_surface() -> None:
+    """No probe may rely on quoting or `$VAR` surviving two different shells."""
+    for name, cmd in diagnose_host.PROBES_WINDOWS.items():
+        assert "$" not in cmd, f"{name}: a bare $ would be expanded by sh"
+        assert "|" not in cmd, f"{name}: a pipe would be interpreted by sh"
+        assert '"' not in cmd, f"{name}: cmd /c eats quotes"
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        ('{"DeviceID":"C:","Size":1000000,"FreeSpace":250000}', {"total_mb": 0, "free_mb": 0, "use_pct": 75, "mount": "C:"}),
+        ('[{"DeviceID":"D:","Size":2000000,"FreeSpace":1000000}]', {"total_mb": 1, "free_mb": 0, "use_pct": 50, "mount": "D:"}),
+        ("not json", {}),
+        ("", {}),
+    ],
+)
+def test_parse_disk_windows(stdout: str, expected: dict) -> None:
+    assert diagnose_host._parse_disk_windows(stdout) == expected
+
+
+def test_parse_cpu_windows() -> None:
+    assert diagnose_host._parse_cpu_windows("42\n") == {"cpu_pct": 42}
+    assert diagnose_host._parse_cpu_windows("") == {}
+    assert diagnose_host._parse_cpu_windows("nonsense") == {}
+
+
+def test_parse_mem_windows() -> None:
+    assert diagnose_host._parse_mem_windows("16099 8475\n") == {
+        "total_mb": 16099,
+        "used_mb": 8475,
+    }
+    assert diagnose_host._parse_mem_windows("only-one") == {}
+
+
+def test_score_uses_cpu_percentage_for_windows() -> None:
+    probes = {
+        "load": _probe_block({"cpu_pct": diagnose_host.CPU_CRIT_PCT}),
+        "disk": _probe_block({"use_pct": 10}),
+        "zombie": _probe_block({"count": 0}),
+    }
+    assert diagnose_host._score(probes) == "crit"
+
+    probes["load"] = _probe_block({"cpu_pct": diagnose_host.CPU_WARN_PCT})
+    assert diagnose_host._score(probes) == "warn"
+
+
+def test_forced_target_os_reaches_the_envelope(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(diagnose_host, "_ssh_execute_path", lambda: Path(__file__))
+
+    def fake_run(argv, **_kwargs):
+        return _completed(0, stdout=_envelope_json(stdout=""))
+
+    monkeypatch.setattr(diagnose_host.subprocess, "run", fake_run)
+    rc = diagnose_host.main(["pai", "--json", "--target-os", "windows"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["data"]["target_os"] == "windows"
+    assert "(windows)" in out["stdout"]
+    assert rc in (EXIT_OK, EXIT_FAIL)

@@ -1,0 +1,29 @@
+# One-node Kubernetes fixture for the k8s-debug live suite.
+#
+#   docker compose -f tests/fixtures/backends/compose.kind.yml up -d
+#   pytest tests/ -m live_k8s -q
+#
+# kind itself runs the cluster, so this service is only a supervised wrapper
+# that keeps the container alive and publishes the API server on 6443. The
+# pytest fixture (tests/conftest.py::kind_cluster) reuses the cluster by name,
+# so `kind delete cluster --name k8s-debug-test` is the way to reset it.
+services:
+  kind:
+    image: kindest/node:v1.29.2
+    container_name: devops-skills-kind
+    privileged: true
+    command: ["sleep", "infinity"]
+    environment:
+      KIND_EXPERIMENTAL_PROVIDER: docker
+    ports:
+      - "127.0.0.1:6443:6443"
+    volumes:
+      - kind-state:/var/lib
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /var/lib/kubelet/config.yaml || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  kind-state:

@@ -25,6 +25,9 @@ from pathlib import Path
 
 import pytest
 
+import live_support  # noqa: E402
+from live_support import require_live_ssh  # noqa: E402
+
 pytestmark = pytest.mark.live_ssh
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -38,7 +41,7 @@ SCM_PATH = (
     / "ssh_config_manager.py"
 )
 REAL_CONFIG = Path("~/.ssh/config").expanduser()
-POC_HOST = os.environ.get("POC_HOST", "pai")
+POC_HOST = live_support.poc_host()
 
 EXIT_OK = 0
 

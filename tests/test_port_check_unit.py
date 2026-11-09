@@ -466,28 +466,78 @@ def test_main_matrix_mode_generates_all_cells(
     assert calls[expected_cells - 1][2] == "src2"
 
 
-def test_main_udp_flag_writes_deferred_warning(
+def test_main_udp_probe_runs_and_is_labelled(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """--udp must not crash; v0.2 surface compatibility (R2)."""
-    payload = _envelope_json(exit_code=0, stdout="succeeded!")
-    monkeypatch.setattr(
-        port_check.subprocess,
-        "run",
-        lambda *_a, **_k: _completed(0, stdout=payload, stderr=""),
-    )
+    """--udp runs a real UDP probe and says so in the envelope."""
+    payload = _envelope_json(exit_code=0, stdout="")
+    seen: list[str] = []
+
+    def fake_run(argv, **_kwargs):
+        seen.append(argv[3] if len(argv) > 3 else "")
+        return _completed(0, stdout=payload, stderr="")
+
+    monkeypatch.setattr(port_check.subprocess, "run", fake_run)
 
     rc = port_check.main(
-        ["pai", "--target", "localhost", "--ports", "22", "--udp", "--json"]
+        ["pai", "--target", "localhost", "--ports", "53", "--udp", "--json"]
     )
 
     cap = capsys.readouterr()
-    assert rc == EXIT_OK  # TCP probe still ran; UDP only writes warning
-    assert "udp" in cap.err.lower()
-    assert "deferred" in cap.err.lower()
+    assert rc == EXIT_OK
+    assert "nc -zu" in seen[0], seen[0]
     parsed = json.loads(cap.out)
-    assert parsed["success"] is True
+    assert parsed["data"]["protocol"] == "udp"
+    assert parsed["data"]["matrix"][0]["protocol"] == "udp"
+    assert parsed["data"]["matrix"][0]["status"] == "open-or-filtered"
+    assert "firewall" in parsed["data"]["summary"]["note"]
+
+
+def test_udp_refusal_is_reported_as_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An ICMP port-unreachable is the one definitive UDP answer.
+
+    ``nc -zu`` surfaces it as ``Connection refused`` on the read side, which is
+    the same text the TCP classifier already recognises.
+    """
+    monkeypatch.setattr(
+        port_check.subprocess,
+        "run",
+        lambda *_a, **_k: _completed(0, stdout=json.dumps({
+            "success": False, "exit_code": 1, "stdout": "",
+            "stderr": "nc: read udp 10.0.0.1:4321->10.0.0.2:53: Connection refused",
+            "data": {},
+        }), stderr=""),
+    )
+
+    rc = port_check.main(
+        ["pai", "--target", "localhost", "--ports", "53", "--udp", "--json"]
+    )
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["data"]["matrix"][0]["status"] == "refused"
+    assert rc == EXIT_FAIL
+
+
+def test_udp_without_netcat_is_a_source_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No `nc` on the source cannot be reported as 'port closed'."""
+    monkeypatch.setattr(
+        port_check.subprocess,
+        "run",
+        lambda *_a, **_k: _completed(0, stdout=json.dumps({
+            "success": False, "exit_code": 127, "stdout": "",
+            "stderr": "nc not available: UDP probing needs netcat", "data": {},
+        }), stderr=""),
+    )
+
+    port_check.main(["pai", "--target", "localhost", "--ports", "53", "--udp", "--json"])
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["data"]["matrix"][0]["status"] == "source-error"
 
 
 def test_main_propagates_source_error_to_envelope(

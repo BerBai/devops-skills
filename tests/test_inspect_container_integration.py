@@ -27,6 +27,9 @@ from pathlib import Path
 
 import pytest
 
+import live_support  # noqa: E402
+from live_support import require_live_ssh  # noqa: E402
+
 pytestmark = pytest.mark.live_ssh
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

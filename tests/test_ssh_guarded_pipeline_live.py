@@ -29,13 +29,16 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
 import pytest
+
+import live_support  # noqa: E402
+from live_support import require_live_ssh  # noqa: E402
 
 pytestmark = pytest.mark.live_ssh
 
@@ -49,52 +52,30 @@ REQUEST_MKDIR = SSH_GUARDED_SCRIPTS / "request_mkdir.py"
 REQUEST_DELETE = SSH_GUARDED_SCRIPTS / "request_delete.py"
 RUN_REQUEST = SSH_GUARDED_SCRIPTS / "run_request.py"
 
-POC_HOST = os.environ.get("POC_HOST", "pai")
+POC_HOST = live_support.poc_host()
 PROJECT_ID = "devops-skills"
+
+#: Redirected state home for the whole module so a live run never pollutes the
+#: developer's real ``~/.devops/ssh-guarded`` (GAP-006).
+_STATE_HOME = Path(tempfile.mkdtemp(prefix="ssh-guarded-live-state-"))
 
 EXIT_OK = 0
 EXIT_SANDBOX_REFUSAL = 50
 EXIT_DENYLIST_REFUSAL = 51
 
 
-def _ssh_agent_has_key() -> bool:
-    if shutil.which("ssh-add") is None:
-        return False
-    try:
-        proc = subprocess.run(
-            ["ssh-add", "-l"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return proc.returncode == 0 and bool(proc.stdout.strip())
-
-
-def _host_reachable(host: str) -> bool:
-    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "true"]
-    try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=10, check=False
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return proc.returncode == 0
+def _state_env() -> dict[str, str]:
+    """Process env for a live run, with state redirected to a temp dir."""
+    env = dict(os.environ)
+    env["SSH_GUARDED_HOME"] = str(_STATE_HOME)
+    env["SSH_GUARDED_PROJECT_ID"] = PROJECT_ID
+    return env
 
 
 @pytest.fixture(scope="module", autouse=True)
 def _require_live_ssh() -> None:
-    if not _ssh_agent_has_key():
-        pytest.skip(
-            "ssh-agent has no loaded identity (run `ssh-add ~/.ssh/id_ed25519`)"
-        )
-    if not _host_reachable(POC_HOST):
-        pytest.skip(
-            f"host '{POC_HOST}' not reachable (override with POC_HOST=<alias>); "
-            "host expected at 192.168.2.0/24 subnet per project convention"
-        )
+    """Module-level precondition; the shared guard names what is missing."""
+    require_live_ssh()
 
 
 def _ssh(host: str, command: str, timeout: int = 15) -> subprocess.CompletedProcess[str]:
@@ -116,7 +97,9 @@ def _run_drafter(script: Path, *args: str, timeout: int = 60) -> tuple[dict, str
     """Invoke a drafter script; return (parsed_envelope, stderr_text).
 
     All drafters always run with --json so envelope is stable; --project-id is
-    pinned so tests don't depend on cwd-detection.
+    pinned so tests don't depend on cwd-detection; $SSH_GUARDED_HOME is
+    redirected into the per-run temp dir so a live run never writes into the
+    developer's real state home (GAP-006).
     """
     argv = [
         sys.executable,
@@ -127,7 +110,12 @@ def _run_drafter(script: Path, *args: str, timeout: int = 60) -> tuple[dict, str
         PROJECT_ID,
     ]
     proc = subprocess.run(
-        argv, capture_output=True, text=True, timeout=timeout, check=False
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+        env=_state_env(),
     )
     try:
         env = json.loads(proc.stdout)
@@ -151,7 +139,12 @@ def _run_executor(*args: str, timeout: int = 120) -> tuple[dict, str, int]:
         PROJECT_ID,
     ]
     proc = subprocess.run(
-        argv, capture_output=True, text=True, timeout=timeout, check=False
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+        env=_state_env(),
     )
     try:
         env = json.loads(proc.stdout)
