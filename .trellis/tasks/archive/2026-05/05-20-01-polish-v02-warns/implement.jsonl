@@ -1,3 +1,0 @@
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Review checklist — confirm string-only edits do not break JSON output contract / no shell strings / script --help smoke"}
-{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Where plugin.json and scripts live; confirm only the 8 plugin.json + 7 plugin UNIMPLEMENTED_NOTE + ssh-core lib are in scope"}
-{"file": ".trellis/spec/backend/error-handling.md", "reason": "JSON contract / exit code 2 semantics must be preserved when changing stub message strings"}

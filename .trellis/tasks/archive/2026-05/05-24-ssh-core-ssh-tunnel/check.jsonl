@@ -1,7 +1,0 @@
-{"file": ".trellis/spec/backend/error-handling.md", "reason": "验证：30–39 区段已在 exit-code 表追加一行；'Do not invent new exit codes' 段末尾的范围列表已含 30-39；每个 failure_class 字符串与 envelope data.failure_class 一致；callers branch on class not number"}
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "验证：pytest tests/ 全绿；ruff check 干净；mypy 干净；test_manifests.py 的 test_script_help 对 ssh_tunnel.py 通过；ssh_tunnel.py 覆盖率 ≥ 90%"}
-{"file": ".trellis/spec/backend/directory-structure.md", "reason": "验证 lib import 路径与脚本位置仍合规（ssh_tunnel.py 在 plugins/ssh-core/skills/ssh-core/scripts/）"}
-{"file": "plugins/ssh-core/skills/ssh-core/references/workflows.md", "reason": "验证 §4 整段重写完成；grep 'Same daemon shape' 结果为 0；'v1.0 status' 在 §4 出现至少 1 次（§3 也有 1 次）；不再说 'exits after --idle-timeout'"}
-{"file": "plugins/ssh-core/skills/ssh-core/references/safety.md", "reason": "验证 L22 state 路径约定未被破坏；ssh_tunnel state 目录确实 0o700、文件 0o600"}
-{"file": "plugins/ssh-core/skills/ssh-core/references/troubleshooting.md", "reason": "验证 L33-34 已更新 daemon → detached ssh / forwarder 措辞"}
-{"file": "plugins/ssh-core/skills/ssh-core/SKILL.md", "reason": "验证 decision tree + quick reference 已加 v1.0 注释（idle-timeout v1.1 deferred）"}

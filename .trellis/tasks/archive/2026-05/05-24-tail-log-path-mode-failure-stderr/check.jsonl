@@ -1,2 +1,0 @@
-{"file": ".trellis/spec/backend/error-handling.md", "reason": "Line 28 — non-JSON failures must surface diagnostics to stderr. The post-check must verify the new path mode failure conforms."}
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "General test/lint/style expectations for new code in this repo."}

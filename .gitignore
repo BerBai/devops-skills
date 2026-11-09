@@ -9,13 +9,41 @@ venv/
 .ruff_cache/
 .mypy_cache/
 .coverage
+.coverage.*
+pytest-of-*/
+junit*.xml
+coverage.xml
+htmlcov/
 
-# Runtime state — these are generated at use time, never committed
-plugins/ssh-guarded/skills/ssh-guarded/reports/requests/*.json
-plugins/ssh-guarded/skills/ssh-guarded/reports/jobs/*.json
+# Offline bundle output: `scripts/build_offline_bundle.sh` writes dist/offline/,
+# and the tarball it produces must never be committed (GAP-025).
+dist/
+wheelhouse/
+devops-skills-offline/
+devops-skills-*-linux-offline-*.tar.gz
+
+# Runtime state — generated at use time, never committed.
+#
+# ssh-guarded writes its request artifacts and job state outside the plugin
+# tree now: $SSH_GUARDED_HOME (default ~/.devops/ssh-guarded). The plugin
+# directory is read-only under most installs, and writing state into it lost
+# pending approvals on every upgrade (DEVOPS-GAP-006). Only the two
+# per-project files remain, and only when the user opts into project-local
+# state by setting SSH_GUARDED_PROJECT_ID and pointing at the skill dir.
 plugins/ssh-guarded/skills/ssh-guarded/server_list.local.json
 plugins/ssh-guarded/skills/ssh-guarded/project.local.json
 **/.bak.*
+
+# ssh-core's JSONL audit trail and ssh-guarded's askpass staging both fall back
+# to the current directory when every temp location is unwritable. The askpass
+# directory holds a 0600 file with the password in it, so it is ignored for the
+# same reason the code refuses to read secrets from disk.
+/ssh-core/
+.ssh-core-askpass/
+ssh-core-askpass/
+
+# Ad-hoc logs produced while running a script from the repository root.
+*.log
 
 # OS
 .DS_Store
@@ -41,5 +69,11 @@ authorized_keys
 # Team conventions live in CONTRIBUTING.md and code, not in .trellis/.
 .claude/
 .trellis/
+.agents/
+.codex/
+.windsurf/
 AGENTS.md
 CLAUDE.md
+
+# macOS archive junk
+__MACOSX/

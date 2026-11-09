@@ -1,0 +1,32 @@
+# Normalise line endings and mark the file types git should treat as binary.
+#
+# Why this exists: the working copy on the maintainer's Windows box has
+# core.autocrlf=true, so `git status` used to report ~50 files as modified when
+# the only difference was the 100755 -> 100644 mode flip plus CRLF. A repo that
+# ships POSIX shell scripts and a Windows .cmd launcher cannot pick one global
+# setting; it has to say so per path.
+
+* text=auto eol=lf
+
+# Windows launcher must stay CRLF — cmd.exe mis-parses an LF-only batch file in
+# some edge cases (labels and `goto`).
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# POSIX launchers must stay LF: a CRLF shebang is `#!/bin/sh\r` and fails.
+*.sh text eol=lf
+
+# Plugin manifests / docs / sources are all LF.
+*.json text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.txt text eol=lf
+
+# Archives and binaries.
+*.png binary
+*.jpg binary
+*.zip binary
+*.gz binary

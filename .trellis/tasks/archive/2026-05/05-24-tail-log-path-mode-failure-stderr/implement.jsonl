@@ -1,3 +1,0 @@
-{"file": ".trellis/spec/backend/error-handling.md", "reason": "Line 28: 'Without --json, write errors and diagnostics to stderr' — the spec rule this task implements."}
-{"file": ".trellis/tasks/05-24-e2e-validate-skills-on-pai/validation-report.md", "reason": "Finding #2 (lines 186-192) is the source bug report; describes reproduce + suggestion."}
-{"file": "plugins/ssh-core/skills/ssh-core/scripts/ssh_cluster.py", "reason": "Reference implementation for the same fix shape (commit f4c072b, Finding #1) — see _STDERR_HEAD_CAP=200 and _format_human stderr-surfacing pattern around lines 414-450."}

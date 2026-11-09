@@ -1,3 +1,0 @@
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "check 阶段对照脚本桩的 --help / --json / argparse 契约"}
-{"file": ".trellis/spec/backend/directory-structure.md", "reason": "check 阶段对照新 plugin 目录布局是否与既有三 plugin 完全一致"}
-{"file": ".trellis/tasks/05-14-devops-k8s-docker-iac-cicd-log-plugin/prd.md", "reason": "check 阶段对照 Acceptance Criteria 是否全部达成"}

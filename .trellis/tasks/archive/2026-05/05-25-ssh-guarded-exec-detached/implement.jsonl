@@ -1,6 +1,0 @@
-{"file": ".trellis/spec/backend/adr-001-ssh-execute.md", "reason": "Native ssh subprocess contract, ssh_execute JSON envelope, timeout behavior, and no-paramiko/no-daemon boundary."}
-{"file": ".trellis/spec/backend/error-handling.md", "reason": "Repo JSON output contract, exit-code rules, subprocess safety, and timeout code 124."}
-{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Authoritative local-state path for ssh-guarded reports/jobs/*.json and runtime-state gitignore rules."}
-{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "stdout/stderr discipline, no logging module, no emoji, and never-log-secrets constraints."}
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Required pytest, ruff, mypy, --help, and review checklist expectations for scripts."}
-{"file": ".trellis/tasks/archive/2026-05/05-25-ssh-guarded-request-pipeline/design.md", "reason": "Archived Child A cross-child contract for request artifacts, sandbox, lockfile, redact catalog, and shared lib APIs."}
