@@ -2,6 +2,13 @@
 
 每种 source spec 翻译成什么命令、限制是什么、时间戳怎么解析。
 
+`<N>` 就是 `tail_multi.py --lines N`（默认 **10000**）。它只影响**非 follow**
+的快照抓取：给了 `--lines` 时映射到 `file://` 的 `tail -n N`、`docker://` 的
+`docker logs --tail N`、`kube://` 的 `kubectl logs --tail=N`；`--follow` 是无界流，
+`journal://` 没有「最后 N 行」的语义（用 `--since` 限流），两者都忽略它。
+`grep_across_sources.py` / `correlate.py` 不暴露该参数，仍按各自的默认抓取（远端
+`file://` 为 `tail -n 10000`，docker/kube 不加 `--tail`）。
+
 ## journal://<host>/<unit?>
 
 ```bash
@@ -17,6 +24,7 @@ journalctl -o json --since "<since>" --no-pager
 - `--since` 接受 `"10 min ago"` / `"2026-05-14 14:00"` / Unix timestamp。我们统一传 `"@<epoch>"` 避免本地化问题。
 - root 才能看 system journal；非 root 用户只能看自己的 user journal。
 - 远端跑 `journalctl -f` 会被 ssh-core daemon 的 idle timeout 截断，长时间 follow 需要心跳。
+- **没有 `--lines` 对应物**：journalctl 不支持「最后 N 行」，只能用 `--since` 缩小范围。
 
 **字段**（`-o json`）：
 - `__REALTIME_TIMESTAMP` —— 微秒级时间戳
@@ -30,6 +38,10 @@ journalctl -o json --since "<since>" --no-pager
 ```bash
 docker logs --timestamps --tail <N> [--follow] [--since <since>] <container>
 ```
+
+`<N>` = `tail_multi --lines`（默认 10000）。非 follow 时总会带上 `--tail`：不带时
+`docker logs` 会倾倒容器全部历史，而不是"最近一段"。`grep_across_sources` /
+`correlate` 不传该参数，因此它们不加 `--tail`（行为与 GAP-007 之前一致）。
 
 **优点**：每行带 RFC3339 时间戳。
 
@@ -45,8 +57,10 @@ docker logs --timestamps --tail <N> [--follow] [--since <since>] <container>
 ## kube://<host>/<namespace>/<pod>
 
 ```bash
-kubectl logs -n <ns> <pod> [-c <container>] [--tail <N>] [--since <since>] [--follow] [--previous]
+kubectl logs -n <ns> <pod> [-c <container>] [--tail=<N>] [--since <since>] [--follow] [--previous]
 ```
+
+`<N>` = `tail_multi --lines`（默认 10000），非 follow 时以 `--tail=<N>` 透传。
 
 `pod` 字段支持：
 - 精确名：`payment-svc-abc123`
@@ -62,10 +76,13 @@ kubectl logs -n <ns> <pod> [-c <container>] [--tail <N>] [--since <since>] [--fo
 ## file://<host>/<path>
 
 ```bash
-tail -n <N> [--follow] <path>     # 不带时间戳
-# 我们用：
-awk -v offset=<bytes> 'NR > offset' <path>   # 等价于位置游标，能 resume
+tail -n <N> <path>                # 不带时间戳
+tail -F <path>                    # --follow
 ```
+
+`<N>` = `tail_multi --lines`（默认 10000）。`<host>` 为 `local` 时不调用 `tail`：用
+Python 读文件末尾（同样是最后 N 行），因此 Windows 上也能用。`grep_across_sources` /
+`correlate` 不传该参数，走默认的 10000。
 
 **优点**：最简单。
 

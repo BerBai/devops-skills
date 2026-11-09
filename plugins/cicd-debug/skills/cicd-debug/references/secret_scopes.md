@@ -55,7 +55,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}      # ❌ checkout PR 代码
+          ref: ${{ github.event.pull_request.head.sha }}      # BAD: checks out PR code
       - run: npm install                                       # ← 这里跑了 PR 代码
       - run: npm test                                          # ← 这里 secret 在
 ```

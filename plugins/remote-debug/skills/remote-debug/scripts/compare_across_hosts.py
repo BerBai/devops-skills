@@ -49,11 +49,16 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import os
 import shlex
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+import _local_exec
+import _ssh_core_locator as _locator
+from _version import add_version_flag, handle_version
 
 # --- Constants ---------------------------------------------------------------
 
@@ -100,6 +105,7 @@ def _envelope(
 
 
 def _emit(result: dict[str, Any], as_json: bool) -> None:
+    _local_exec.utf8_stdio()
     if as_json:
         json.dump(result, sys.stdout, ensure_ascii=False)
         sys.stdout.write("\n")
@@ -118,15 +124,8 @@ def _emit(result: dict[str, Any], as_json: bool) -> None:
 
 
 def _ssh_execute_path() -> Path:
-    here = Path(__file__).resolve()
-    return (
-        here.parents[4]
-        / "ssh-core"
-        / "skills"
-        / "ssh-core"
-        / "scripts"
-        / "ssh_execute.py"
-    )
+    """Locate ssh-core's ssh_execute.py (honours DEVOPS_SSH_CORE_DIR)."""
+    return _locator.ssh_core_script("ssh_execute.py")
 
 
 # --- Remote command builders -------------------------------------------------
@@ -159,6 +158,20 @@ def _cmd_packages() -> str:
 # --- Remote fetch -----------------------------------------------------------
 
 
+def _run_local_command(name: str, command: str, timeout: int) -> dict[str, Any]:
+    """Run a POSIX one-liner on *this* host through the platform shell.
+
+    ``host == "local"`` cannot go through ssh-core: its local route runs
+    without a shell and refuses ``;``/``|``, which these probe one-liners use.
+
+    A shell that could not parse the one-liner (``cmd.exe`` on Windows) or
+    could not find the binary now reports ``local_shell_error`` /
+    ``dependency_missing`` instead of a bare non-zero exit that a caller would
+    read as "the two hosts differ" (LS-03).
+    """
+    return _local_exec.run_shell(name, command, timeout)
+
+
 def _run_remote(
     ssh_exec: Path,
     alias: str,
@@ -166,6 +179,9 @@ def _run_remote(
     connect_timeout: int,
 ) -> dict[str, Any]:
     """Run a command on `alias` through ssh_execute.py; return its envelope."""
+    if alias == "local":
+        return _run_local_command("compare_across_hosts", command, CELL_SUBPROCESS_TIMEOUT_S)
+
     argv = [
         sys.executable,
         str(ssh_exec),
@@ -428,6 +444,11 @@ def _assemble_comparison(
             "side": "both",
             "baseline_stderr": base_info["remote_stderr"],
             "other_stderr": other_info["remote_stderr"],
+            # Both sides failed *the same way* is not "the hosts agree"; keep
+            # the class so a caller can tell local_shell_error (the command
+            # never ran) from a genuine matching failure (LS-03).
+            "failure_class": base_info["failure_class"],
+            "other_failure_class": other_info["failure_class"],
         }
         cell["differs"] = False
         cell["unified_diff"] = ""
@@ -517,6 +538,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit the shared JSON output contract on stdout",
     )
+    add_version_flag(p)
     return p
 
 
@@ -564,6 +586,9 @@ MIN_ALIASES = 2
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("compare_across_hosts.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
 
     if len(args.aliases) < MIN_ALIASES:

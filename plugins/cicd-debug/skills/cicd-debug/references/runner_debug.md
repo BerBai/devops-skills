@@ -209,10 +209,10 @@ limit = 2                   # 这个 runner 同时跑几个
 glab api projects/<project-id>/runners                    # 注册到 project 的 runner
 glab api projects/<project-id>/pipelines/<id>/jobs       # job 状态
 glab ci view --pipeline-id <id>                          # 可视化
-# Runner 端
-ssh <runner-host> "sudo gitlab-runner status"
-ssh <runner-host> "sudo gitlab-runner verify"
-ssh <runner-host> "sudo journalctl -u gitlab-runner --since '10 min ago'"
+# Runner 端（走 ssh-core 的 ssh_execute.py，不要裸调 ssh）
+python <ssh-core>/scripts/ssh_execute.py <runner-host> "sudo -n gitlab-runner status" --json
+python <ssh-core>/scripts/ssh_execute.py <runner-host> "sudo -n gitlab-runner verify" --json
+python <ssh-core>/scripts/ssh_execute.py <runner-host> "sudo -n journalctl -u gitlab-runner --since '10 min ago'" --json
 ```
 
 ### Runner 日志

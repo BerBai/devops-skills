@@ -49,6 +49,19 @@ Skip when:
 
 `docker context use` 也算"远端"，但本 plugin 不强依赖它 —— 我们走 ssh-core 的明确路径，便于审计。
 
+### Runtime 选择
+
+`--runtime` 默认 `auto`：
+
+| 取值 | 行为 |
+|---|---|
+| `auto`（默认） | `local` 上按 `docker` → `podman` 顺序挑第一个存在的；远端一律发 `docker`（对端 PATH 自己解析，不为此多跑一次 SSH） |
+| `docker` / `podman` | 原样使用，不再探测 —— 远端机上装了什么由对端决定 |
+
+本地找不到 runtime 时不会静默降级：`failure_class: "dependency_missing"`（exit 3）并指名找的是哪个二进制。**不要**把这个读成 `remote_error` —— 它和网络、SSH alias 都没有关系。
+
+同一条规则也用于区分另外两种本地错误：目录不存在是 `project_dir_invalid`，文件读不到是 `local_not_found`。
+
 ## Quick reference
 
 ```bash

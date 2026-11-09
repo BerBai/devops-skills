@@ -26,6 +26,12 @@ Validation order (locked, design D7):
     6. SHA-256 (upload only)     → exit 56 sha256_mismatch
     7. lock acquire (execute)    → exit 54 lock_held
 
+Execution failure semantics (BUG-002):
+    A non-zero *transport* exit is a failed action, not a dispatched one.
+    ``success`` becomes false, ``error`` is populated, and the process exits
+    with the child's code (1 when the code is outside 1..255). ``result.json``
+    is still written first: the audit trail must survive a failure.
+
 Concurrency: ``<artifact>.lock`` via ``lib.exclusive_lock`` held for the
 duration of dispatch (step 7 + subprocess call). Validation steps 1-6
 do NOT hold the lock so failed validations never block other processes.
@@ -55,13 +61,21 @@ if str(_SCRIPTS_DIR) not in sys.path:
 from lib import (  # noqa: E402, I001
     SSH_CORE_SCRIPTS_DIR,
     ArtifactError,
+    GuardedArgumentParser,
     LockHeld,
     Redactor,
     RequestArtifact,
+    add_version_flag,
+    emit,
+    expand_remote_tilde,
     exclusive_lock,
+    failure_envelope,
+    handle_version,
     iso_utc_now,
     resolve_project_id,
+    resolve_remote_home,
     save_result,
+    success_envelope,
 )
 
 # --- Constants --------------------------------------------------------------
@@ -96,6 +110,9 @@ SHA256_BLOCK_BYTES = 131072  # 128 KiB (mirrors ADR-003 D2 / Phase B request_upl
 _STDERR_TAIL_CHARS = 200
 _TRANSPORT_STDERR_CAP = 4000
 
+#: ``data.failure_class`` used when a failed child did not classify itself.
+DEFAULT_TRANSPORT_FAILURE_CLASS = "internal"
+
 
 # --- Parser -----------------------------------------------------------------
 
@@ -111,7 +128,7 @@ def _build_common_parser() -> argparse.ArgumentParser:
 
 def build_parser() -> argparse.ArgumentParser:
     common = _build_common_parser()
-    p = argparse.ArgumentParser(
+    p = GuardedArgumentParser(
         prog="run_request.py",
         parents=[common],
         description=(
@@ -145,6 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable redaction in the human-mode print. The on-disk "
         "result.json is governed by --no-redact, not this flag.",
     )
+    add_version_flag(p)
     return p
 
 
@@ -155,49 +173,29 @@ def _envelope_error(
     exc: ArtifactError,
     extra_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Failure envelope; ``data`` always carries ``failure_class``."""
     data: dict[str, Any] = {"failure_class": exc.failure_class}
     if extra_data:
         data.update(extra_data)
-    return {
-        "success": False,
-        "data": data,
-        "error": {
-            "message": exc.message,
-            "failure_class": exc.failure_class,
-            "exit_code": exc.exit_code,
-        },
-    }
+    return failure_envelope(
+        failure_class=exc.failure_class,
+        message=exc.message,
+        exit_code=exc.exit_code,
+        stderr=f"{exc.failure_class}: {exc.message}\n",
+        data=data,
+    )
 
 
-def _envelope_success(data: dict[str, Any]) -> dict[str, Any]:
-    return {"success": True, "data": data, "error": None}
+def _envelope_success(
+    data: dict[str, Any],
+    *,
+    stdout: str = "",
+) -> dict[str, Any]:
+    return success_envelope(stdout=stdout, data=data)
 
 
 def _emit(envelope: dict[str, Any], as_json: bool) -> None:
-    if as_json:
-        json.dump(envelope, sys.stdout, ensure_ascii=False)
-        sys.stdout.write("\n")
-        return
-    if envelope["success"]:
-        data = envelope["data"]
-        if data.get("validate_only"):
-            sys.stdout.write(
-                f"validated {data['request_id']} ({data['operation']}) — "
-                f"ready to --execute\n"
-            )
-        else:
-            sys.stdout.write(
-                f"executed {data['request_id']} → {data['result_path']}\n"
-                f"transport={data['transport']} "
-                f"exit_code={data['exit_code']} "
-                f"duration_ms={data['duration_ms']}\n"
-            )
-            tail = data.get("stderr_tail") or ""
-            if tail:
-                sys.stdout.write(f"stderr_tail: {tail}\n")
-    else:
-        err = envelope["error"]
-        sys.stderr.write(f"{err['failure_class']}: {err['message']}\n")
+    emit(envelope, as_json)
 
 
 # --- SHA-256 streaming (mirrors Phase B request_upload._sha256_streaming) ---
@@ -285,79 +283,23 @@ def _resolve_remote_home(
 ) -> str:
     """Resolve ``$HOME`` on the remote host so transport can expand ``~/``.
 
-    Why: paramiko SFTP and ``shlex.quote('~/foo')`` both keep ``~`` literal,
-    so dispatching artifact paths verbatim writes to ``/root/~/workspace/...``
-    instead of the user's home. We resolve once per ``run_request --execute``
-    via a single ``BatchMode`` SSH probe and use the result to materialise
-    payload paths inside :func:`_build_argv` (design.md §3 D8 transport
-    tilde-expansion, drift recorded 2026-05-28).
-
-    Raises ``ArtifactError(transport_failed, 57)`` on ssh failure, timeout,
-    or non-absolute output — never silently falls back, since a wrong home
+    Thin wrapper over :func:`lib.resolve_remote_home` (shared with
+    ``request_delete.py``'s pre-check, BUG-001). Raises
+    ``ArtifactError(transport_failed, 57)`` on ssh failure, timeout, or
+    non-absolute output — never silently falls back, since a wrong home
     silently corrupts the remote filesystem.
     """
-    argv = [
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        f"ConnectTimeout={timeout_seconds}",
+    return resolve_remote_home(
         server,
-        'printf %s "$HOME"',
-    ]
-    try:
-        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds + 5,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise ArtifactError(
-            failure_class="transport_failed",
-            exit_code=57,
-            message=(
-                f"resolving remote $HOME on '{server}' timed out after "
-                f"{timeout_seconds}s"
-            ),
-        ) from exc
-    if proc.returncode != 0:
-        stderr_tail = (proc.stderr or "").strip()[:200]
-        raise ArtifactError(
-            failure_class="transport_failed",
-            exit_code=57,
-            message=(
-                f"resolving remote $HOME on '{server}' failed "
-                f"(ssh exit={proc.returncode}): {stderr_tail or '<no stderr>'}"
-            ),
-        )
-    home = (proc.stdout or "").strip()
-    if not home.startswith("/"):
-        raise ArtifactError(
-            failure_class="transport_failed",
-            exit_code=57,
-            message=(
-                f"resolving remote $HOME on '{server}' produced "
-                f"non-absolute path: {home!r}"
-            ),
-        )
-    return home
+        timeout_seconds=timeout_seconds,
+        failure_class="transport_failed",
+        exit_code=57,
+    )
 
 
 def _expand_remote_tilde(path: str, remote_home: str) -> str:
-    """Expand a leading ``~/`` (or bare ``~``) to ``<remote_home>/...``.
-
-    Only ``~/`` and ``~`` forms are touched; ``~user/`` and any path
-    that does not start with ``~`` pass through unchanged. ``remote_home``
-    must be an absolute POSIX path (guaranteed by :func:`_resolve_remote_home`).
-    """
-    if path == "~":
-        return remote_home
-    if path.startswith("~/"):
-        suffix = path[2:]
-        return f"{remote_home}/{suffix}" if suffix else remote_home
-    return path
+    """Expand a leading ``~/`` (or bare ``~``) to ``<remote_home>/...``."""
+    return expand_remote_tilde(path, remote_home)
 
 
 def _build_argv(
@@ -374,6 +316,11 @@ def _build_argv(
     ``remote_path`` (upload/mkdir/delete) are expanded to the absolute
     remote home so SFTP and ``shlex.quote``-wrapped shell strings both
     target the real path (design.md §3 D8 transport tilde-expansion).
+
+    ``--overwrite`` is passed through to ``ssh_upload.py`` (BUG-003); the
+    flag now exists there, and ``tests/test_ssh_guarded_run_request_unit.py``
+    cross-checks this argv against that script's own parser so the two
+    cannot drift apart again.
     """
     op = art.operation
     server = art.server
@@ -477,10 +424,36 @@ def _dispatch_subprocess(
     return envelope, proc
 
 
+def _effective_exit_code(child_exit_code: int) -> int:
+    """Process exit code for a failed transport (BUG-002).
+
+    Pass the child's code through when it is a usable process status
+    (1..255); anything else (negative from a signal, or 256+ from a broken
+    child) becomes the shared ``internal`` code 1.
+    """
+    return child_exit_code if 0 < child_exit_code < 256 else 1
+
+
+def _child_failure_class(child_env: dict[str, Any]) -> str:
+    """``data.failure_class`` reported by the child, else ``internal``."""
+    data = child_env.get("data")
+    if isinstance(data, dict):
+        candidate = data.get("failure_class")
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    candidate = child_env.get("failure_class")
+    if isinstance(candidate, str) and candidate:
+        return candidate
+    return DEFAULT_TRANSPORT_FAILURE_CLASS
+
+
 # --- Main -------------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, PLR0915
+    early = handle_version("run_request.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     as_json = getattr(args, "json", False)
     no_redact = getattr(args, "no_redact", False)
@@ -565,6 +538,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, PLR09
                     "operation": art.operation,
                     "server": art.server,
                 },
+                stdout=(
+                    f"validated {art.request_id} ({art.operation}) — "
+                    "ready to --execute\n"
+                ),
             )
             _emit(envelope, as_json)
             return 0
@@ -629,7 +606,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, PLR09
 
                 # save_result applies the redactor to stdout_redacted /
                 # stderr_redacted and atomic-writes <id>.result.json next
-                # to the artifact (mode 0o600).
+                # to the artifact (mode 0o600). It is written BEFORE the
+                # outcome is judged: audit needs the record of a failure.
                 result_path = save_result(
                     art, result, redactor, out_dir=art_path.parent
                 )
@@ -653,7 +631,51 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, PLR09
                     )
                     envelope_data["stderr_tail"] = redacted_tail
 
-                envelope = _envelope_success(envelope_data)
+                # BUG-002: a non-zero transport exit is a FAILED action.
+                if child_exit_code != 0:
+                    failure_class = _child_failure_class(child_env)
+                    exit_code = _effective_exit_code(child_exit_code)
+                    message = f"transport exited {child_exit_code}"
+                    printed_stderr = child_stderr.strip() or message
+                    if redactor is not None and not args.show_sensitive:
+                        printed_stderr, _ = redactor.apply(printed_stderr)
+                        message, _ = redactor.apply(message)
+                    if not printed_stderr.endswith("\n"):
+                        printed_stderr += "\n"
+                    failure_data = {
+                        **envelope_data,
+                        "failure_class": failure_class,
+                        "transport_exit_code": proc.returncode,
+                    }
+                    envelope = failure_envelope(
+                        failure_class=failure_class,
+                        message=message,
+                        exit_code=exit_code,
+                        stderr=(
+                            f"{message}\n"
+                            f"{printed_stderr}"
+                            if printed_stderr.strip() != message
+                            else printed_stderr
+                        ),
+                        data=failure_data,
+                    )
+                    _emit(envelope, as_json)
+                    return exit_code
+
+                envelope = _envelope_success(
+                    envelope_data,
+                    stdout=(
+                        f"executed {art.request_id} → {result_path}\n"
+                        f"transport={transport} "
+                        f"exit_code={child_exit_code} "
+                        f"duration_ms={duration_ms}\n"
+                        + (
+                            f"stderr_tail: {envelope_data['stderr_tail']}\n"
+                            if envelope_data.get("stderr_tail")
+                            else ""
+                        )
+                    ),
+                )
                 _emit(envelope, as_json)
                 return 0
         except LockHeld as lh:

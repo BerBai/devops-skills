@@ -36,11 +36,11 @@
 
 诱人但有害的 deny：
 
-- ❌ `WARN` —— 真问题前的早期信号常以 WARN 出现
-- ❌ `^debug:` —— 看似是 debug 但应用可能用错 level
-- ❌ "expected" 错误（"connection reset by peer" 等）—— 它们在某些故障里就是因
-- ❌ 慢请求 / `elapsed > 1s` —— 慢就是问题
-- ❌ 任何含 `5\d\d` / `panic` / `oom` / `FATAL` / `traceback` 的行
+- never filter `WARN` —— 真问题前的早期信号常以 WARN 出现
+- never filter `^debug:` —— 看似是 debug 但应用可能用错 level
+- never filter "expected" errors（"connection reset by peer" 等）—— 它们在某些故障里就是因
+- never filter slow requests / `elapsed > 1s` —— 慢就是问题
+- never filter anything matching `5\d\d` / `panic` / `oom` / `FATAL` / `traceback` 的行
 
 `correlate.py` 在 anchor 周围**强制不过滤** —— 不管 deny-list 怎么配，window 内的所有原始行都拉出来。
 

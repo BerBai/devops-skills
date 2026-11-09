@@ -63,7 +63,11 @@ from lib_cicd import (  # type: ignore[import-not-found]
     QueuedRun,
     RunnerData,
     resolve_provider,
+    LOCAL_HOST,
+    preflight_provider,
+    split_host_argv,
 )
+from _version import add_version_flag, handle_version
 
 DEFAULT_POOL_CAP = 5000
 DEFAULT_QUEUE_CAP = 200
@@ -125,6 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--glab-bin", default=None, help="Path to glab binary")
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SEC)
     p.add_argument("--json", action="store_true")
+    add_version_flag(p)
     return p
 
 
@@ -427,16 +432,29 @@ def _map_exception(exc: Exception, provider: str | None) -> tuple[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("runner_check.py", argv)
+    if early is not None:
+        return early
     started_at = time.time()
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    # Optional leading <host>: `local` (default) or an ssh-core alias, matching
+    # every other diagnostic plugin in this marketplace.
+    host, raw_argv = split_host_argv(raw_argv)
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     try:
         scope = validate_scope(args)
-        provider = resolve_provider(args.provider, args.gh_bin, args.glab_bin)
+        # A remote host has its own gh/glab install and credentials; check
+        # before the first API call so "not logged in there" is reported as
+        # an auth problem instead of a broken pipeline.
+        if host != LOCAL_HOST:
+            preflight_provider(args.provider, host)
+        provider = resolve_provider(args.provider, args.gh_bin, args.glab_bin, host)
         runners = provider.list_runners(scope, limit=args.pool_cap)
         queued = provider.list_queued_runs(scope, limit=args.queue_cap)
         failure_class = "pagination_overflow" if len(runners) >= args.pool_cap else None
         data = build_success_data(args, scope, runners, queued, failure_class, started_at)
+        data["host"] = host
         exit_code = FAILURE_CLASS_TO_EXIT[failure_class]
         stdout = _format_human(data)
         if exit_code == 0:
@@ -445,6 +463,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         failure_class, stderr = _map_exception(exc, getattr(args, "provider", None))
         data = _failure_data(args, started_at, failure_class)
+        data["host"] = host
         return _emit_data(data, FAILURE_CLASS_TO_EXIT[failure_class], stderr, args.json)
 
 

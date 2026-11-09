@@ -17,6 +17,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import emit, json_result, msys_safe_env  # type: ignore[import-not-found]  # noqa: E402, I001
 from lib.kubectl import KubectlError, run_kubectl  # type: ignore[import-not-found]  # noqa: E402
+from lib import _ssh_core_locator as _locator  # type: ignore[import-not-found]  # noqa: E402
+from _version import add_version_flag, handle_version
 
 _TEN_MB = 10 * 1024 * 1024
 _TRUNCATE_MARKER = "\n... <truncated 10MB cap>\n"
@@ -40,8 +42,8 @@ _KNOWN_STATUSES = _PENDING_STATUSES | _CRIT_STATUSES | _WARN_STATUSES | {"deploy
 _SEVERITY_ORDER = {"crit": 0, "warn": 1, "ok": 2}
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_REPO_ROOT = _SCRIPT_DIR.parents[4]
-_SSH_EXECUTE_PATH = _REPO_ROOT / "plugins" / "ssh-core" / "skills" / "ssh-core" / "scripts" / "ssh_execute.py"
+# Resolved through the shared locator so DEVOPS_SSH_CORE_DIR is honoured.
+_SSH_EXECUTE_PATH = _locator.ssh_core_script("ssh_execute.py")
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("release", nargs="?", default=None)
     parser.add_argument("--list-pending", action="store_true", help="List all pending-* releases cluster-wide")
     parser.add_argument("--json", action="store_true")
+    add_version_flag(parser)
     return parser
 
 
@@ -389,6 +392,66 @@ def _recommend(status: str, associated_jobs: dict[str, list[dict[str, Any]]]) ->
     return "no action"
 
 
+
+def _normalize_pods(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Summarise the pods of a pending release into "what is still not up".
+
+    A Helm release stuck in ``pending-install``/``pending-upgrade`` is waiting on
+    exactly these objects; listing them by name is the difference between
+    "rollback and hope" and "this pod is in ImagePullBackOff, fix the tag".
+    """
+    rows: list[dict[str, Any]] = []
+    for pod in _list_from_json(payload):
+        metadata = _dict_field(pod, "metadata")
+        status = _dict_field(pod, "status")
+        name = str(metadata.get("name") or "")
+        if not name:
+            continue
+        phase = str(status.get("phase") or "")
+        container_statuses = status.get("containerStatuses")
+        waiting_reasons: list[str] = []
+        restart_count = 0
+        if isinstance(container_statuses, list):
+            for entry in container_statuses:
+                if not isinstance(entry, dict):
+                    continue
+                restart_count += int(entry.get("restartCount") or 0)
+                state = _dict_field(entry, "state")
+                waiting = _dict_field(state, "waiting")
+                reason = waiting.get("reason")
+                if isinstance(reason, str) and reason:
+                    waiting_reasons.append(reason)
+        if phase == "Running" and not waiting_reasons:
+            continue
+        rows.append(
+            {
+                "name": name,
+                "phase": phase,
+                "reasons": sorted(set(waiting_reasons)),
+                "restarts": restart_count,
+                "node": str(_dict_field(pod, "spec").get("nodeName") or ""),
+            }
+        )
+    return sorted(rows, key=lambda row: row["name"])
+
+
+def _stuck_findings(namespace: str, release: str, stuck: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for row in stuck:
+        reason = ",".join(row["reasons"]) or row["phase"] or "not-ready"
+        findings.append(
+            _finding(
+                "crit" if row["phase"] in {"Failed", "Unknown"} or row["reasons"] else "warn",
+                "Pod",
+                row["name"],
+                reason,
+                f"pod is {row['phase'] or 'unknown'} ({reason}) while release {release} is pending",
+                namespace=namespace,
+                hint="references/common_issues.md#helm-release-stuck-pending-upgrade--pending-rollback",
+            )
+        )
+    return findings
+
 def _per_release(args: argparse.Namespace, helm_version: HelmResult) -> dict[str, Any]:
     namespace = str(args.namespace)
     release = str(args.release)
@@ -422,7 +485,33 @@ def _per_release(args: argparse.Namespace, helm_version: HelmResult) -> dict[str
         associated_jobs = {"all": [], "stuck": [], "failed": []}
         partial_failures.append(_partial_failure("jobs", exc.failure_class, exc.exit_code, exc.stderr))
 
+    # A pending release is waiting on its workloads. List the ones that are not
+    # up yet so the report names them instead of repeating "pending".
+    stuck_resources: list[dict[str, Any]] = []
+    stuck_resources_error: dict[str, Any] | None = None
+    if status in _PENDING_STATUSES:
+        try:
+            pods_result = run_kubectl(
+                args.host,
+                namespace,
+                ["get", "pods", "-l", f"app.kubernetes.io/instance={release}"],
+                use_json=True,
+                timeout=30,
+            )
+            raw["pods"] = _truncate_10mb(pods_result.stdout)
+            stuck_resources = _normalize_pods(
+                _json_loads(pods_result.stdout)
+                if isinstance(_json_loads(pods_result.stdout), dict)
+                else {}
+            )
+        except KubectlError as exc:
+            stuck_resources_error = _partial_failure(
+                "pods", exc.failure_class, exc.exit_code, exc.stderr
+            )
+            partial_failures.append(stuck_resources_error)
+
     findings = _release_findings(namespace, release, status, associated_jobs, history_warning)
+    findings.extend(_stuck_findings(namespace, release, stuck_resources))
     return json_result(
         success=True,
         exit_code=0,
@@ -434,8 +523,8 @@ def _per_release(args: argparse.Namespace, helm_version: HelmResult) -> dict[str
             "status": status,
             "history": history,
             "associated_jobs": associated_jobs,
-            "stuck_resources": [],
-            "stuck_resources_deferred": True,
+            "stuck_resources": stuck_resources,
+            "stuck_resources_error": stuck_resources_error,
             "summary": _summary(status, associated_jobs, history_warning),
             "recommended_next_step": _recommend(status, associated_jobs),
             "findings": _top_findings(findings),
@@ -516,6 +605,9 @@ def _format_human(result: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("helm_status.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     arg_error = _validate_args(args)
     if arg_error is not None:

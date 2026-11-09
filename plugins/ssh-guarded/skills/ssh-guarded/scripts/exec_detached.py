@@ -3,14 +3,19 @@
 
 Runs a command request artifact in the background on a remote host by
 wrapping it in ``nohup``, capturing the remote PID, writing a remote log,
-and recording a local ``reports/jobs/<job_id>.json`` state file.
+and recording a ``$SSH_GUARDED_HOME/reports/<project_id>/jobs/<job_id>.json``
+state file.
 
 v1.0 surface:
-    exec_detached.py run --request reports/requests/<id>.json [--json]
-    exec_detached.py status <job_id> [--json]
+    exec_detached.py run --request <artifact> [--reports-dir PATH] [--json]
+    exec_detached.py status <job_id> [--reports-dir PATH] [--json]
     exec_detached.py tail-log <job_id> [--lines N] [--follow] [--no-redact] [--json]
     exec_detached.py wait <job_id> [--timeout SEC] [--json]
     exec_detached.py list [--probe] [--json]
+
+Job state lives outside the plugin tree (GAP-006): ``$SSH_GUARDED_HOME``
+defaults to ``~/.devops/ssh-guarded`` and ``--reports-dir`` replaces the
+``.../reports`` level for CI and containers.
 
 See:
     .trellis/tasks/05-25-ssh-guarded-exec-detached/{prd,design,implement}.md
@@ -42,21 +47,39 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 from lib import (  # type: ignore[import-not-found]  # noqa: E402, I001
     ArtifactError,
+    GuardedArgumentParser,
     LockHeld,
     Redactor,
     RequestArtifact,
+    add_version_flag,
+    emit,
+    error_object,
     exclusive_lock,
+    handle_version,
     iso_utc_now,
+    json_envelope,
     resolve_project_id,
 )
+from lib import _ssh_core_locator as _locator  # type: ignore[import-not-found]  # noqa: E402
+from lib import reports_root as state_reports_root  # noqa: E402
+from lib import warn_legacy_reports  # noqa: E402
 
 # --- Constants --------------------------------------------------------------
 
 SKILL_ROOT = _THIS.parent.parent
+#: Pre-GAP-006 location. Kept only so a caller (or a test) can name it; the
+#: script never writes here. The migration note in ``lib/state.py`` reports on
+#: it.
 REPORTS_DIR = SKILL_ROOT / "reports"
-JOBS_DIR = REPORTS_DIR / "jobs"
-PLUGINS_DIR = _THIS.parents[4]
-SSH_EXECUTE = PLUGINS_DIR / "ssh-core" / "skills" / "ssh-core" / "scripts" / "ssh_execute.py"
+#: Explicit override (unit tests set this to a tmp dir; ``--reports-dir`` and
+#: ``$SSH_GUARDED_HOME`` both feed :data:`REPORTS_ROOT` instead).
+JOBS_DIR: Path | None = None
+#: Reports root for this invocation (``--reports-dir`` or ``$SSH_GUARDED_HOME``).
+REPORTS_ROOT: Path | None = None
+#: project_id for this invocation (``--project-id`` or the env var).
+_resolved_project_id: str | None = None
+# Resolved through the shared locator so DEVOPS_SSH_CORE_DIR is honoured.
+SSH_EXECUTE = _locator.ssh_core_script("ssh_execute.py")
 
 DEFAULT_TAIL_LINES = 200
 DEFAULT_WAIT_TIMEOUT_SECONDS = 600
@@ -144,12 +167,21 @@ def _build_common_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     common.add_argument("--project-id", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    common.add_argument(
+        "--reports-dir",
+        dest="reports_dir",
+        default=argparse.SUPPRESS,
+        help=(
+            "Override the state root that holds <project_id>/jobs/ "
+            "(default: $SSH_GUARDED_HOME/reports)"
+        ),
+    )
     return common
 
 
 def build_parser() -> argparse.ArgumentParser:
     common = _build_common_parser()
-    p = argparse.ArgumentParser(
+    p = GuardedArgumentParser(
         prog="exec_detached.py",
         parents=[common],
         description="Fire-and-track long remote commands via nohup + job state.",
@@ -179,6 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
     ls = sub.add_parser("list", parents=[common], help="List local detached job state files")
     ls.add_argument("--probe", action="store_true", help="SSH-probe each job before printing")
 
+    add_version_flag(p)
     return p
 
 
@@ -192,15 +225,24 @@ def _json_result(
     stderr: str = "",
     data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Shared envelope (GAP-005): six keys, ``error.exit_code`` == top level."""
     payload = data.copy() if data else {}
     payload.setdefault("failure_class", None if success else "remote_error")
-    return {
-        "success": success,
-        "exit_code": exit_code,
-        "stdout": stdout,
-        "stderr": stderr,
-        "data": payload,
-    }
+    error = None
+    if not success:
+        error = error_object(
+            payload.get("failure_class"),
+            stderr.strip() or f"exit {exit_code}",
+            exit_code,
+        )
+    return json_envelope(
+        success=success,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        data=payload,
+        error=error,
+    )
 
 
 def _success(data: dict[str, Any], stdout: str = "") -> dict[str, Any]:
@@ -222,18 +264,7 @@ def _failure(
 
 
 def _emit(result: dict[str, Any], as_json: bool) -> None:
-    if as_json:
-        json.dump(result, sys.stdout, ensure_ascii=False)
-        sys.stdout.write("\n")
-        return
-    if result.get("stdout"):
-        sys.stdout.write(str(result["stdout"]))
-        if not str(result["stdout"]).endswith("\n"):
-            sys.stdout.write("\n")
-    if result.get("stderr"):
-        sys.stderr.write(str(result["stderr"]))
-        if not str(result["stderr"]).endswith("\n"):
-            sys.stderr.write("\n")
+    emit(result, as_json)
 
 
 def _human_lines_for_data(data: dict[str, Any]) -> str:
@@ -295,8 +326,27 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
                 tmp_path.unlink()
 
 
+def _jobs_root() -> Path:
+    """Directory holding ``<job_id>.json`` for the current invocation.
+
+    Resolution order: an explicit ``JOBS_DIR`` (unit tests), then
+    ``--reports-dir`` (``REPORTS_ROOT``), then ``$SSH_GUARDED_HOME``, then the
+    project-scoped default ``<reports>/<project_id>/jobs``. Never the plugin
+    tree (GAP-006).
+    """
+    if JOBS_DIR is not None:
+        return Path(JOBS_DIR)
+    reports = REPORTS_ROOT or state_reports_root()
+    project_id = (
+        _resolved_project_id
+        or os.environ.get("SSH_GUARDED_PROJECT_ID", "")
+        or "default"
+    )
+    return Path(reports) / project_id / "jobs"
+
+
 def _job_path(job_id: str) -> Path:
-    return JOBS_DIR / f"{job_id}.json"
+    return _jobs_root() / f"{job_id}.json"
 
 
 def _load_job(job_id: str) -> JobState:
@@ -362,9 +412,10 @@ def _write_job(job: JobState) -> Path:
 
 
 def _iter_job_files() -> list[Path]:
-    if not JOBS_DIR.exists():
+    root = _jobs_root()
+    if not root.exists():
         return []
-    return sorted(JOBS_DIR.glob("*.json"))
+    return sorted(root.glob("*.json"))
 
 
 def _find_existing_job(request_id: str) -> JobState | None:
@@ -521,6 +572,7 @@ def _status_payload(job: JobState) -> dict[str, Any]:
 
 
 def _cmd_run(args: argparse.Namespace) -> dict[str, Any]:
+    global _resolved_project_id
     request_path = Path(args.request).expanduser().resolve()
     try:
         art = RequestArtifact.load(request_path)
@@ -532,6 +584,9 @@ def _cmd_run(args: argparse.Namespace) -> dict[str, Any]:
             exc.failure_class,
             exc.message,
         ) from exc
+
+    _resolved_project_id = project_id
+    warn_legacy_reports()
 
     if art.operation != "command":
         raise DetachedError(
@@ -777,8 +832,20 @@ def _cmd_list(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
+    global _resolved_project_id, REPORTS_ROOT
+    early = handle_version("exec_detached.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     as_json = getattr(args, "json", False)
+    _resolved_project_id = (
+        getattr(args, "project_id", None)
+        or os.environ.get("SSH_GUARDED_PROJECT_ID", "")
+        or None
+    )
+    reports_override = getattr(args, "reports_dir", None)
+    if reports_override:
+        REPORTS_ROOT = Path(reports_override).expanduser()
     try:
         if args.cmd == "run":
             result = _cmd_run(args)

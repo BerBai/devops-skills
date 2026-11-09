@@ -36,6 +36,7 @@ from lib.terraform import (  # type: ignore[import-not-found]  # noqa: E402
     resolve_tool,
     run_tf,
 )
+from _version import add_version_flag, handle_version
 
 _INIT_FAILED = 130
 _PLAN_FAILED = 131
@@ -90,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target", default=None, help="Limit to one resource address, e.g. aws_instance.web")
     parser.add_argument("--tool", choices=["auto", "tofu", "terraform"], default="auto")
     parser.add_argument("--json", action="store_true")
+    add_version_flag(parser)
     return parser
 
 
@@ -380,6 +382,9 @@ def _format_human(result: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("drift_check.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     try:
         result = _run_drift(args)

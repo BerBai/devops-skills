@@ -11,11 +11,16 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-import hcl2  # type: ignore[import-untyped]
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import emit, json_result  # type: ignore[import-not-found]  # noqa: E402, I001
-from lib.terraform import TfError, resolve_tool, run_tf  # type: ignore[import-not-found]  # noqa: E402
+from lib.terraform import (  # type: ignore[import-not-found]  # noqa: E402
+    TfError,
+    list_remote_files,
+    read_remote_text,
+    resolve_tool,
+    run_tf,
+)
+from _version import add_version_flag, handle_version
 
 _MODULE_PATH_INVALID = 140
 _HCL_PARSE_FAILED = 141
@@ -24,6 +29,8 @@ _VALIDATE_FAILED = 143
 _REGISTRY_UNREACHABLE = 144
 _REGISTRY_VERSION_NOT_FOUND = 145
 _UNSUPPORTED_SOURCE = 146
+_DEPENDENCY_MISSING = 3
+_HCL2_IMPORT_HINT = "pip install 'python-hcl2>=8.1,<9'"
 _MIN_QUOTED_LEN = 2
 _REGISTRY_SOURCE_PARTS = 3
 _HTTP_NOT_FOUND = 404
@@ -51,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-version", default=None, help="Compare against this registry version")
     parser.add_argument("--tool", choices=["auto", "tofu", "terraform"], default="auto")
     parser.add_argument("--json", action="store_true")
+    add_version_flag(parser)
     return parser
 
 
@@ -93,11 +101,31 @@ def _validate_local_module(module_path: str) -> Path:
     return path
 
 
+def _load_hcl2() -> Any:
+    """Import ``hcl2`` lazily so ``--help`` and path errors never need it.
+
+    The dependency is only required for static HCL analysis. Importing it at
+    module scope made every invocation -- including ``--help`` -- die with a
+    traceback on a host without python-hcl2 installed, which breaks the
+    "every script accepts --help" contract.
+    """
+    try:
+        import hcl2  # type: ignore[import-untyped]  # noqa: PLC0415
+    except ImportError:
+        raise TfError(
+            "dependency_missing",
+            _DEPENDENCY_MISSING,
+            f"module_validate requires python-hcl2 for static HCL analysis; install it with {_HCL2_IMPORT_HINT}",
+        ) from None
+    return hcl2
+
+
 def _load_hcl_files(module_dir: Path) -> tuple[dict[str, Any], str]:
+    hcl2 = _load_hcl2()
     merged: dict[str, Any] = {}
     raw_parts: list[str] = []
     for path in sorted(module_dir.glob("*.tf")):
-        raw = path.read_text()
+        raw = path.read_text(encoding="utf-8")
         raw_parts.append(raw)
         try:
             parsed = hcl2.loads(raw)
@@ -142,12 +170,26 @@ def _terraform_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in payload.get("terraform", []) if isinstance(item, dict)]
 
 
-def _check_structure(module_dir: Path) -> list[dict[str, Any]]:
-    findings = []
-    for filename in _STRUCTURE_FILES:
-        if not (module_dir / filename).exists():
-            findings.append(_finding("warn", "structure", filename, "missing_file", f"{filename} is missing"))
-    return findings
+def _check_structure(
+    module_dir: Path | None, *, present: list[str] | None = None
+) -> list[dict[str, Any]]:
+    """Report missing conventional files.
+
+    ``present`` carries the remote file list; when it is None the local
+    directory is interrogated instead. Passing a list keeps the remote and
+    local routes on one code path.
+    """
+    if present is None:
+        if module_dir is None:  # pragma: no cover - callers always pass one
+            return []
+        have = {p.name for p in module_dir.iterdir()} if module_dir.is_dir() else set()
+    else:
+        have = set(present)
+    return [
+        _finding("warn", "structure", filename, "missing_file", f"{filename} is missing")
+        for filename in _STRUCTURE_FILES
+        if filename not in have
+    ]
 
 
 def _check_inputs(variables: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -269,7 +311,10 @@ def _registry_source(modules: dict[str, dict[str, Any]]) -> str | None:
 
 
 def _parse_registry_source(source: str) -> tuple[str, str, str] | None:
-    clean = source.removeprefix("registry.terraform.io/")
+    # str.removeprefix is 3.9+; the plugin floor is 3.8 (see ADR-006).
+    clean = source[len("registry.terraform.io/"):] if source.startswith(
+        "registry.terraform.io/"
+    ) else source
     parts = clean.split("/")
     if len(parts) == _REGISTRY_SOURCE_PARTS and all(parts):
         return parts[0], parts[1], parts[2]
@@ -355,11 +400,55 @@ def _parse_local_hcl(
         try:
             return _load_hcl_files(module_dir)
         except TfError as exc:
+            if exc.failure_class == "dependency_missing":
+                # A missing parser is an environment problem, not a property
+                # of the module; surface it as a hard failure so the caller
+                # installs python-hcl2 instead of reading "0 findings".
+                raise
             warnings.append({"failure_class": exc.failure_class, "exit_code": exc.exit_code, "message": exc.stderr})
             findings.append(_finding("warn", "hcl_parse", "hcl", "hcl_parse_failed", exc.stderr))
-    else:
-        warnings.append({"failure_class": "hcl_parse_failed", "exit_code": 141, "message": "remote static HCL parsing is deferred in v1.0"})
     return None, ""
+
+
+def _load_remote_hcl(
+    host: str,
+    module_path: str,
+) -> tuple[dict[str, Any], str, list[str]]:
+    """Fetch and parse a module that lives on ``host``.
+
+    The module is read over ssh-core one ``cat`` at a time rather than copied:
+    a module is a handful of small text files, and copying would need a temp
+    directory on both ends plus cleanup that can fail.
+
+    Returns ``(merged_ir, raw_hcl, file_names)``. ``file_names`` lets the
+    structure check run against the real file list instead of a local directory.
+    """
+    # Resolve the file list *before* importing the parser: an empty or missing
+    # module is a property of the target, and reporting it as
+    # "dependency_missing" would send the caller to install the wrong thing.
+    names = list_remote_files(host, module_path)
+    if not names:
+        raise TfError(
+            "module_path_invalid",
+            _MODULE_PATH_INVALID,
+            f"module path has no *.tf files on {host}: {module_path}",
+        )
+    hcl2 = _load_hcl2()
+    merged: dict[str, Any] = {}
+    raw_parts: list[str] = []
+    for name in sorted(names):
+        raw = read_remote_text(host, module_path, name)
+        raw_parts.append(raw)
+        try:
+            parsed = hcl2.loads(raw)
+        except Exception as exc:
+            raise TfError("hcl_parse_failed", _HCL_PARSE_FAILED, f"{name}: {exc}") from None
+        for key, value in parsed.items():
+            if isinstance(value, list):
+                merged.setdefault(key, []).extend(value)
+            else:
+                merged[key] = value
+    return merged, "\n".join(raw_parts), names
 
 
 def _run_tf_validate(
@@ -389,13 +478,15 @@ def _run_static_checks(
     module_dir: Path | None,
     raw_hcl: str,
     findings: list[dict[str, Any]],
+    *,
+    remote_files: list[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     variables: dict[str, dict[str, Any]] = {}
-    if parsed is not None and module_dir is not None:
+    if parsed is not None and (module_dir is not None or remote_files is not None):
         variables = _named_blocks(parsed, "variable")
         outputs = _named_blocks(parsed, "output")
         resources = _resources(parsed)
-        findings.extend(_check_structure(module_dir))
+        findings.extend(_check_structure(module_dir, present=remote_files))
         findings.extend(_check_inputs(variables))
         findings.extend(_check_outputs(outputs))
         findings.extend(_check_naming(variables, resources))
@@ -428,16 +519,27 @@ def _run_upgrade_diff(
 
 def _run_validate(args: argparse.Namespace) -> dict[str, Any]:
     module_dir = _validate_local_module(args.module_path) if args.host == "local" else None
+    # Fail on a missing HCL parser before starting work that needs a remote
+    # round trip (resolve_tool) or writes anything.
+    _load_hcl2()
     tool = resolve_tool(args.host, args.tool)
     raw: dict[str, Any] = {}
     findings: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
 
     _run_fmt(args, tool, raw, findings)
-    parsed, raw_hcl = _parse_local_hcl(module_dir, warnings, findings)
+    remote_files: list[str] | None = None
+    if module_dir is not None:
+        parsed, raw_hcl = _parse_local_hcl(module_dir, warnings, findings)
+    else:
+        # Remote module: read the files over ssh-core and parse them locally.
+        # Same parser, same checks -- only the file source differs.
+        parsed, raw_hcl, remote_files = _load_remote_hcl(args.host, args.module_path)
     modules = _named_blocks(parsed or {}, "module")
     _run_tf_validate(args, tool, raw, modules, warnings)
-    variables = _run_static_checks(parsed, module_dir, raw_hcl, findings)
+    variables = _run_static_checks(
+        parsed, module_dir, raw_hcl, findings, remote_files=remote_files
+    )
     _run_upgrade_diff(args, modules, variables, findings, warnings)
 
     sorted_findings = _sort_findings(findings)
@@ -477,6 +579,9 @@ def _format_human(result: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("module_validate.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     try:
         result = _run_validate(args)

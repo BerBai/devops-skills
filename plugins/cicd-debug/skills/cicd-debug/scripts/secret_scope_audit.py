@@ -32,8 +32,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]
-
 SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -60,7 +58,11 @@ from lib_cicd import (  # type: ignore[import-not-found]
     SecretData,
     WorkflowFile,
     resolve_provider,
+    LOCAL_HOST,
+    preflight_provider,
+    split_host_argv,
 )
+from _version import add_version_flag, handle_version
 
 FAILURE_CLASS_TO_EXIT = {
     None: 0,
@@ -76,10 +78,33 @@ FAILURE_CLASS_TO_EXIT = {
     "workflow_dir_missing": 179,
     "timeout": 124,
     "internal": 1,
+    "dependency_missing": 3,
 }
 
 DEFAULT_TIMEOUT_SEC = 120
 DEFAULT_WORKFLOW_FETCH_CAP = 50
+_YAML_IMPORT_HINT = "pip install 'pyyaml>=6.0'"
+
+
+class DependencyMissing(Exception):
+    """Raised when an optional parser dependency is not installed."""
+
+
+def _load_yaml() -> Any:
+    """Import ``yaml`` lazily so ``--help`` works without PyYAML installed.
+
+    PyYAML is only needed to parse workflow files. Importing it at module
+    scope made ``--help`` (and every provider error path) die with a
+    traceback on a host without the dependency, breaking the "every script
+    accepts --help" contract and masking the real failure envelope.
+    """
+    try:
+        import yaml  # type: ignore[import-untyped]  # noqa: PLC0415
+    except ImportError:
+        raise DependencyMissing(
+            f"secret_scope_audit requires PyYAML to parse workflow files; install it with {_YAML_IMPORT_HINT}"
+        ) from None
+    return yaml
 GH_SECRET_RE = re.compile(
     r"\$\{\{\s*secrets\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}"
     r"|\$\{\{\s*secrets\[['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]\]\s*\}\}"
@@ -143,6 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--glab-bin", default=None, help="Path to glab binary (overrides GLAB_BIN env)")
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SEC)
     p.add_argument("--json", action="store_true")
+    add_version_flag(p)
     return p
 
 
@@ -312,6 +338,7 @@ def analyze_workflows(
     scans: list[WorkflowScan] = []
     findings: list[dict[str, Any]] = []
     parse_failures = 0
+    yaml = _load_yaml() if files else None
     for workflow in files:
         try:
             loaded = yaml.safe_load(workflow.content)
@@ -530,6 +557,8 @@ def _failure_data(args: argparse.Namespace, started_at: float, failure_class: st
 
 
 def _map_exception(exc: Exception) -> tuple[str, str]:
+    if isinstance(exc, DependencyMissing):
+        return "dependency_missing", str(exc)
     if isinstance(exc, ProviderUnavailable):
         message = str(exc)
         if "glab" in message.lower():
@@ -553,12 +582,24 @@ def _map_exception(exc: Exception) -> tuple[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("secret_scope_audit.py", argv)
+    if early is not None:
+        return early
     started_at = time.time()
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    # Optional leading <host>: `local` (default) or an ssh-core alias, matching
+    # every other diagnostic plugin in this marketplace.
+    host, raw_argv = split_host_argv(raw_argv)
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     try:
         scope = validate_scope(args)
-        provider = resolve_provider(args.provider, args.gh_bin, args.glab_bin)
+        # A remote host has its own gh/glab install and credentials; check
+        # before the first API call so "not logged in there" is reported as
+        # an auth problem instead of a broken pipeline.
+        if host != LOCAL_HOST:
+            preflight_provider(args.provider, host)
+        provider = resolve_provider(args.provider, args.gh_bin, args.glab_bin, host)
         secrets = provider.list_secrets(
             scope,
             include_codespaces=args.include_codespaces,
@@ -585,6 +626,7 @@ def main(argv: list[str] | None = None) -> int:
         findings.extend(workflow_findings)
         failure_class = parse_failure_class or workflow_failure_class
         data = build_success_data(args, scope, secrets, envs, scans, findings, failure_class, started_at)
+        data["host"] = host
         stdout = _format_human(data)
         exit_code = 0 if failure_class == "workflow_dir_missing" else FAILURE_CLASS_TO_EXIT[failure_class]
         if exit_code == 0:
@@ -593,6 +635,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         failure_class, stderr = _map_exception(exc)
         data = _failure_data(args, started_at, failure_class)
+        data["host"] = host
         return _emit_data(data, FAILURE_CLASS_TO_EXIT[failure_class], stderr, args.json)
 
 

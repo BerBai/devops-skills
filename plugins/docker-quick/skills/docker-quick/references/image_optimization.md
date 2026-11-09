@@ -8,7 +8,7 @@ Faster builds: 写代码反馈快、CI 成本低、迭代密。
 每条 `RUN` / `COPY` / `ADD` 都生成一层。镜像 size = 所有层 size 之和。**层删除不可回收**：在第二层 `rm` 第一层加的文件，第一层仍占空间。
 
 ```dockerfile
-# ❌ 多余的层：先装再删，删了也没用
+# BAD: wasted layer - install then delete still keeps the bytes
 RUN apt-get update && apt-get install -y curl
 RUN curl -o /tmp/big.tar https://...
 RUN tar xf /tmp/big.tar -C /opt
@@ -16,7 +16,7 @@ RUN rm /tmp/big.tar       # 第 2 层的 big.tar 仍在镜像里
 ```
 
 ```dockerfile
-# ✅ 同层做完
+# GOOD: install and clean up in the same layer
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && curl -o /tmp/big.tar https://... \

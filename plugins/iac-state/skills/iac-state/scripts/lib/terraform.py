@@ -12,9 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-_LIB_DIR = Path(__file__).resolve().parent
-_REPO_ROOT = _LIB_DIR.parents[5]
-SSH_EXECUTE_PATH = _REPO_ROOT / "plugins" / "ssh-core" / "skills" / "ssh-core" / "scripts" / "ssh_execute.py"
+from . import _ssh_core_locator as _locator
+
+# Resolved through the shared locator so DEVOPS_SSH_CORE_DIR is honoured and
+# the lookup survives the marketplace layout (each plugin in its own dir).
+SSH_EXECUTE_PATH = _locator.ssh_core_script("ssh_execute.py")
 
 _HOST_UNREACHABLE = 120
 _TOOL_MISSING = 121
@@ -137,13 +139,50 @@ def read_text(host: str, project_dir: str, relative_path: str, timeout: int = 30
     if host == "local":
         path = Path(project_dir).expanduser() / relative_path
         try:
-            return path.read_text()
+            return path.read_text(encoding="utf-8")
         except FileNotFoundError:
             raise TfError("not_initialized", 123, f"missing {relative_path}") from None
     command = "cd " + shlex.quote(project_dir) + " && cat " + shlex.quote(relative_path)
     result = _run_remote_shell(host, command, timeout)
     if result.returncode != 0:
         raise TfError("not_initialized", 123, result.stderr)
+    return result.stdout
+
+
+def list_remote_files(host: str, directory: str, pattern: str = "*.tf", timeout: int = 30) -> list[str]:
+    """Return ``directory``'s entries matching ``pattern`` as bare file names.
+
+    Used by the static analyser to read a *remote* module without copying it:
+    ``ls -1`` on the far side, then one ``cat`` per file. ``--json`` on
+    ssh_execute keeps the transport surface identical to every other call, so
+    a failure here classifies the same way.
+
+    Returns an empty list when the directory has no matches (not an error: an
+    empty module is a legitimate, if useless, module).
+    """
+    # `find -maxdepth 1 -name <pattern> -printf '%f\n'` is not portable to BSD
+    # find; `ls -1 -- <pattern>` is, and the pattern is shell-quoted so a glob
+    # that matches nothing stays a literal the shell can reject cleanly.
+    command = (
+        "cd " + shlex.quote(directory) + " && "
+        "ls -1 -- " + shlex.quote(pattern) + " 2>/dev/null || true"
+    )
+    result = _run_remote_shell(host, command, timeout)
+    if result.returncode != 0:
+        raise TfError("module_path_invalid", _PROJECT_DIR_INVALID, result.stderr or "cannot list module directory")
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def read_remote_text(host: str, directory: str, filename: str, timeout: int = 30) -> str:
+    """Read one file on ``host`` as text, refusing a missing file loudly."""
+    command = "cd " + shlex.quote(directory) + " && cat " + shlex.quote(filename)
+    result = _run_remote_shell(host, command, timeout)
+    if result.returncode != 0:
+        raise TfError(
+            "module_path_invalid",
+            _PROJECT_DIR_INVALID,
+            result.stderr or f"cannot read {filename}",
+        )
     return result.stdout
 
 

@@ -37,19 +37,29 @@ See:
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import _local_exec
+import _ssh_core_locator as _locator
+from _version import add_version_flag, handle_version
+
 # --- Probe catalogue ---------------------------------------------------------
 # Each value is a single command run on the remote host through ssh_execute.
 # Pipes inside these strings are evaluated by the *remote* shell -- they are
 # not local subprocess pipes, so the ADR-001 D7 metachar refusal does not
 # apply here.
+#
+# Two families exist because the probes are not portable: a Windows target has
+# no ``nproc``, ``free``, ``df`` or ``/proc``. ``--target-os auto`` (the
+# default) runs a one-line detector first and then picks the matching family.
 
 PROBES: dict[str, str] = {
     "uptime": "uptime",
@@ -59,12 +69,77 @@ PROBES: dict[str, str] = {
     "zombie": "ps -eo stat | grep -c '^Z' || true",
 }
 
+# PowerShell is present on every supported Windows (5.1 ships with 10/2016+).
+#
+# ``-EncodedCommand`` takes base64(UTF-16LE) and reads no further arguments, so
+# the whole probe is one token with no quotes, no ``$``, and no ``|``. That
+# matters twice over: the local route hands the string to ``cmd /c`` (which
+# eats quotes) and the remote route hands it to a POSIX shell (where ``$o``
+# would be expanded by the *wrong* interpreter). Encoding sidesteps both.
+#
+# ``$ProgressPreference='SilentlyContinue'`` is load-bearing: without it
+# ``Get-CimInstance`` writes CLIXML progress records to stderr, and every
+# consumer of this envelope treats non-empty stderr as a problem worth showing.
+#
+# ``[Console]::OutputEncoding`` is load-bearing for the same reason one level
+# down: a Chinese Windows PowerShell writes GBK by default, and the capturing
+# side decodes UTF-8. Without this line ``LastBootUpTime`` came back as
+# replacement characters and the whole probe looked like garbage.
+_PROGRESS_OFF = (
+    "$ProgressPreference='SilentlyContinue'; "
+    "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
+)
+
+_WINDOWS_SCRIPTS: dict[str, str] = {
+    "uptime": "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime",
+    "load": (
+        "(Get-CimInstance Win32_Processor "
+        "| Measure-Object -Property LoadPercentage -Average).Average"
+    ),
+    "disk": (
+        "$d = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' "
+        "| Select-Object -First 1; "
+        "if ($d) { $d | Select-Object DeviceID,Size,FreeSpace | ConvertTo-Json -Compress }"
+    ),
+    "mem": (
+        "$o = Get-CimInstance Win32_OperatingSystem; "
+        "'{0} {1}' -f [int]($o.TotalVisibleMemorySize/1KB),"
+        "[int](($o.TotalVisibleMemorySize-$o.FreePhysicalMemory)/1KB)"
+    ),
+    "zombie": "@(Get-Process | Where-Object { -not $_.Responding }).Count",
+}
+
+
+def _encoded_command(script: str) -> str:
+    """Return a PowerShell ``-EncodedCommand`` invocation for ``script``."""
+    payload = _PROGRESS_OFF + script
+    encoded = base64.b64encode(payload.encode("utf-16-le")).decode("ascii")
+    return f"powershell -NoProfile -NonInteractive -EncodedCommand {encoded}"
+
+
+PROBES_WINDOWS: dict[str, str] = {
+    name: _encoded_command(script) for name, script in _WINDOWS_SCRIPTS.items()
+}
+
+#: Detector: prints ``linux`` or ``windows``, nothing else.
+OS_DETECT_CMD = (
+    'uname -s 2>/dev/null || echo windows'
+)
+
+OS_LINUX = "linux"
+OS_WINDOWS = "windows"
+TARGET_OS_CHOICES = ("auto", "linux", "windows")
+
+
 # --- Severity thresholds (intentionally not flags) ---------------------------
 LOAD_WARN_MULT = 1
 LOAD_CRIT_MULT = 2
 DISK_WARN_PCT = 80
 DISK_CRIT_PCT = 95
 ZOMBIE_WARN_COUNT = 5
+# Windows has no load average; the CPU percentage is the equivalent signal.
+CPU_WARN_PCT = 80
+CPU_CRIT_PCT = 95
 
 # Per-probe ssh_execute subprocess budget. Generous: each probe is a tiny
 # command, but the SSH handshake plus connect-timeout can take a few seconds.
@@ -106,6 +181,7 @@ def _envelope(
 
 
 def _emit(result: dict[str, Any], as_json: bool) -> None:
+    _local_exec.utf8_stdio()
     if as_json:
         json.dump(result, sys.stdout, ensure_ascii=False)
         sys.stdout.write("\n")
@@ -124,34 +200,35 @@ def _emit(result: dict[str, Any], as_json: bool) -> None:
 
 
 def _ssh_execute_path() -> Path:
-    """Locate ssh-core's ssh_execute.py relative to this file.
+    """Locate ssh-core's ssh_execute.py.
 
-    Layout (parents counted from this script)::
-
-        plugins/ssh-core/skills/ssh-core/scripts/ssh_execute.py
-        plugins/remote-debug/skills/remote-debug/scripts/diagnose_host.py
-                                                                       ^ here
-
-    parents[0] = scripts/, parents[1] = remote-debug/ (skill dir),
-    parents[2] = skills/,  parents[3] = remote-debug/ (plugin dir),
-    parents[4] = plugins/. So the sibling plugin lives at parents[4] /
-    "ssh-core" / ... .
-
-    Returns the candidate Path unconditionally; callers must check
+    Delegates to ``_ssh_core_locator`` so the lookup honours
+    ``$DEVOPS_SSH_CORE_DIR`` / ``$DEVOPS_SSH_CORE_SCRIPTS`` and keeps working
+    when the plugins are installed into separate directories (the marketplace
+    layout). Returns the candidate Path unconditionally; callers must check
     ``.exists()`` and emit a precondition envelope if it is missing.
     """
-    here = Path(__file__).resolve()
-    return (
-        here.parents[4]
-        / "ssh-core"
-        / "skills"
-        / "ssh-core"
-        / "scripts"
-        / "ssh_execute.py"
-    )
+    return _locator.ssh_core_script("ssh_execute.py")
 
 
 # --- Probe runner ------------------------------------------------------------
+
+
+def _run_local_probe(probe_cmd: str) -> dict[str, Any]:
+    """Run one probe on *this* host through the platform shell.
+
+    ssh-core's local route deliberately runs without a shell, so it refuses
+    ``;`` and ``|``. The probe one-liners are written for a POSIX shell, which
+    is exactly what a local diagnostic wants; on Windows ``cmd /c`` supplies a
+    shell so the commands are still interpreted rather than exec'd verbatim.
+
+    Windows targets take the PowerShell family instead (``PROBES_WINDOWS``
+    are ``-EncodedCommand`` payloads), so this only ever sees a POSIX
+    one-liner when the caller forced ``--target-os linux`` on a Windows box --
+    in which case the failure is now reported as a shell error rather than a
+    probe that ran and returned nothing (LS-01).
+    """
+    return _local_exec.run_shell("diagnose_host", probe_cmd, PROBE_TIMEOUT_S)
 
 
 def _run_probe(ssh_exec: Path, host: str, probe_cmd: str) -> dict[str, Any]:
@@ -160,7 +237,16 @@ def _run_probe(ssh_exec: Path, host: str, probe_cmd: str) -> dict[str, Any]:
     Never raises; any unexpected failure (ssh_execute crashes, stdout is
     not JSON, the subprocess itself times out) is mapped to a synthesised
     failure envelope so the caller can keep aggregating.
+
+    ``host == "local"`` is handled here rather than delegated: ssh-core's local
+    route runs without a shell and therefore refuses the ``;``/``|`` these
+    probe one-liners need. Running the probe through ``sh -c`` locally keeps a
+    single command shape while still letting the shell interpret the pipeline
+    on the machine being diagnosed.
     """
+    if host == "local":
+        return _run_local_probe(probe_cmd)
+
     argv = [
         sys.executable,
         str(ssh_exec),
@@ -258,6 +344,41 @@ def _parse_disk(stdout: str) -> dict[str, Any]:
     return parsed
 
 
+def _parse_disk_windows(stdout: str) -> dict[str, Any]:
+    """Parse the ``ConvertTo-Json`` row emitted by the Windows disk probe."""
+    try:
+        row = json.loads(stdout.strip() or "null")
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(row, list):  # single-drive hosts still come back as an array
+        row = row[0] if row else None
+    if not isinstance(row, dict):
+        return {}
+    size = row.get("Size")
+    free = row.get("FreeSpace")
+    if not isinstance(size, int) or not isinstance(free, int) or size <= 0:
+        return {}
+    parsed: dict[str, Any] = {
+        "total_mb": size // (1024 * 1024),
+        "free_mb": free // (1024 * 1024),
+    }
+    parsed["use_pct"] = int(round((size - free) * 100 / size))
+    if isinstance(row.get("DeviceID"), str):
+        parsed["mount"] = row["DeviceID"]
+    return parsed
+
+
+def _parse_cpu_windows(stdout: str) -> dict[str, Any]:
+    """CPU load percentage, the Windows stand-in for a load average."""
+    stripped = stdout.strip()
+    if not stripped:
+        return {}
+    try:
+        return {"cpu_pct": int(float(stripped))}
+    except ValueError:
+        return {}
+
+
 def _parse_mem(stdout: str) -> dict[str, Any]:
     """Parse one ``free -m`` data row.
 
@@ -281,6 +402,19 @@ def _parse_mem(stdout: str) -> dict[str, Any]:
     return parsed
 
 
+def _parse_mem_windows(stdout: str) -> dict[str, Any]:
+    """``"<total_mb> <used_mb>"`` as emitted by the Windows memory probe."""
+    nums: list[int] = []
+    for chunk in stdout.split():
+        try:
+            nums.append(int(chunk))
+        except ValueError:
+            continue
+    if len(nums) < MEM_NUMS_MIN_FOR_USED:
+        return {}
+    return {"total_mb": nums[0], "used_mb": nums[1]}
+
+
 def _parse_zombie(stdout: str) -> dict[str, Any]:
     stripped = stdout.strip()
     try:
@@ -289,19 +423,48 @@ def _parse_zombie(stdout: str) -> dict[str, Any]:
         return {}
 
 
-PARSERS: dict[str, Callable[[str], dict[str, Any]]] = {
-    "uptime": _parse_uptime,
-    "load": _parse_load,
-    "disk": _parse_disk,
-    "mem": _parse_mem,
-    "zombie": _parse_zombie,
+#: Per-OS parser table. ``host_os`` selects one; keys match ``PROBES_*``.
+PARSERS_BY_OS: dict[str, dict[str, Callable[[str], dict[str, Any]]]] = {
+    OS_LINUX: {
+        "uptime": _parse_uptime,
+        "load": _parse_load,
+        "disk": _parse_disk,
+        "mem": _parse_mem,
+        "zombie": _parse_zombie,
+    },
+    OS_WINDOWS: {
+        "uptime": _parse_uptime,
+        "load": _parse_cpu_windows,
+        "disk": _parse_disk_windows,
+        "mem": _parse_mem_windows,
+        "zombie": _parse_zombie,
+    },
 }
+
+PROBES_BY_OS: dict[str, dict[str, str]] = {
+    OS_LINUX: PROBES,
+    OS_WINDOWS: PROBES_WINDOWS,
+}
+
+#: Kept for backwards compatibility with the v1.0 tests and any caller that
+#: imports it; the dispatch now goes through ``PARSERS_BY_OS``.
+PARSERS: dict[str, Callable[[str], dict[str, Any]]] = PARSERS_BY_OS[OS_LINUX]
 
 
 # --- Severity scoring --------------------------------------------------------
 
 
 def _score(probes: dict[str, dict[str, Any]]) -> str:
+    """Score the parsed signals as ok / warn / crit / unknown.
+
+    ``unknown`` means no probe produced a usable answer, so there is no signal
+    to score. Reporting ``ok`` in that case was actively misleading: a host
+    where every probe failed (wrong alias, no shell, missing coreutils) looked
+    healthy in the summary while the envelope's ``success`` was already false.
+    """
+    if probes and not any(block.get("success") for block in probes.values()):
+        return "unknown"
+
     sev = "ok"
 
     load_parsed = probes.get("load", {}).get("parsed", {})
@@ -311,6 +474,15 @@ def _score(probes: dict[str, dict[str, Any]]) -> str:
         if load_1m > LOAD_CRIT_MULT * cores:
             sev = "crit"
         elif load_1m > LOAD_WARN_MULT * cores and sev != "crit":
+            sev = "warn"
+
+    # Windows reports a CPU percentage instead of a load average; same
+    # thresholds, different scale.
+    cpu_pct = load_parsed.get("cpu_pct")
+    if cpu_pct is not None:
+        if cpu_pct >= CPU_CRIT_PCT:
+            sev = "crit"
+        elif cpu_pct >= CPU_WARN_PCT and sev != "crit":
             sev = "warn"
 
     disk_pct = probes.get("disk", {}).get("parsed", {}).get("use_pct")
@@ -351,6 +523,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--target-os",
+        choices=TARGET_OS_CHOICES,
+        default="auto",
+        help=(
+            "Which probe family to use. 'auto' (default) detects the target "
+            "with a one-line `uname -s` probe; a Windows target gets the "
+            "PowerShell family (CPU %% instead of load average, no /proc)."
+        ),
+    )
+    p.add_argument(
         "--json",
         action="store_true",
         help="Emit the JSON output envelope on stdout",
@@ -370,23 +552,50 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help=argparse.SUPPRESS,
     )
+    add_version_flag(p)
     return p
 
 
-def _select_probes(check: str | None) -> tuple[list[str], list[str]]:
+def _select_probes(
+    check: str | None, probes: dict[str, str] | None = None
+) -> tuple[list[str], list[str]]:
     """Return (selected, unknown). Unknown is empty unless --check named a
-    probe that's not in PROBES."""
+    probe that's not in the chosen probe family."""
+    table = PROBES if probes is None else probes
     if not check:
-        return list(PROBES), []
+        return list(table), []
     requested = [name.strip() for name in check.split(",") if name.strip()]
-    unknown = [n for n in requested if n not in PROBES]
+    unknown = [n for n in requested if n not in table]
     return requested, unknown
+
+
+def _detect_target_os(ssh_exec: Path, host: str) -> str:
+    """Return ``linux`` or ``windows`` for ``host``; default to linux.
+
+    Runs one tiny probe through the same route as everything else, so the
+    detector works for a remote alias and for ``local`` identically. Any
+    failure keeps the historical behaviour (the Linux family): a broken
+    detector must not turn a working invocation into an error.
+    """
+    if host == "local" and os.name == "nt":
+        return OS_WINDOWS
+    env = _run_probe(ssh_exec, host, OS_DETECT_CMD)
+    if not env.get("success"):
+        return OS_LINUX
+    first = (env.get("stdout") or "").strip().splitlines()
+    token = first[0].strip().lower() if first else ""
+    if token.startswith("windows") or token.startswith("mingw") or token.startswith("msys"):
+        return OS_WINDOWS
+    return OS_LINUX
 
 
 # --- main --------------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("diagnose_host.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
 
     ssh_exec = _ssh_execute_path()
@@ -408,17 +617,26 @@ def main(argv: list[str] | None = None) -> int:
         _emit(result, as_json=args.json)
         return int(result["exit_code"])
 
-    selected, unknown = _select_probes(args.check)
+    target_os = (
+        args.target_os
+        if args.target_os in PROBES_BY_OS
+        else _detect_target_os(ssh_exec, args.host)
+    )
+    probe_table = PROBES_BY_OS[target_os]
+    parser_table = PARSERS_BY_OS[target_os]
+
+    selected, unknown = _select_probes(args.check, probe_table)
     if unknown:
         result = _envelope(
             success=False,
             exit_code=EXIT_FAIL,
             stderr=(
                 f"diagnose_host: unknown probe(s) in --check: {unknown}. "
-                f"Known probes: {sorted(PROBES)}"
+                f"Known probes for a {target_os} target: {sorted(probe_table)}"
             ),
             data={
                 "host": args.host,
+                "target_os": target_os,
                 "failure_class": "precondition",
                 "unknown_probes": unknown,
             },
@@ -429,9 +647,9 @@ def main(argv: list[str] | None = None) -> int:
     probes: dict[str, dict[str, Any]] = {}
     all_ok = True
     for name in selected:
-        env = _run_probe(ssh_exec, args.host, PROBES[name])
+        env = _run_probe(ssh_exec, args.host, probe_table[name])
         probe_stdout = env.get("stdout", "") or ""
-        parsed = PARSERS[name](probe_stdout)
+        parsed = parser_table[name](probe_stdout)
         probes[name] = {
             "success": bool(env.get("success", False)),
             "exit_code": int(env.get("exit_code", EXIT_FAIL)),
@@ -444,12 +662,12 @@ def main(argv: list[str] | None = None) -> int:
             all_ok = False
 
     severity = _score(probes)
-    overall_success = all_ok and severity != "crit"
+    overall_success = all_ok and severity not in {"crit", "unknown"}
     exit_code = EXIT_OK if overall_success else EXIT_FAIL
 
     ok_count = sum(1 for p in probes.values() if p["success"])
     summary = (
-        f"diagnose_host {args.host}: severity={severity}, "
+        f"diagnose_host {args.host} ({target_os}): severity={severity}, "
         f"{ok_count}/{len(probes)} probes ok\n"
     )
 
@@ -459,6 +677,7 @@ def main(argv: list[str] | None = None) -> int:
         stdout=summary,
         data={
             "host": args.host,
+            "target_os": target_os,
             "probes": probes,
             "severity": severity,
             "checks_run": list(probes),

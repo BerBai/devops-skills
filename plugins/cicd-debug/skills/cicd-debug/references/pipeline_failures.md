@@ -103,9 +103,9 @@
 > ```bash
 > gh api orgs/<org>/actions/runners --jq '.runners[] | {name, status, busy, labels: [.labels[].name]}'
 > gh api repos/<owner>/<repo>/actions/runners
-> # 在 runner 机器上：
-> ssh <runner-host> "systemctl status actions.runner.* "
-> ssh <runner-host> "tail -50 ~/actions-runner/_diag/Runner_*.log"
+> # 在 runner 机器上（走 ssh-core 的 ssh_execute.py，不要裸调 ssh）：
+> python <ssh-core>/scripts/ssh_execute.py <runner-host> "systemctl status 'actions.runner.*'" --json
+> python <ssh-core>/scripts/ssh_execute.py <runner-host> "tail -50 ~/actions-runner/_diag/Runner_*.log" --json
 > ```
 >
 > **Remedy**: 重启 runner service；扩容；调整 label 匹配；走 ARC（Actions Runner Controller）做 K8s 弹性。

@@ -29,6 +29,9 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import Redactor  # type: ignore[import-not-found]  # noqa: E402
+from lib.envelope import GuardedArgumentParser  # type: ignore[import-not-found]  # noqa: E402
+from lib.envelope import failure_envelope, success_envelope, write_json  # noqa: E402
+from lib.version_cli import add_version_flag, handle_version  # noqa: E402
 
 DEFAULT_USER_CATALOG = Path.home() / ".devops" / "redact.json"
 
@@ -59,7 +62,7 @@ class CatalogError(Exception):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="redact_check.py")
+    parser = GuardedArgumentParser(prog="redact_check.py")
     parser.add_argument(
         "--catalog",
         default=None,
@@ -76,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Include data.redacted_text in --json output",
     )
+    add_version_flag(parser)
     return parser
 
 
@@ -158,21 +162,34 @@ def _validate_catalog(path: Path) -> None:
 
 
 def _apply_with_details(redactor: Redactor, text: str) -> tuple[str, list[Hit]]:
-    out_lines: list[str] = []
+    """Apply the catalog to the whole text, reporting one-indexed line numbers.
+
+    Patterns are applied to the *entire* buffer rather than per line: the
+    private-key rule is deliberately ``(?s)`` multi-line, and a line-by-line
+    pass could only ever match its BEGIN header, leaving the key body in the
+    output. Every replacement is inline (no newlines added or removed), so
+    offsets stay valid and line numbers can be derived from the current text.
+    """
+    out = text
     hits: list[Hit] = []
     compiled = list(redactor._compiled)  # noqa: SLF001 - shipped lib has no public hit iterator.
 
-    for line_no, line in enumerate(text.splitlines(keepends=True), start=1):
-        redacted = line
-        for kind, pattern, replace_with in compiled:
-            matches = list(pattern.finditer(redacted))
-            if not matches:
-                continue
-            hits.extend(Hit(kind=kind, line=line_no, match_len=len(m.group(0))) for m in matches)
-            redacted = pattern.sub(replace_with, redacted)
-        out_lines.append(redacted)
+    for kind, pattern, replace_with in compiled:
+        matches = list(pattern.finditer(out))
+        if not matches:
+            continue
+        for match in matches:
+            hits.append(
+                Hit(
+                    kind=kind,
+                    line=out.count("\n", 0, match.start()) + 1,
+                    match_len=len(match.group(0)),
+                )
+            )
+        out = pattern.sub(replace_with, out)
 
-    return "".join(out_lines), hits
+    hits.sort(key=lambda hit: hit.line)
+    return out, hits
 
 
 def _has_surrogate_escape(text: str) -> bool:
@@ -208,14 +225,8 @@ def _emit_success(
         }
         if args.emit_redacted:
             data["redacted_text"] = redacted_text
-        envelope = {
-            "success": True,
-            "exit_code": 0,
-            "stdout": "",
-            "stderr": "",
-            "data": data,
-        }
-        sys.stdout.write(json.dumps(envelope, ensure_ascii=False) + "\n")
+        envelope = success_envelope(data=data)
+        write_json(envelope)
         return 0
 
     if not args.report_only:
@@ -238,21 +249,24 @@ def _emit_error(
         "catalog": getattr(args, "catalog", None),
         **(extra or {}),
     }
-    envelope = {
-        "success": False,
-        "exit_code": exit_code,
-        "stdout": "",
-        "stderr": stderr,
-        "data": data,
-    }
+    envelope = failure_envelope(
+        failure_class=failure_class,
+        message=message,
+        exit_code=exit_code,
+        stderr=stderr,
+        data=data,
+    )
     if args.json:
-        sys.stdout.write(json.dumps(envelope, ensure_ascii=False) + "\n")
+        write_json(envelope)
     else:
         sys.stderr.write(stderr)
     return exit_code
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("redact_check.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     try:
         redactor = _load_redactor(args.catalog)

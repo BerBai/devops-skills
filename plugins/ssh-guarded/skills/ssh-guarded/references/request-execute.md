@@ -10,17 +10,36 @@ A request artifact splits the two. The agent declares intent (request), the huma
 
 ## Artifact location
 
+Runtime state lives **outside** the skill directory (GAP-006). Writing it into
+the installed plugin used to break on read-only installs and lost pending
+approvals on upgrade.
+
 ```
-plugins/ssh-guarded/skills/ssh-guarded/reports/
+$SSH_GUARDED_HOME/reports/<project_id>/      # default ~/.devops/ssh-guarded
 ├── requests/
 │   ├── command-a1b2c3d4.json
+│   ├── command-a1b2c3d4.result.json         # written by --execute
+│   ├── command-a1b2c3d4.lock                # held during --execute
 │   ├── upload-e5f6g7h8.json
 │   └── delete-i9j0k1l2.json
 └── jobs/
-    └── <job_id>.json   (only when exec_detached is used)
+    └── <job_id>.json                        # only when exec_detached is used
 ```
 
-Paths are gitignored by default — they contain user intent and partial command output. Don't commit them.
+- `$SSH_GUARDED_HOME` defaults to `~/.devops/ssh-guarded`
+  (`%USERPROFILE%\.devops\ssh-guarded` on Windows).
+- `--reports-dir PATH` on each `request_*.py`, plus `exec_detached.py` and
+  `gc_artifacts.py`, replaces the `.../reports` level — use it in CI and
+  containers. `run_request.py` needs no such flag: it writes `result.json`
+  next to the artifact it was handed.
+- `<project_id>` is `--project-id`, else `SSH_GUARDED_PROJECT_ID`, else the git
+  repo basename. Two projects never see each other's artifacts.
+- The plugin tree keeps only `reports/README.md`. If artifacts from the old
+  in-tree layout are found, the first run prints a one-time note naming both
+  paths; nothing is moved or deleted automatically.
+
+Paths contain user intent and partial command output. Keep them out of shared
+transcripts; do not commit them.
 
 ## Request shape (v1)
 
@@ -85,6 +104,7 @@ Generated from the payload. The script computes; the agent does not freestyle it
 | `command` matching `sudo` | "command runs with elevated privileges" |
 | `upload` with overwrite=true | "remote file will be replaced" |
 | `delete` recursive=true | "recursive delete — irreversible" |
+| `delete` of a path the pre-check found to be a directory | scope is `tree`, even without `--recursive` (and the drafter refuses unless `--recursive` is passed) |
 | `delete` of any path | "modifies remote workdir content" |
 
 The agent **may** add reason-specific lines, never remove auto-generated ones.
@@ -107,20 +127,56 @@ Validation prints the result and exits 0/1. With `--execute`, validation runs fi
 2. Acquire a lockfile next to the artifact: `<request_id>.lock`. Prevents two concurrent `--execute`s on the same artifact.
 3. Hand off to `ssh-core`:
    - `command` → `ssh_execute.py`
-   - `upload` → `ssh_upload.py`
+   - `upload` → `ssh_upload.py` (`--overwrite` is passed through when the
+     artifact says `overwrite: true`; without it `ssh_upload.py` refuses to
+     clobber an existing destination with exit 168 `remote_path_exists`)
    - `mkdir`/`delete` → `ssh_execute.py` with the obvious one-liner
 4. Capture stdout / stderr / exit code into `<request_id>.result.json`.
 5. Print the redacted summary. Raw output is in the result file.
 
 On non-zero exit, the artifact stays. Re-execution requires a new request (same payload is fine, new id, new reason).
 
+### Failure semantics
+
+`success` means **the action completed**, never "the request was dispatched".
+A transport that exits non-zero is a failed action: the envelope says so and so
+does the process exit code.
+
+| Transport result | `success` | process exit | `error` | `data` |
+|---|---|---|---|---|
+| exit 0 | `true` | `0` | `null` | `result_path`, `request_id`, `transport`, `exit_code: 0`, `duration_ms`, `stderr_tail` |
+| exit 1..255 | `false` | the child's code | `{"message": "transport exited <N>", "failure_class": <child class>, "exit_code": <N>}` | the same fields, plus `failure_class` and `transport_exit_code` |
+| exit < 1 (killed by a signal) or > 255 | `false` | `1` | `{"message": "transport exited <N>", "failure_class": ..., "exit_code": 1}` | the same fields, plus the raw `transport_exit_code` |
+
+`data.failure_class` is the child's own class when the transport classified
+itself (`remote_path_missing`, `permission`, …); otherwise it is `internal`.
+`stderr` carries the redacted transport stderr (or the `transport exited N`
+line when the child printed nothing).
+
+`result.json` is written **before** the outcome is judged, so the audit record
+of a failed execution survives. Its `exit_code` / `transport_exit_code` fields
+are unchanged from earlier versions.
+
+Validation failures keep their existing codes and never reach the transport:
+
+| Code | `failure_class` |
+|---|---|
+| 50 | `workdir_outside_sandbox` |
+| 51 | `path_in_denylist` |
+| 53 | `artifact_invalid` / `artifact_expired` |
+| 54 | `lock_held` |
+| 56 | `sha256_mismatch` |
+| 57 | `transport_failed` (non-JSON child output) |
+| 59 | `delete_confirm_required` |
+| 124 | `timeout` (the transport itself never returned) |
+
 ## Detached jobs
 
-`exec_detached.py --request <file>` does the same as `run_request --execute`, except:
+`exec_detached.py run --request <file>` does the same as `run_request --execute`, except:
 
 - The command is wrapped in `nohup … > <remote-log> 2>&1 &`.
 - Returns immediately with a `job_id`.
-- A local manifest is written to `reports/jobs/<job_id>.json`:
+- A local manifest is written to `$SSH_GUARDED_HOME/reports/<project_id>/jobs/<job_id>.json`:
   ```json
   { "job_id": "...", "request_id": "...", "remote_pid": 12345,
     "remote_log": "~/workspace/<id>/logs/<job_id>.log",
@@ -135,3 +191,27 @@ On non-zero exit, the artifact stays. Re-execution requires a new request (same 
 - **Path drifted out of workdir.** Project's `workdir` field changed between request and execute. Refuse. Project state must be locked while a request is pending.
 - **Checksum mismatch.** Local file changed since request. Refuse — content drift means the intent doesn't match the bytes any more.
 - **Lock held.** Another execute is running. Wait or unlock manually (the lock includes the PID).
+- **Transport failed.** The action did not happen. `success=false`, non-zero
+  exit, `data.failure_class` names the cause. Read `result.json` for the
+  redacted transport output before deciding whether to draft a new request.
+
+## JSON envelope
+
+Every ssh-guarded script emits the same six keys — the marketplace shape plus
+the backwards-compatible `error` object:
+
+```json
+{
+  "success": false,
+  "exit_code": 53,
+  "stdout": "",
+  "stderr": "artifact_invalid: artifact not found: /tmp/x.json\n",
+  "data": {"failure_class": "artifact_invalid"},
+  "error": {"message": "artifact not found: /tmp/x.json",
+            "failure_class": "artifact_invalid", "exit_code": 53}
+}
+```
+
+`jq -r .exit_code` always prints a number — including when argparse rejects the
+command line, which now emits `{"exit_code": 2, "error": {"failure_class":
+"invalid_arguments"}, ...}` on stdout instead of nothing.

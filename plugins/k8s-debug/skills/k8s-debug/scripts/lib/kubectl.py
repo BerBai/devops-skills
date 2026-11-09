@@ -23,19 +23,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import msys_safe_env
+from . import _ssh_core_locator as _locator
 
 # ---------------------------------------------------------------------------
 # SSH_EXECUTE_PATH resolution
 # ---------------------------------------------------------------------------
-# This file lives at:
-#   <repo>/plugins/k8s-debug/skills/k8s-debug/scripts/lib/kubectl.py
-# Walking parents: [0] lib -> [1] scripts -> [2] k8s-debug -> [3] skills
-#                  -> [4] k8s-debug -> [5] plugins -> [6] <repo>
-_LIB_DIR = Path(__file__).resolve().parent
-_REPO_ROOT = _LIB_DIR.parents[5]
-SSH_EXECUTE_PATH = (
-    _REPO_ROOT / "plugins" / "ssh-core" / "skills" / "ssh-core" / "scripts" / "ssh_execute.py"
-)
+# Delegated to ``_ssh_core_locator`` so the lookup honours DEVOPS_SSH_CORE_DIR
+# / DEVOPS_SSH_CORE_SCRIPTS and survives the marketplace layout, where each
+# plugin is installed into its own directory instead of a shared plugins/.
+SSH_EXECUTE_PATH = _locator.ssh_core_script("ssh_execute.py")
 
 
 # ---------------------------------------------------------------------------

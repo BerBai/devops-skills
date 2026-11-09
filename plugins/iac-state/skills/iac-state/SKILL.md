@@ -51,6 +51,11 @@ IaC 症状？
 
 CI 场景（在 GH Actions runner 上）通常想本地跑：直接传 `local` 即可。
 
+`module_validate.py` 的静态 HCL 分析两条路都做：本地模块直接读盘，远程模块用
+`ls -1 *.tf` + 逐文件 `cat` 取回后**在本机解析**（同一个 hcl2 解析器、同一套检查）。
+远程模块不需要预先 `terraform init`，也不会在目标机上留下临时文件；只要求
+`python-hcl2` 装在运行脚本的这台机器上。
+
 ## Tool autodetect
 
 每个脚本先 `command -v tofu` → 若有用 OpenTofu，否则 fallback 到 `terraform`。可强制 `--tool tofu|terraform`。

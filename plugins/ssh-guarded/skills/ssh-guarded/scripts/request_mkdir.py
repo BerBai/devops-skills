@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """request_mkdir.py — draft a remote mkdir request (v1.0).
 
-Produces an artifact at ``reports/requests/mkdir-<id>.json``. Does NOT
-execute. Hand the artifact to ``run_request.py --execute`` after human
-review.
+Produces an artifact under ``$SSH_GUARDED_HOME/reports/<project_id>/requests/``
+(``mkdir-<id>.json``). Does NOT execute. Hand the artifact to
+``run_request.py --execute`` after human review.
 
 v1.0 surface:
     request_mkdir.py <alias>
@@ -13,6 +13,7 @@ v1.0 surface:
         [--parents]                         (mkdir -p semantics)
         [--expires-in 1h]
         [--project-id <id>]                 (SUPPRESS)
+        [--reports-dir <path>]              (override the state root)
         [--json]                            (SUPPRESS)
 
 Payload (operation="mkdir"):
@@ -25,12 +26,12 @@ Implementation notes:
 - ``remote`` outside the sandbox warns to stderr but the artifact is
   still written (C3 pedagogical: executor refuses with exit 50).
 - ``risk_summary`` is computed by ``lib.compute_risk`` (D4 mkdir row).
+- State lives outside the plugin tree (GAP-006): see ``lib/state.py``.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -43,16 +44,24 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 from lib import (  # noqa: E402, I001
     ArtifactError,
+    GuardedArgumentParser,
     RequestArtifact,
+    add_version_flag,
     allocate_request_id,
     compute_risk,
+    emit,
+    failure_envelope,
+    handle_version,
     is_inside_sandbox,
     iso_utc_now,
     iso_utc_offset,
     normalize_remote_path,
     parse_expires_in,
     resolve_project_id,
+    success_envelope,
+    warn_legacy_reports,
 )
+from lib import requests_dir as state_requests_dir  # noqa: E402
 
 # --- Constants --------------------------------------------------------------
 
@@ -87,7 +96,7 @@ def _build_common_parser() -> argparse.ArgumentParser:
 
 def build_parser() -> argparse.ArgumentParser:
     common = _build_common_parser()
-    p = argparse.ArgumentParser(
+    p = GuardedArgumentParser(
         prog="request_mkdir.py",
         parents=[common],
         description="Draft a remote mkdir request artifact for review/execute.",
@@ -102,6 +111,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="mkdir -p semantics; required if >1 missing parent")
     p.add_argument("--expires-in", dest="expires_in", default="1h",
                    help="<n>{m,h,d}; min 60s, max 7d, default 1h")
+    p.add_argument("--reports-dir", dest="reports_dir", default=None,
+                   help="Override the state root (default: $SSH_GUARDED_HOME/reports)")
+    add_version_flag(p)
     return p
 
 
@@ -137,31 +149,21 @@ def _sandbox_segment_count(normalized: str, project_id: str) -> int:
     return len([seg for seg in suffix.split("/") if seg])
 
 
-def _resolve_requests_dir() -> Path:
-    skill_root = _THIS.parent.parent
-    return skill_root / "reports" / "requests"
-
-
-def _emit(envelope: dict[str, Any], as_json: bool) -> None:
-    if as_json:
-        json.dump(envelope, sys.stdout, ensure_ascii=False)
-        sys.stdout.write("\n")
-        return
-    if envelope["success"]:
-        data = envelope["data"]
-        sys.stdout.write(
-            f"drafted {data['request_id']} -> {data['artifact_path']}\n"
-            f"risk: {data['risk_summary']['blast_radius']}\n"
-        )
-    else:
-        err = envelope["error"]
-        sys.stderr.write(f"{err['failure_class']}: {err['message']}\n")
+def _resolve_requests_dir(
+    project_id: str,
+    reports_dir: str | None = None,
+) -> Path:
+    """Return ``$SSH_GUARDED_HOME/reports/<project_id>/requests``."""
+    return state_requests_dir(project_id, reports_dir=reports_dir)
 
 
 # --- Main ------------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("request_mkdir.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     as_json = getattr(args, "json", False)
     try:
@@ -203,7 +205,10 @@ def main(argv: list[str] | None = None) -> int:
 
         risk = compute_risk(OPERATION, payload, args.alias)
 
-        requests_dir = _resolve_requests_dir()
+        warn_legacy_reports()
+        requests_dir = _resolve_requests_dir(
+            project_id, getattr(args, "reports_dir", None)
+        )
         request_id = allocate_request_id(OPERATION, requests_dir)
         artifact_path = requests_dir / f"{request_id}.json"
 
@@ -220,9 +225,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         artifact.save(artifact_path)
 
-        envelope = {
-            "success": True,
-            "data": {
+        envelope = success_envelope(
+            stdout=(
+                f"drafted {request_id} -> {artifact_path}\n"
+                f"risk: {risk.blast_radius}\n"
+            ),
+            data={
                 "artifact_path": str(artifact_path),
                 "request_id": request_id,
                 "operation": OPERATION,
@@ -234,21 +242,18 @@ def main(argv: list[str] | None = None) -> int:
                     "blast_radius": risk.blast_radius,
                 },
             },
-            "error": None,
-        }
-        _emit(envelope, as_json)
+        )
+        emit(envelope, as_json)
         return 0
     except ArtifactError as exc:
-        envelope = {
-            "success": False,
-            "data": None,
-            "error": {
-                "message": exc.message,
-                "failure_class": exc.failure_class,
-                "exit_code": exc.exit_code,
-            },
-        }
-        _emit(envelope, as_json)
+        envelope = failure_envelope(
+            failure_class=exc.failure_class,
+            message=exc.message,
+            exit_code=exc.exit_code,
+            stderr=f"{exc.failure_class}: {exc.message}\n",
+            data=None,
+        )
+        emit(envelope, as_json)
         return exc.exit_code
 
 

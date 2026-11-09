@@ -28,18 +28,11 @@ import sys
 import time
 from pathlib import Path
 
-_THIS = Path(__file__).resolve()
-# lib/clock_skew.py -> lib -> scripts -> log-aggregator (skill) -> skills
-#   -> log-aggregator (plugin) -> plugins
-_PLUGINS_DIR = _THIS.parents[5]
-SSH_EXECUTE_PATH = (
-    _PLUGINS_DIR
-    / "ssh-core"
-    / "skills"
-    / "ssh-core"
-    / "scripts"
-    / "ssh_execute.py"
-)
+from . import _ssh_core_locator as _locator
+
+# Resolved through the shared locator so DEVOPS_SSH_CORE_DIR is honoured and
+# the lookup survives the marketplace layout (each plugin in its own dir).
+SSH_EXECUTE_PATH = _locator.ssh_core_script("ssh_execute.py")
 
 
 def probe(

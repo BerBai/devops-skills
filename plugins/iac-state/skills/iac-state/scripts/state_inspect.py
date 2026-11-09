@@ -12,6 +12,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import emit, json_result  # type: ignore[import-not-found]  # noqa: E402, I001
 from lib.terraform import TfError, read_text, resolve_tool, run_tf  # type: ignore[import-not-found]  # noqa: E402
+from _version import add_version_flag, handle_version
 
 _BACKEND_UNKNOWN = 125
 _LOCK_PARSE_FAILED = 126
@@ -37,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("project_dir", help="Terraform project root containing .terraform/")
     parser.add_argument("--tool", choices=["auto", "tofu", "terraform"], default="auto")
     parser.add_argument("--json", action="store_true")
+    add_version_flag(parser)
     return parser
 
 
@@ -241,6 +243,9 @@ def _format_human(result: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("state_inspect.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     try:
         result = _inspect(args)

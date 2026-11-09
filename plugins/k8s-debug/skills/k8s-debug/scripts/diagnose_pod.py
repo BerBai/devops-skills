@@ -37,6 +37,7 @@ from typing import Any, Literal
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import emit, json_result  # noqa: E402, I001
 from lib.kubectl import KubectlError, KubectlResult, run_kubectl  # noqa: E402
+from _version import add_version_flag, handle_version
 
 PhaseLiteral = Literal[
     "Pending",
@@ -177,6 +178,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include --previous container logs (crucial for CrashLoop)",
     )
     p.add_argument("--json", action="store_true")
+    add_version_flag(p)
     return p
 
 
@@ -399,6 +401,9 @@ def _empty() -> KubectlResult:
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("diagnose_pod.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     try:
         result = _diagnose(args)

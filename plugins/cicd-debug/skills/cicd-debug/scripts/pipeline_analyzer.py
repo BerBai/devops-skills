@@ -65,7 +65,11 @@ from lib_cicd import (  # type: ignore[import-not-found]
     PermissionError,
     ProviderUnavailable,
     resolve_provider,
+    LOCAL_HOST,
+    preflight_provider,
+    split_host_argv,
 )
+from _version import add_version_flag, handle_version
 
 # Failure class to exit code mapping (PRD D3)
 FAILURE_CLASS_TO_EXIT = {
@@ -132,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Subprocess timeout in seconds (default: {DEFAULT_TIMEOUT_SEC})",
     )
     p.add_argument("--json", action="store_true")
+    add_version_flag(p)
     return p
 
 
@@ -426,8 +431,15 @@ def _reference_summary(
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("pipeline_analyzer.py", argv)
+    if early is not None:
+        return early
     start_time = time.time()
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    # Optional leading <host>: `local` (default) or an ssh-core alias, matching
+    # every other diagnostic plugin in this marketplace.
+    host, raw_argv = split_host_argv(raw_argv)
+    args = build_parser().parse_args(raw_argv)
 
     failure_class: str | None = None
     stderr = ""
@@ -439,7 +451,12 @@ def main(argv: list[str] | None = None) -> int:
             raise BadArgsError("--project is required for glab")
 
         # Resolve provider
-        provider = resolve_provider(args.provider, args.gh_bin, args.glab_bin)
+        # A remote host has its own gh/glab install and credentials; check
+        # before the first API call so "not logged in there" is reported as
+        # an auth problem instead of a broken pipeline.
+        if host != LOCAL_HOST:
+            preflight_provider(args.provider, host)
+        provider = resolve_provider(args.provider, args.gh_bin, args.glab_bin, host)
 
         # Fetch run metadata
         run_raw = provider.fetch_run(args.run_id, args.project)
@@ -567,6 +584,7 @@ def main(argv: list[str] | None = None) -> int:
         # Build data payload
         data = {
             "provider": args.provider,
+            "host": host,
             "run_ref": args.run_id,
             "run_meta": run_meta,
             "job_states": job_states,
@@ -616,6 +634,7 @@ def main(argv: list[str] | None = None) -> int:
     if failure_class:
         data["failure_class"] = failure_class
         data["elapsed_s"] = time.time() - start_time
+    data.setdefault("host", host)
 
     # Emit JSON envelope
     exit_code = FAILURE_CLASS_TO_EXIT.get(failure_class, 1)

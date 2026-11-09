@@ -75,10 +75,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import _runtime
+import _ssh_core_locator as _locator
+from _version import add_version_flag, handle_version
+
 # --- Constants ---------------------------------------------------------------
 
-DEFAULT_RUNTIME = "docker"
-ALLOWED_RUNTIMES = ("docker", "podman")
+DEFAULT_RUNTIME = _runtime.RUNTIME_AUTO
+ALLOWED_RUNTIMES = (*_runtime.ALLOWED_RUNTIMES, _runtime.RUNTIME_AUTO)
 DEFAULT_THRESHOLD_MB = 200
 
 HISTORY_TIMEOUT_S = 30
@@ -142,6 +146,7 @@ def _envelope(
 
 
 def _emit(result: dict[str, Any], as_json: bool) -> None:
+    _runtime.utf8_stdio()
     if as_json:
         json.dump(result, sys.stdout, ensure_ascii=False)
         sys.stdout.write("\n")
@@ -160,26 +165,12 @@ def _emit(result: dict[str, Any], as_json: bool) -> None:
 
 
 def _ssh_execute_path() -> Path:
-    """Locate ssh-core's ssh_execute.py relative to this file.
+    """Locate ssh-core's ssh_execute.py (honours DEVOPS_SSH_CORE_DIR).
 
-    Layout::
-
-        plugins/ssh-core/skills/ssh-core/scripts/ssh_execute.py
-        plugins/docker-quick/skills/docker-quick/scripts/image_audit.py
-                                                                       ^ here
-
-    parents[0]=scripts, [1]=docker-quick (skill), [2]=skills,
-    [3]=docker-quick (plugin), [4]=plugins.
+    Only used for the remote route; callers check ``.exists()`` and emit a
+    precondition envelope when ssh-core is not installed alongside.
     """
-    here = Path(__file__).resolve()
-    return (
-        here.parents[4]
-        / "ssh-core"
-        / "skills"
-        / "ssh-core"
-        / "scripts"
-        / "ssh_execute.py"
-    )
+    return _locator.ssh_core_script("ssh_execute.py")
 
 
 # --- Local execution --------------------------------------------------------
@@ -192,6 +183,8 @@ def _run_local(argv: list[str], timeout: int) -> dict[str, Any]:
             argv,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
         )
@@ -205,12 +198,15 @@ def _run_local(argv: list[str], timeout: int) -> dict[str, Any]:
             ),
             data={"failure_class": "timeout"},
         )
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         return _envelope(
             False,
-            EXIT_FAIL,
-            stderr=f"image_audit: command not found: {e}\n",
-            data={"failure_class": "remote_error"},
+            _runtime.EXIT_DEPENDENCY_MISSING,
+            stderr=(
+                f"image_audit: no '{argv[0]}' executable on this host. "
+                "Install docker/podman, or target a remote alias that has it.\n"
+            ),
+            data={"failure_class": "dependency_missing"},
         )
     return _envelope(
         proc.returncode == 0,
@@ -248,6 +244,8 @@ def _run_via_ssh_execute(
             argv,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout + connect_timeout + 5,
             check=False,
         )
@@ -570,7 +568,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--runtime",
         default=DEFAULT_RUNTIME,
         choices=list(ALLOWED_RUNTIMES),
-        help=f"Container runtime to invoke (default: {DEFAULT_RUNTIME})",
+        help=(
+            "Container runtime to invoke (default: auto = docker, then "
+            "podman; an explicit value is used verbatim)"
+        ),
     )
     p.add_argument(
         "--connect-timeout",
@@ -586,6 +587,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit the shared JSON output contract on stdout",
     )
+    add_version_flag(p)
     return p
 
 
@@ -593,8 +595,40 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("image_audit.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     threshold_bytes = args.threshold_mb * 1024 * 1024
+
+    # Step 0: resolve the container runtime (DQ-01).
+    runtime, runtime_err = _runtime.resolve_runtime(
+        args.runtime, host=args.host
+    )
+    if runtime_err is not None:
+        result = _envelope(
+            False,
+            _runtime.EXIT_DEPENDENCY_MISSING,
+            stderr=f"image_audit: {runtime_err}\n",
+            data={
+                "host": args.host,
+                "image": args.image,
+                "runtime": None,
+                "threshold_mb": args.threshold_mb,
+                "summary": {
+                    "state": "unknown",
+                    "total_size_mb": 0,
+                    "layer_count": 0,
+                    "large_layers": 0,
+                },
+                "layers": [],
+                "findings": [],
+                "failure_class": "dependency_missing",
+            },
+        )
+        _emit(result, args.json)
+        return result["exit_code"]
+    args.runtime = runtime
 
     # Step 1: history.
     hist_env = _history_image(

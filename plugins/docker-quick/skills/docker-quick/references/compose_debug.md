@@ -22,11 +22,11 @@ docker compose events                   # 实时事件流（容器生死、healt
 services:
   api:
     depends_on:
-      - db                      # ❌ 这只保证 db 容器进入 Running
+      - db                      # NO: only waits for the db container to reach Running
   api2:
     depends_on:
       db:
-        condition: service_healthy   # ✅ 这才等到 db healthcheck PASS
+        condition: service_healthy   # YES: waits for the db healthcheck to pass
 ```
 
 如果 db 容器起来了但 mysqld 还没接收连接，`api` 就启动并立即 fail。修法：给 db 写 healthcheck + `condition: service_healthy`，或在 `api` 入口加 wait-for-it 脚本。

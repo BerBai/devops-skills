@@ -26,25 +26,41 @@ Skip when:
 ```
 CI/CD 症状？
 │
-├─ 某次 run 失败 / 行为意外 ── pipeline_analyzer.py <provider> <run-id>
+├─ 某次 run 失败 / 行为意外 ── pipeline_analyzer.py [<host>] <provider> <run-id>
 │                              → 全 job 状态 + 关键错误行
 │                              → 与上一次成功 run 的 diff
 │                              → 标记可疑 step（action 升级 / cache miss / env 变化）
 │
-├─ Runner 不工作 ─────────── runner_check.py <provider>
+├─ Runner 不工作 ─────────── runner_check.py [<host>] <provider>
 │                              → 在线 runner 数、忙闲、label 覆盖
 │                              → 最近 heartbeat（GitLab 支持；GitHub API v1.0 返回 null）
 │                              → 队列长度；running_job 仅 repo/project scope 可用
 │
-└─ Secret / 环境作用域困惑 ── secret_scope_audit.py <provider> <repo>
+└─ Secret / 环境作用域困惑 ── secret_scope_audit.py [<host>] <provider> <repo>
                                 → 每个 secret 的可见性（repo / env / org）
                                 → 哪些 workflow 引用了它
                                 → PR-from-fork 场景的 secret 暴露面
 ```
 
+## Host model
+
+第一参可选 `<host>`，与其他诊断插件一致：
+
+```
+pipeline_analyzer.py [<host>] <provider> <run-id> [flags]
+runner_check.py      [<host>] <provider> [scope flags]
+secret_scope_audit.py[<host>] <provider> [scope flags]
+```
+
+- 省略 `<host>`，或写 `local` → 在**本机**跑 `gh` / `glab`（v1.0 行为，CI runner 上最常用）
+- 其他别名（如跳板机）→ 通过 `ssh-core` 的 `ssh_execute.py` 在远端执行 `gh` / `glab`，需要目标机已登录对应 CLI
+
+因为 provider 关键字只有 `gh` / `glab`，省略 host 与显式给 host 不会歧义：
+`gh --repo a/b` 和 `lab-240 gh --repo a/b` 都能解析。
+
 ## Providers
 
-第一参 `<provider>` 取值：
+第二参 `<provider>` 取值：
 - `gh` —— GitHub Actions（走 `gh api` 命令，要 `gh auth login` 完成）
 - `glab` —— GitLab CI（走 `glab api` 命令，要 `glab auth login`）
 
@@ -53,9 +69,12 @@ CI/CD 症状？
 ## Quick reference
 
 ```bash
-# 分析单次 GitHub Actions run
+# 分析单次 GitHub Actions run（本机）
 python scripts/pipeline_analyzer.py gh 12345678 --json
 python scripts/pipeline_analyzer.py gh 12345678 --diff-against last-success
+
+# 在跳板机上分析（gh/glab 在远端）
+python scripts/pipeline_analyzer.py lab-240 gh 12345678 --json
 
 # 分析 GitLab pipeline
 python scripts/pipeline_analyzer.py glab 567890 --project mygroup/myrepo
@@ -65,6 +84,7 @@ python scripts/runner_check.py gh --org myorg --json
 python scripts/runner_check.py gh --repo owner/name --json
 python scripts/runner_check.py glab --group mygroup
 python scripts/runner_check.py glab --project mygroup/myrepo --json
+python scripts/runner_check.py lab-240 glab --group mygroup --json
 
 # Secret 审计
 python scripts/secret_scope_audit.py gh --repo owner/name

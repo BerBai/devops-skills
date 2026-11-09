@@ -37,15 +37,29 @@ Install any subset. `ssh-core` is the only hard dependency for the others (used 
 ## Design principles
 
 - **One plugin per problem domain.** Narrow, opinionated `description` strings make Claude Code's skill matcher more accurate.
+- **`ssh-core` is the remote-connection sub-function.** Transport, auth, sessions, tunnels, transfers and `~/.ssh/config` live there and nowhere else; every other plugin reaches a remote host by shelling out to it (ADR-005).
 - **Read-only diagnosis by default.** Diagnostic plugins inspect by default. Writes go through `ssh-guarded` (with audit) or human-driven CLI.
-- **`<host>` as first argument.** Diagnostic scripts take a host alias as their first argument; `local` runs locally, otherwise commands are forwarded through `ssh-core`.
+- **`<host>` as first argument.** Every diagnostic script takes a host as its first argument; `local` runs locally, otherwise commands are forwarded through `ssh-core`. Omitting it means `local`.
 - **Two-layer docs.** `SKILL.md` is for triage (decision tree + quick reference). Deep content lives in `references/*.md` and loads progressively.
 - **`subprocess.run(list, ...)`, never shell strings.** No exceptions.
-- **JSON output contract.** Every script supports `--json` and emits `{success, exit_code, stdout, stderr, data}`. Chains compose without natural-language parsing.
+- **JSON output contract.** Every script supports `--json` and emits `{success, exit_code, stdout, stderr, data}`. Chains compose without natural-language parsing. `success` means the action completed, never merely "the request was dispatched".
+- **`--version` everywhere.** Every public script answers `--version` / `-V` with `<script> (<plugin> <x.y.z>)`, sourced from the plugin's `plugin.json`, so "which build is installed" is one flag away.
+- **One `partial_fetch` rule.** Any source or host that could not be read makes the run fail (`success: false` + a non-zero exit code) while the data that *was* collected is still returned under `data` — never a silent empty result.
+
+## Where ssh-core lives
+
+Diagnostic plugins do not guess: each one ships its own `scripts/_ssh_core_locator.py` (vendored from `scripts/templates/`, not shared) that resolves ssh-core in this order.
+
+1. `$DEVOPS_SSH_CORE_SCRIPTS` — the `.../ssh-core/scripts` directory
+2. `$DEVOPS_SSH_CORE_DIR` — the `.../ssh-core` skill root
+3. the repo layout (`plugins/ssh-core/...` next to the calling plugin)
+4. installed agent roots (`~/.claude/plugins/`, `~/.dsh/skills/`, `~/.agents/skills/`, `~/.codex/skills/`)
+
+Set the first variable when you install the plugins into unrelated directories, and the error message tells you exactly what was looked for.
 
 ## Status
 
-`v1.0` shipped all 8 plugin surfaces. `ssh-core` has since been synced to standalone version `1.4.0` (ADR-004), adding byte-safe output, password/key auth, interactive sessions, multi-backend transfers, sudo/retry, `ssh_session.py`, `ssh_daemon.py`, `selfcheck.py`, and `audit.py`. Other plugins still communicate with it only through CLI + JSON.
+`v1.0` shipped all 8 plugin surfaces. `ssh-core` now tracks the standalone tree at `1.5.0` (ADR-004, ADR-005), adding `doctor.py` capability probes, `ssh_slice.py` windowed log reads, the `run.cmd`/`run.sh` launchers, `--output-file`, `--script-file`, `--allow-exit`, and the `user_required` failure class. Other plugins still communicate with it only through CLI + JSON.
 
 See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the V1.1 roadmap.
 

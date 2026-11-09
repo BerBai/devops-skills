@@ -65,7 +65,9 @@ Is this a read or a write?
 
 ## Request artifact contract
 
-Every write produces a JSON file under `reports/requests/<id>.json`:
+Every write produces a JSON file under
+`$SSH_GUARDED_HOME/reports/<project_id>/requests/<id>.json` (default home:
+`~/.devops/ssh-guarded`; `--reports-dir` overrides the `reports` level):
 
 ```json
 {
@@ -79,20 +81,72 @@ Every write produces a JSON file under `reports/requests/<id>.json`:
     "command": "logrotate -f /etc/logrotate.d/nginx",
     "workdir": "~/workspace/log-rotation"
   },
-  "risk_summary": [
-    "modifies remote workdir content",
-    "affects nginx logging — service does not restart but log handle rotates"
-  ]
+  "risk_summary": {
+    "irreversible": false,
+    "scope": "single-file",
+    "blast_radius": "runs 'logrotate -f /etc/logrotate.d/nginx' as you@prod-web-01"
+  }
 }
 ```
 
 The artifact is the **agreement** between you and the user. When you present it, paste the JSON in full. When the user says "execute", run:
 
 ```
-run_request.py --request reports/requests/command-a1b2c3d4.json --execute
+run_request.py --request <artifact path> --execute
 ```
 
 Without `--execute`, `run_request.py` only **validates** the request and reports what it would do. Use this for double-checks.
+
+## Two-phase flow: what each phase means
+
+```
+draft   request_*.py  → artifact on disk; nothing has touched the host yet
+review  (you + user)  → full payload + risk_summary; ask "execute?"
+execute run_request.py --execute → lock, dispatch, result.json, real outcome
+```
+
+`success: true` means **the action completed**, not "the request was
+dispatched". Two consequences worth stating explicitly:
+
+- A drafter that exits 0 only means *a request exists*. The host is untouched.
+- An executor whose transport exits non-zero reports `success: false`, a
+  populated `error`, and the transport's own exit code from its own process.
+  `--execute` is therefore safe to put in a shell `&&` chain or a CI step.
+
+| Transport exit | `success` | process exit | `error.failure_class` |
+|---|---|---|---|
+| 0 | `true` | `0` | `null` |
+| 1..255 | `false` | the same code | the transport's class, else `internal` |
+| <1 or >255 | `false` | `1` | the transport's class, else `internal` |
+
+`result.json` is written in both cases: the audit trail must survive a failure.
+Validation failures keep their own codes (50/51/53/54/56/57/59/124) and never
+reach the transport. See `references/request-execute.md` for the full table.
+
+## JSON envelope
+
+Every script in this plugin emits the same six top-level keys — the
+marketplace-wide shape plus `error` for backwards compatibility:
+
+```json
+{
+  "success": true,
+  "exit_code": 0,
+  "stdout": "drafted command-a1b2c3d4 -> ...\n",
+  "stderr": "",
+  "data": {"artifact_path": "...", "request_id": "command-a1b2c3d4"},
+  "error": null
+}
+```
+
+- `exit_code` is always the process exit code and is **never null** —
+  `jq -r .exit_code` works on success, on classified failure, and on an
+  argparse error (`2` + `failure_class: "invalid_arguments"`).
+- `stdout` / `stderr` are the human-mode text, so a wrapper can log exactly
+  what the user saw.
+- `data` is the script-specific payload; `data.failure_class` is set on failure.
+- `error` is `null` on success and `{message, failure_class, exit_code}` on
+  failure, with `error.exit_code == exit_code`.
 
 ## Redaction policy
 
@@ -130,8 +184,8 @@ See `references/workdir-sandbox.md`.
 For anything that may take longer than a few seconds (builds, snapshots, migrations), do not block:
 
 ```
-exec_detached.py --request reports/requests/command-xyz.json
-  → writes reports/jobs/<job_id>.json
+exec_detached.py run --request <artifact path>
+  → writes $SSH_GUARDED_HOME/reports/<project_id>/jobs/<job_id>.json
   → starts the command with nohup on the remote host
   → returns the job_id immediately
 ```
@@ -159,6 +213,37 @@ scan_software.py prod-web-01
 ```
 
 After the first scan, `scan_software.py --name kubectl prod-web-01` reads the cache. No SSH round trip. Use this to answer "can I run X on this box?" without reconnecting.
+
+## Housekeeping
+
+Runtime state does **not** live in the skill directory. It lives under
+`$SSH_GUARDED_HOME` (default `~/.devops/ssh-guarded`,
+`%USERPROFILE%\.devops\ssh-guarded` on Windows), one directory per project:
+
+```
+$SSH_GUARDED_HOME/reports/<project_id>/requests/   # drafts, results, locks
+$SSH_GUARDED_HOME/reports/<project_id>/jobs/       # detached job manifests
+```
+
+That keeps a read-only install usable, stops an upgrade from deleting pending
+approvals, and keeps two projects' artifacts apart. `--reports-dir PATH` on the
+drafters, `exec_detached.py` and `gc_artifacts.py` replaces the `.../reports`
+level for CI and containers (`run_request.py` writes its `result.json` next to
+the artifact it was given, so it needs no flag). Artifacts left in the old
+in-tree `reports/` are reported once, never moved or deleted automatically.
+
+`gc_artifacts.py` prunes the state tree, per project:
+
+```
+gc_artifacts.py                          # dry run, 7-day cut-off, all projects
+gc_artifacts.py --older-than 30d --apply
+gc_artifacts.py --project-id myproj --older-than 12h --apply
+gc_artifacts.py --reports-dir /var/ci/reports --older-than 1d --apply
+```
+
+`--dry-run` is the default. A lock that is still held, and a request whose
+`expires_at` has not passed, are never removed — see `reports/README.md` for
+the full rule table.
 
 ## What `ssh-guarded` does *not* do
 

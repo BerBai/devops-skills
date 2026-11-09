@@ -33,6 +33,7 @@ from typing import Any, Literal, get_args
 
 from . import sandbox
 from ._errors import ArtifactError
+from ._ssh_core_locator import ssh_core_script as _ssh_core_script
 from .redact import Redactor
 
 # ---- Constants -----------------------------------------------------------
@@ -57,16 +58,10 @@ MAX_UPLOAD_BYTES = 256 * 1024 * 1024
 ARTIFACT_FILE_MODE = 0o600
 
 # Path to ssh-core scripts dir, used by run_request to dispatch.
-# Monkeypatched in unit tests; see design.md §3 D8.
-# __file__ lives at plugins/ssh-guarded/skills/ssh-guarded/scripts/lib/request_artifact.py
-# parents[5] = plugins/  (design.md §3 D8 said parents[3] but the math is off by 2)
-SSH_CORE_SCRIPTS_DIR: Path = (
-    Path(__file__).resolve().parents[5]
-    / "ssh-core"
-    / "skills"
-    / "ssh-core"
-    / "scripts"
-)
+# Monkeypatched in unit tests; see design.md §3 D8. Resolved through the shared
+# locator so DEVOPS_SSH_CORE_DIR is honoured and the marketplace layout (each
+# plugin installed into its own directory) keeps working.
+SSH_CORE_SCRIPTS_DIR: Path = _ssh_core_script("ssh_execute.py").parent
 
 # ---- Expiry parsing (D11) ------------------------------------------------
 
@@ -158,7 +153,11 @@ class RiskSummary:
 
 @dataclass
 class RequestArtifact:
-    """The JSON artifact on disk under ``reports/requests/<op>-<id>.json``."""
+    """The JSON artifact on disk under ``<reports>/<project_id>/requests/<op>-<id>.json``.
+
+    The reports root is ``$SSH_GUARDED_HOME/reports`` (or ``--reports-dir``),
+    never the plugin tree — see :mod:`lib.state` (DEVOPS-GAP-006).
+    """
 
     version: int
     request_id: str
@@ -517,7 +516,12 @@ def _mkdir_risk(payload: dict[str, Any], server: str) -> RiskSummary:
 def _delete_risk(payload: dict[str, Any], server: str) -> RiskSummary:
     remote = payload.get("remote_path", "?")
     recursive = bool(payload.get("recursive", False))
-    scope = "tree" if recursive else "single-file"
+    # BUG-001: a path the drafter *knows* is a directory is a tree even if the
+    # caller did not pass --recursive. Reporting single-file for a directory
+    # made the risk summary — the artifact a human reviews — wrong, which is
+    # the whole reason the --recursive gate exists.
+    is_directory = bool(payload.get("is_directory_pre_check", False))
+    scope = "tree" if (recursive or is_directory) else "single-file"
     blast = f"deletes {remote} on {server}; recursive={recursive}"
     return RiskSummary(
         irreversible=True,
@@ -570,7 +574,7 @@ def save_result(
 
     Returns the result path.
     """
-    base_dir = out_dir or Path("reports/requests")
+    base_dir = out_dir or Path(".")
     result_path = base_dir / f"{art.request_id}.result.json"
     out = dict(result_dict)
     out.setdefault("version", SCHEMA_VERSION)

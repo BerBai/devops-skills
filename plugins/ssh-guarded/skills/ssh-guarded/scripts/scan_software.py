@@ -65,6 +65,7 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as _dt
+import importlib.util
 import json
 import os
 import re
@@ -83,7 +84,33 @@ _SSH_CORE_LIB = (
     / "scripts"
 )
 sys.path.insert(0, str(_SSH_CORE_LIB))
-from lib import emit, json_result  # noqa: E402, I001
+from lib import emit  # noqa: E402, I001
+
+# GAP-005: the ssh-guarded envelope (six keys, incl. ``error``) is loaded by
+# path under a private module name. Importing ``lib.envelope`` would collide
+# with ssh-core's ``lib`` package above; the file itself has no relative
+# imports precisely so it can be used this way.
+_envelope_spec = importlib.util.spec_from_file_location(
+    "ssh_guarded_envelope",
+    Path(__file__).resolve().parent / "lib" / "envelope.py",
+)
+if _envelope_spec is None or _envelope_spec.loader is None:  # pragma: no cover
+    raise ImportError("ssh-guarded lib/envelope.py is missing")
+_guarded_envelope = importlib.util.module_from_spec(_envelope_spec)
+_envelope_spec.loader.exec_module(_guarded_envelope)
+GuardedArgumentParser = _guarded_envelope.GuardedArgumentParser
+guarded_json_envelope = _guarded_envelope.json_envelope
+
+_version_spec = importlib.util.spec_from_file_location(
+    "ssh_guarded_version_cli",
+    Path(__file__).resolve().parent / "lib" / "version_cli.py",
+)
+if _version_spec is None or _version_spec.loader is None:  # pragma: no cover
+    raise ImportError("ssh-guarded lib/version_cli.py is missing")
+_guarded_version = importlib.util.module_from_spec(_version_spec)
+_version_spec.loader.exec_module(_guarded_version)
+add_version_flag = _guarded_version.add_version_flag
+handle_version = _guarded_version.handle_version
 
 # --- Constants --------------------------------------------------------------
 
@@ -338,7 +365,7 @@ class CacheCorruptError(Exception):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    p = GuardedArgumentParser(
         prog="scan_software.py",
         description=(
             "Cache-backed remote software inventory probe. See "
@@ -374,6 +401,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true",
         help="Emit the shared {success,exit_code,stdout,stderr,data} envelope.",
     )
+    add_version_flag(p)
     return p
 
 
@@ -691,12 +719,22 @@ def _envelope(
     stdout: str = "",
     stderr: str = "",
 ) -> dict[str, Any]:
-    return json_result(
+    """Shared six-key envelope (GAP-005): ssh-core shape plus ``error``."""
+    error = None
+    if not success:
+        failure_class = data.get("failure_class")
+        error = {
+            "message": stderr.strip() or f"exit {exit_code}",
+            "failure_class": failure_class,
+            "exit_code": int(exit_code),
+        }
+    return guarded_json_envelope(
         success=success,
         exit_code=exit_code,
         stdout=stdout,
         stderr=stderr,
         data=data,
+        error=error,
     )
 
 
@@ -1084,6 +1122,9 @@ def _dispatch_has(
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("scan_software.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     try:
         catalog = _load_catalog(args.catalog)

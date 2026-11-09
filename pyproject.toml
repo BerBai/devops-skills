@@ -1,42 +1,70 @@
 [project]
 name = "devops-skills"
-version = "0.1.0"
+version = "1.0.0"
 description = "Open-source DevOps & cross-device debugging skills for Claude Code"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.10"
+# Floor shared by every plugin. ssh-core's SKILL.md documents 3.8+ because the
+# transport has to keep working on Kylin 3 / CentOS 7 hosts (ADR-006); this
+# project therefore holds the whole tree to that floor rather than 3.10.
+requires-python = ">=3.8"
 authors = [{ name = "devops-skills contributors" }]
 keywords = ["claude-code", "claude-plugin", "ssh", "devops", "remote-debugging"]
 classifiers = [
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.12",
   "Topic :: System :: Systems Administration",
   "Topic :: Software Development :: Debuggers",
 ]
 
-# Runtime dependencies live in each plugin's own future requirements.txt; the
-# top-level project ships only manifests, markdown, and Python stubs, so the
-# wheel itself has no runtime deps.
-# Exception: paramiko is optional for ssh-core 1.4.0 SFTP routes; scp/tar/
-# rsync fallbacks work without it, but the dev environment includes it for
-# SFTP path and optional-transfer coverage.
-# Exception: PyYAML is required by cicd-debug/secret_scope_audit.py to parse
-# GitHub Actions and GitLab CI workflow YAML structurally.
-# Exception: python-hcl2 is required by iac-state/module_validate.py for
-# Terraform HCL2 static parsing.
-dependencies = [
-    "paramiko>=3.0,<4",
-    "python-hcl2>=8.1,<9",
-    "pyyaml>=6.0",
-]
+# This project is a plugin marketplace, not an importable library: the plugins
+# are copied into an agent's skill directory, never `pip install`ed. There is
+# deliberately no [build-system], so `pip install .` fails loudly instead of
+# producing an empty wheel (see the note at the bottom of this file).
+#
+# Every runtime dependency below is **optional by design** and declared as an
+# extra rather than a base dependency:
+#
+#   sftp   paramiko    ssh-core's SFTP backend; without it ssh_upload /
+#                      ssh_download / ssh_server_transfer fall back to
+#                      scp / tar / rsync and refuse --resume/--bwlimit/--delete
+#                      with exit 166 instead of silently ignoring them
+#   yaml   PyYAML      cicd-debug/secret_scope_audit.py (workflow YAML)
+#   hcl    python-hcl2 iac-state/module_validate.py (HCL2 static analysis)
+#
+# A missing extra is a supported state, not an installation error: the scripts
+# import lazily and return `dependency_missing` (exit 3) on the path that needs
+# it. Install what you actually use, e.g. `pip install 'paramiko>=3.0,<4'`, or
+# `uv sync --extra sftp --extra yaml`.
+dependencies = []
 
 [project.optional-dependencies]
+sftp = [
+    "paramiko>=3.0,<4",
+]
+yaml = [
+    "pyyaml>=6.0",
+]
+hcl = [
+    # python-hcl2 8.x requires >=3.9; keep it out of the 3.8 leg (CI installs it
+    # separately) so the declared floor stays honest.
+    "python-hcl2>=8.1,<9; python_version >= '3.9'",
+]
+# Everything a contributor needs to run the shipped surface end to end.
+all = [
+    "paramiko>=3.0,<4",
+    "pyyaml>=6.0",
+    "python-hcl2>=8.1,<9; python_version >= '3.9'",
+]
 dev = [
-  "pytest>=8.0",
-  "pytest-cov>=5.0",
-  "ruff>=0.4",
-  "mypy>=1.10",
-  "types-PyYAML>=6.0",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "types-PyYAML>=6.0",
 ]
 
 [project.urls]
@@ -45,7 +73,7 @@ Issues = "https://github.com/BerBai/devops-skills/issues"
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py38"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "PL"]
@@ -55,16 +83,21 @@ ignore = ["E501", "PLR0913"]
 testpaths = ["tests"]
 addopts = "-ra -q"
 markers = [
-    "live_ssh: integration tests that ssh to a real host (default alias 'pai'). Skipped by default; run with `pytest -m live_ssh`. See tests/README.md for prerequisites.",
+    "live_ssh: integration tests that ssh to a real host. The alias comes from POC_HOST (default 'pai'); the guard in tests/conftest.py skips the whole group when no reachable host is configured. Run with `pytest -m live_ssh`. See tests/README.md for prerequisites.",
+    "sftp_only: cases that assert the paramiko/SFTP backend. Skipped automatically when paramiko is not importable; the scp/tar fallback is covered separately.",
+    "needs_posix: cases that need a POSIX shell on the machine running the tests (setsid, chmod bits, /tmp paths). Skipped on Windows.",
     "live_k8s: integration tests that need a kind cluster + kubectl. Skipped by default; run with `pytest -m live_k8s`.",
-    "live_terraform: integration tests that need Terraform/OpenTofu and initialized fixture projects.",
+    "live_docker: integration tests that need a Docker daemon. Skipped by default; run with `pytest -m live_docker`.",
+    "live_iac: integration tests that need Terraform/OpenTofu and initialized fixture projects (see tests/fixtures/backends/).",
+    "live_terraform: alias kept for the existing Terraform cases; same prerequisites as live_iac.",
     "cicd_gh: tests requiring GitHub CLI access to CICD_GH_REPO.",
     "cicd_glab: tests requiring GitLab CLI access.",
 ]
 
-[build-system]
-requires = ["hatchling>=1.20"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["plugins"]
+# No [build-system]: this repository is installed by copying, not by building a
+# wheel. The previous `packages = ["plugins"]` target could never work — there is
+# no plugins/__init__.py and the plugin directories are not importable names
+# (`docker-quick`, `k8s-debug`, ...). Removing the build backend makes
+# `pip install .` fail loudly instead of producing an empty wheel.
+[tool.hatch.build.targets.sdist]
+include = ["plugins", "tests", "README.md", "CONTRIBUTING.md", "LICENSE", "pyproject.toml"]

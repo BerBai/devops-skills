@@ -37,17 +37,31 @@
 ## 设计原则
 
 - **一个问题域一个 plugin**。窄而明确的 `description` 让 Claude Code 的 skill 匹配器更精准。
+- **`ssh-core` 是远程连接子功能**。传输、认证、会话、隧道、文件传输与 `~/.ssh/config` 只在这里实现；其他 plugin 通过 shell out 复用它（ADR-005）。
 - **默认只读诊断**。诊断类 plugin 默认只做检查；写操作走 `ssh-guarded`（带审计）或人工 CLI。
-- **`<host>` 作为第一参**。诊断脚本第一参是 host alias；`local` 走本机，否则通过 `ssh-core` 转发。
+- **`<host>` 作为第一参**。每个诊断脚本第一参是 host；`local` 走本机，否则通过 `ssh-core` 转发。省略即视为 `local`。
 - **两层文档**。`SKILL.md` 用于分诊（决策树 + 速查），深度内容下沉 `references/*.md` 按需加载。
 - **`subprocess.run(list, ...)`，永不传 shell 字符串**。无例外。
-- **JSON 输出契约**。每个脚本支持 `--json` 并输出 `{success, exit_code, stdout, stderr, data}`，能链式组合无需自然语言解析。
+- **JSON 输出契约**。每个脚本支持 `--json` 并输出 `{success, exit_code, stdout, stderr, data}`，能链式组合无需自然语言解析。`success` 表示动作已完成，而非"请求已派发"。
+- **每个脚本都有 `--version`**。所有公开脚本都支持 `--version` / `-V`，输出来自该插件 `plugin.json` 的 `<script> (<plugin> <x.y.z>)`，"装的是哪一版"一条命令即可确认。
+- **统一的 `partial_fetch` 语义**。任何一个源/主机读不到，整次调用即判失败（`success: false` + 非 0 退出码），但已取到的数据仍放在 `data` 里返回 —— 绝不伪装成空结果的"成功"。
+
+## ssh-core 在哪里
+
+诊断插件不靠猜：各 plugin 内的 `scripts/_ssh_core_locator.py` 按顺序解析。
+
+1. `$DEVOPS_SSH_CORE_SCRIPTS` —— `.../ssh-core/scripts` 目录
+2. `$DEVOPS_SSH_CORE_DIR` —— `.../ssh-core` skill 根目录
+3. 仓库布局（调用方 plugin 旁边的 `plugins/ssh-core/...`）
+4. 已安装的 agent 根目录（`~/.claude/plugins/`、`~/.dsh/skills/`、`~/.agents/skills/`、`~/.codex/skills/`）
+
+把插件装到互不相邻的目录时，设置第一个变量即可；报错信息会告诉你它找过哪些路径。
 
 ## 状态
 
-`v1.0` 已发布 8 个 plugin surface。此后 `ssh-core` 已同步到独立版 `1.4.0`（ADR-004），新增字节安全输出、密钥/密码认证、交互会话、多后端传输、sudo/retry，以及 `ssh_session.py`、`ssh_daemon.py`、`selfcheck.py`、`audit.py`。其他 plugin 仍只通过 CLI + JSON 与它交互。
+`v1.0` 已发布 8 个 plugin surface。`ssh-core` 现在跟踪独立版 `1.5.0`（ADR-004、ADR-005），新增 `doctor.py` 能力探针、`ssh_slice.py` 窗口读日志、`run.cmd`/`run.sh` 启动器、`--output-file`、`--script-file`、`--allow-exit` 与 `user_required` 失败类。其他 plugin 仍只通过 CLI + JSON 与它交互。
 
-V1.1 路线图见 [`CONTRIBUTING.zh-CN.md`](./CONTRIBUTING.zh-CN.md)。
+路线图见 [`CONTRIBUTING.zh-CN.md`](./CONTRIBUTING.zh-CN.md)。
 
 ## License
 

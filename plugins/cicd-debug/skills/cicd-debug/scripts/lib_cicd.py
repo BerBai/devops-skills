@@ -14,8 +14,10 @@ import base64
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -30,6 +32,16 @@ if _LIB_SPEC is None or _LIB_SPEC.loader is None:
 _LIB = importlib.util.module_from_spec(_LIB_SPEC)
 _LIB_SPEC.loader.exec_module(_LIB)
 msys_safe_env = _LIB.msys_safe_env
+json_result = _LIB.json_result
+
+from _ssh_core_locator import ssh_core_script  # type: ignore[import-not-found]  # noqa: E402
+from _version import add_version_flag, handle_version
+
+#: Host alias meaning "run gh/glab on this machine".
+LOCAL_HOST = "local"
+
+#: Exit code ssh-core uses when the transport itself is unavailable.
+_EXIT_DEPENDENCY_MISSING = 3
 
 
 # Exception hierarchy for failure_class mapping
@@ -250,8 +262,19 @@ def run_cli(
     timeout: int = 120,
     env_overrides: dict[str, str] | None = None,
     cwd: Path | None = None,
+    host: str = LOCAL_HOST,
 ) -> CompletedProcess:
-    """Shared subprocess wrapper with MSYS-safe env (PRD D1)."""
+    """Shared subprocess wrapper with MSYS-safe env (PRD D1).
+
+    ``host`` keeps the single call shape the adapters already use: ``local``
+    (the default) runs the CLI on this machine, any other value forwards it to
+    ssh-core. Keeping the routing *inside* this function means the adapters do
+    not need a second code path, and tests that monkeypatch ``run_cli`` still
+    observe the exact argv the CLI would receive.
+    """
+    if host != LOCAL_HOST:
+        return run_remote_cli(host, argv, timeout=timeout, cwd=str(cwd) if cwd else None)
+
     env = msys_safe_env()
     if env_overrides:
         env.update(env_overrides)
@@ -277,22 +300,183 @@ def run_cli(
     )
 
 
+def run_remote_cli(
+    host: str,
+    argv: list[str],
+    *,
+    timeout: int = 120,
+    cwd: str | None = None,
+) -> CompletedProcess:
+    """Run a gh/glab command on ``host`` through ssh-core's ssh_execute.py.
+
+    Every cicd-debug verb takes a ``<host>`` first argument, mirroring the other
+    diagnostic plugins: ``local`` runs here, any other alias is forwarded to
+    ssh-core. Only the subprocess boundary changes -- the adapters still see a
+    ``CompletedProcess`` with the remote stdout/stderr/returncode, so all the
+    parsing and failure classification below is shared.
+
+    Raises:
+        ProviderUnavailable: ssh-core's ssh_execute.py is missing, or the
+            transport reported auth/network/timeout/dependency failures.
+    """
+    ssh_execute = ssh_core_script("ssh_execute.py")
+    if not ssh_execute.is_file():
+        raise ProviderUnavailable(
+            "ssh-core is required for a remote host; install the ssh-core "
+            f"plugin or set DEVOPS_SSH_CORE_DIR (looked for {ssh_execute})"
+        )
+
+    command = " ".join(shlex.quote(part) for part in argv)
+    if cwd:
+        command = f"cd {shlex.quote(cwd)} && {command}"
+    ssh_argv = [
+        sys.executable,
+        str(ssh_execute),
+        host,
+        command,
+        "--json",
+        "--timeout",
+        str(timeout),
+    ]
+    try:
+        proc = subprocess.run(
+            ssh_argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout + 30,
+            env=msys_safe_env(),
+            check=False,
+            shell=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CliTimeoutError(
+            f"ssh_execute timed out after {timeout + 30}s for {host}: {argv[0]}"
+        ) from exc
+
+    try:
+        envelope = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise ApiUnexpectedError(
+            f"ssh_execute produced non-JSON output for {host}: {exc}; "
+            f"stderr={proc.stderr[:200]!r}"
+        ) from exc
+
+    failure_class = (envelope.get("data") or {}).get("failure_class")
+    if failure_class in {"auth", "host_key"}:
+        raise AuthError(str(envelope.get("stderr") or failure_class))
+    if failure_class == "network":
+        raise NetworkError(str(envelope.get("stderr") or failure_class))
+    if failure_class == "timeout":
+        raise CliTimeoutError(str(envelope.get("stderr") or failure_class))
+    if failure_class == "dependency_missing" or int(envelope.get("exit_code", 0)) == _EXIT_DEPENDENCY_MISSING:
+        raise ProviderUnavailable(str(envelope.get("stderr") or failure_class))
+
+    return CompletedProcess(
+        returncode=int(envelope.get("exit_code", 0)),
+        stdout=str(envelope.get("stdout") or ""),
+        stderr=str(envelope.get("stderr") or ""),
+    )
+
+
+def preflight_provider(provider: str, host: str = LOCAL_HOST, *, timeout: int = 20) -> None:
+    """Fail fast when the CLI is missing or not authenticated on ``host``.
+
+    A remote host has its own ``gh``/``glab`` install and its own credentials:
+    a working local login means nothing there. Without this check the first
+    real API call fails with a generic 401 several seconds later, which reads
+    like "the pipeline is broken" instead of "the runner box is not logged in".
+
+    Runs ``<cli> auth status`` (the same verb both CLIs provide) and raises:
+
+    * :class:`ProviderUnavailable` when the binary is missing
+    * :class:`AuthError` when it exists but is not logged in
+
+    A green preflight is not a promise that the token can see the requested
+    repo; it only rules out the "nothing is set up here" case.
+    """
+    argv = [provider, "auth", "status"]
+    result = run_cli(
+        argv, timeout=timeout, host=host
+    )
+    combined = f"{result.stdout}\n{result.stderr}".lower()
+    if result.returncode == 0:
+        return
+    if "not logged" in combined or "no oauth token" in combined or "unauthorized" in combined:
+        raise AuthError(
+            f"{provider} is not authenticated on host {host!r}; run "
+            f"`{provider} auth login` there (a local login does not carry over)"
+        )
+    if "command not found" in combined or "not recognized" in combined:
+        raise ProviderUnavailable(f"{provider} is not installed on host {host!r}")
+    # Unknown failure: leave the real call to surface it with full context.
+    return
+
+
 def resolve_provider(
-    name: str, gh_bin: str | None = None, glab_bin: str | None = None
+    name: str,
+    gh_bin: str | None = None,
+    glab_bin: str | None = None,
+    host: str = LOCAL_HOST,
 ) -> ProviderAdapter:
-    """Resolve provider adapter by name, with binary override support."""
+    """Resolve an adapter by name, with binary override and host routing.
+
+    ``host == "local"`` (the default) keeps the v1.0 behaviour: the CLI runs on
+    this machine. Any other value routes every gh/glab invocation through
+    ssh-core, which is what the rest of the marketplace does.
+    """
     if name == "gh":
         binary_path = _resolve_binary("gh", gh_bin, "GH_BIN")
-        if not binary_path:
+        if not binary_path and host == LOCAL_HOST:
             raise ProviderUnavailable("gh binary not found")
-        return GhAdapter(binary_path)
-    elif name == "glab":
+        return GhAdapter(binary_path or Path("gh"), host=host)
+    if name == "glab":
         binary_path = _resolve_binary("glab", glab_bin, "GLAB_BIN")
-        if not binary_path:
+        if not binary_path and host == LOCAL_HOST:
             raise ProviderUnavailable("glab binary not found")
-        return GlabAdapter(binary_path)
-    else:
-        raise ValueError(f"Unknown provider: {name}")
+        return GlabAdapter(binary_path or Path("glab"), host=host)
+    raise ValueError(f"Unknown provider: {name}")
+
+
+def resolve_remote_binary(name: str, host: str, arg_override: str | None, env_var: str) -> Path:
+    """Resolve a gh/glab path for a *remote* host.
+
+    The local ``shutil.which`` answer is meaningless on the other end, so the
+    override/env contract is preserved and the bare binary name is used
+    otherwise -- ssh-core runs the command through the remote shell, where PATH
+    resolves it.
+    """
+    if arg_override:
+        return Path(arg_override)
+    env_val = os.getenv(env_var)
+    if env_val:
+        return Path(env_val)
+    return Path(name)
+
+
+_PROVIDERS = frozenset({"gh", "glab"})
+
+
+def split_host_argv(argv: list[str]) -> tuple[str, list[str]]:
+    """Split the optional leading ``<host>`` off a cicd-debug argv.
+
+    Every other diagnostic plugin in this marketplace takes ``<host>`` as its
+    first positional argument (``local`` means "this machine", anything else is
+    an ssh-core alias). cicd-debug shipped without one, so it could only ever
+    inspect the machine it ran on.
+
+    The provider name starts the legacy form, which makes the split
+    unambiguous and backward compatible::
+
+        pipeline_analyzer.py gh 123                 -> ("local", ["gh", "123"])
+        pipeline_analyzer.py lab-240 gh 123         -> ("lab-240", ["gh", "123"])
+
+    Returns:
+        ``(host, remaining_argv)``. ``host`` is ``"local"`` when no host token
+        was supplied.
+    """
+    if argv and argv[0] not in _PROVIDERS and not argv[0].startswith("-"):
+        return argv[0], argv[1:]
+    return LOCAL_HOST, argv
 
 
 def _map_gh_error(stderr: str) -> None:
@@ -488,16 +672,38 @@ def _normalize_glab_queued_run(row: Any) -> QueuedRun:
     )
 
 
-class GhAdapter:
-    """GitHub Actions adapter via gh CLI."""
+class _HostRouted:
+    """Mixin: pass the adapter's host down to :func:`run_cli`."""
 
-    def __init__(self, binary_path: Path):
+    def __init__(self, binary_path: Path, host: str = LOCAL_HOST) -> None:
         self.binary = binary_path
+        self.host = host
+
+    def run_cli(
+        self,
+        argv: list[str],
+        *,
+        timeout: int = 120,
+        env_overrides: dict[str, str] | None = None,
+        cwd: Path | None = None,
+    ) -> CompletedProcess:
+        """Run ``argv`` locally, or on the configured host via ssh-core."""
+        return run_cli(
+            argv,
+            timeout=timeout,
+            env_overrides=env_overrides,
+            cwd=cwd,
+            host=self.host,
+        )
+
+
+class GhAdapter(_HostRouted):
+    """GitHub Actions adapter via gh CLI."""
 
     def fetch_run(self, run_id: str, project: str | None) -> dict[str, Any]:
         """Fetch GitHub Actions run metadata."""
         argv = [str(self.binary), "run", "view", run_id, "--json"]
-        result = run_cli(argv, timeout=30)
+        result = self.run_cli(argv, timeout=30)
         if result.returncode != 0:
             _map_gh_error(result.stderr)
         return json.loads(result.stdout)
@@ -516,7 +722,7 @@ class GhAdapter:
                 "--job",
                 job_id,
             ]
-        result = run_cli(argv, timeout=60)
+        result = self.run_cli(argv, timeout=60)
         if result.returncode != 0:
             _map_gh_error(result.stderr)
         return result.stdout
@@ -540,7 +746,7 @@ class GhAdapter:
                 "databaseId",
             ]
         )
-        result = run_cli(argv, timeout=30)
+        result = self.run_cli(argv, timeout=30)
         if result.returncode != 0:
             return None  # Graceful degrade
         runs = json.loads(result.stdout)
@@ -550,7 +756,7 @@ class GhAdapter:
         """List GitHub Actions workflow YAML files."""
         owner, repo = project.split("/")
         argv = [str(self.binary), "api", f"repos/{owner}/{repo}/actions/workflows"]
-        result = run_cli(argv, timeout=30)
+        result = self.run_cli(argv, timeout=30)
         workflows = json.loads(result.stdout)
         files = []
         for wf in workflows.get("workflows", []):
@@ -560,7 +766,7 @@ class GhAdapter:
                 "api",
                 f"repos/{owner}/{repo}/contents/{path}",
             ]
-            api_result = run_cli(api_argv, timeout=30)
+            api_result = self.run_cli(api_argv, timeout=30)
             content = json.loads(api_result.stdout)
             decoded = base64.b64decode(content["content"])
             files.append((path, decoded))
@@ -594,7 +800,7 @@ class GhAdapter:
         return [_normalize_gh_queued_run(row) for row in rows[:limit]]
 
     def _run_json(self, argv: list[str], *, timeout: int = 120) -> Any:
-        result = run_cli(argv, timeout=timeout)
+        result = self.run_cli(argv, timeout=timeout)
         if result.returncode != 0:
             _map_gh_error(result.stderr)
         return _json_loads(result.stdout, argv[1] if len(argv) > 1 else "gh")
@@ -745,7 +951,7 @@ class GhAdapter:
         if scope_kind != "repo":
             return []
         owner, repo = scope_value.split("/", 1)
-        list_result = run_cli(
+        list_result = self.run_cli(
             [str(self.binary), "api", f"repos/{owner}/{repo}/contents/.github/workflows"],
             timeout=60,
         )
@@ -786,18 +992,15 @@ class GhAdapter:
         return files
 
 
-class GlabAdapter:
+class GlabAdapter(_HostRouted):
     """GitLab CI adapter via glab CLI."""
-
-    def __init__(self, binary_path: Path):
-        self.binary = binary_path
 
     def fetch_run(self, run_id: str, project: str | None) -> dict[str, Any]:
         """Fetch GitLab CI pipeline metadata."""
         argv = [str(self.binary), "ci", "view", run_id, "--output", "json"]
         if project:
             argv.extend(["--repo", project])
-        result = run_cli(argv, timeout=30)
+        result = self.run_cli(argv, timeout=30)
         if result.returncode != 0:
             _map_glab_error(result.stderr)
         return json.loads(result.stdout)
@@ -806,7 +1009,7 @@ class GlabAdapter:
         """Fetch GitLab CI job log."""
         # glab has no --log-failed equivalent; fetch full log
         argv = [str(self.binary), "ci", "trace", job_id]
-        result = run_cli(argv, timeout=60)
+        result = self.run_cli(argv, timeout=60)
         if result.returncode != 0:
             _map_glab_error(result.stderr)
         return result.stdout
@@ -826,7 +1029,7 @@ class GlabAdapter:
             "--output",
             "json",
         ]
-        result = run_cli(argv, timeout=30)
+        result = self.run_cli(argv, timeout=30)
         if result.returncode != 0:
             return None
         pipelines = json.loads(result.stdout)
@@ -866,7 +1069,7 @@ class GlabAdapter:
         return [_normalize_glab_queued_run(row) for row in rows[:limit]]
 
     def _run_json(self, argv: list[str], *, timeout: int = 120) -> Any:
-        result = run_cli(argv, timeout=timeout)
+        result = self.run_cli(argv, timeout=timeout)
         if result.returncode != 0:
             _map_glab_error(result.stderr)
         return _json_loads(result.stdout, argv[1] if len(argv) > 1 else "glab")
@@ -924,7 +1127,7 @@ class GlabAdapter:
         default_branch = "main"
         if isinstance(meta, dict) and isinstance(meta.get("default_branch"), str):
             default_branch = meta["default_branch"]
-        file_result = run_cli(
+        file_result = self.run_cli(
             [
                 str(self.binary),
                 "api",
@@ -957,4 +1160,7 @@ def _build_help_parser() -> argparse.ArgumentParser:
 
 
 if __name__ == "__main__":
+    _early = handle_version("lib_cicd.py")
+    if _early is not None:
+        raise SystemExit(_early)
     _build_help_parser().parse_args()

@@ -20,23 +20,29 @@ The alias is **not** redacted. The alias is the handle the user already chose to
 
 ### Secret regex catalog
 
-Applied to every stdout/stderr/string we forward. Hits are replaced with `<redacted-secret:<kind>>`:
+Applied to every stdout/stderr/string we forward. The table below is the
+**actual** default catalog in `scripts/lib/redact.py`; the replacement marker
+is the `replace_with` column there (for example `[REDACTED-AWS-ACCESS-KEY]`).
 
-| Kind | Pattern (shorthand) |
-|---|---|
-| `aws_access_key` | `AKIA[0-9A-Z]{16}` |
-| `aws_secret` | 40-char base64 after `aws_secret_access_key`-ish context |
-| `github_pat` | `gh[pousr]_[A-Za-z0-9]{36,}` |
-| `gitlab_pat` | `glpat-[A-Za-z0-9_-]{20}` |
-| `slack_token` | `xox[abprs]-[A-Za-z0-9-]+` |
-| `jwt` | `eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+` |
-| `private_key_block` | `-----BEGIN (RSA|EC|OPENSSH|PGP) PRIVATE KEY-----` |
-| `generic_password_env` | `(PASSWORD|PASSWD|SECRET|TOKEN)=[^\s]+` |
-| `bearer` | `Bearer [A-Za-z0-9._\-+/=]{20,}` |
-| `mongodb_uri` | `mongodb(\+srv)?://[^\s]+` |
-| `postgres_uri` | `postgres(ql)?://[^\s]+` |
+| Kind | Pattern | Replaced with |
+|---|---|---|
+| `private_key_block` | a whole `-----BEGIN … PRIVATE KEY-----` … `-----END … PRIVATE KEY-----` block, body included | `[REDACTED-PRIVATE-KEY-BLOCK]` |
+| `private_key_header` | a lone BEGIN line (truncated transcript) | `[REDACTED-PRIVATE-KEY-HEADER]` |
+| `aws_access_key` | `AKIA[0-9A-Z]{16}` | `[REDACTED-AWS-ACCESS-KEY]` |
+| `aws_secret` | `aws_secret_access_key = <40 base64 chars>` (env or HCL form) | `[REDACTED-AWS-SECRET-KEY]` |
+| `github_pat` | `gh[pousr]_[A-Za-z0-9]{36,}` — PAT, OAuth, user, server, refresh | `[REDACTED-GH-TOKEN]` |
+| `gitlab_pat` | `glpat-[A-Za-z0-9_-]{20,}` | `[REDACTED-GITLAB-TOKEN]` |
+| `slack_token` | `xox[abprs]-[A-Za-z0-9-]{10,}` | `[REDACTED-SLACK-TOKEN]` |
+| `jwt` | `eyJ…` three-part token | `[REDACTED-JWT]` |
+| `bearer` | `Bearer <20+ token chars>` | `Bearer [REDACTED-BEARER]` |
+| `generic_password_env` | `PASSWORD=`/`PASSWD=`/`SECRET=`/`TOKEN=` followed by a value | `<NAME>=[REDACTED]` |
+| `mongodb_uri` | `mongodb://…` / `mongodb+srv://…` | `mongodb://[REDACTED]` |
+| `postgres_uri` | `postgres://…` / `postgresql://…` | `postgres://[REDACTED]` |
 
-When a hit overlaps with another, the **longer** match wins.
+Patterns are applied **in catalog order**, so the whole-block rule runs before
+the header-only fallback and a complete key never leaves its body behind.
+There is no longest-match arbitration between unrelated patterns; if you add
+overlapping rules, put the more specific one first.
 
 ### Paths we treat as sensitive
 
@@ -67,13 +73,16 @@ Users can add to the catalog in `~/.devops/redact.json`:
     {
       "kind": "internal_api_key",
       "regex": "MYCO-[A-Z0-9]{32}",
-      "replacement": "<redacted-secret:internal_api_key>"
+      "replace_with": "[REDACTED-INTERNAL]"
     }
   ]
 }
 ```
 
-Loaded at script start. Invalid regexes are rejected (the script refuses to run rather than fail open).
+A user catalog **replaces** the built-in defaults (it is not a merge). A
+missing file falls back to the defaults; corrupt JSON or a regex that fails to
+compile prints a warning on stderr and falls back per-pattern rather than
+failing open silently.
 
 ## Things redaction is *not*
 

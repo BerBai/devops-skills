@@ -32,17 +32,58 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Default pattern catalog — design §4.2 verbatim.
+# Default pattern catalog — design §4.2, extended to match what
+# references/redact.md documents (the doc and the table used to disagree: the
+# doc listed 11 kinds, this list held 4).
+#
+# Order matters: the whole-key rule runs before the header-only fallback, so a
+# complete PEM block is replaced in one piece instead of leaving the private
+# half in the transcript.
 _DEFAULT_PATTERNS: list[dict[str, str]] = [
+    {
+        # Full PEM block, including the body. Without (?s) + ".*?" only the
+        # BEGIN line was redacted and the key material survived verbatim.
+        "kind": "private_key_block",
+        "regex": (
+            r"(?s)-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+            r".*?-----END (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+        ),
+        "replace_with": "[REDACTED-PRIVATE-KEY-BLOCK]",
+    },
+    {
+        # Truncated transcript: only the header made it out.
+        "kind": "private_key_header",
+        "regex": r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----",
+        "replace_with": "[REDACTED-PRIVATE-KEY-HEADER]",
+    },
     {
         "kind": "aws_access_key",
         "regex": r"AKIA[0-9A-Z]{16}",
         "replace_with": "[REDACTED-AWS-ACCESS-KEY]",
     },
     {
-        "kind": "github_token",
-        "regex": r"gh[pus]_[A-Za-z0-9]{36}",
+        "kind": "aws_secret",
+        "regex": (
+            r"(?i)aws_?secret_?access_?key\s*[:=]\s*[\"']?[A-Za-z0-9/+=]{40}"
+        ),
+        "replace_with": "[REDACTED-AWS-SECRET-KEY]",
+    },
+    {
+        # gh[pousr]_ covers PAT (ghp), OAuth (gho), user-to-server (ghu),
+        # server-to-server (ghs) and refresh (ghr) tokens.
+        "kind": "github_pat",
+        "regex": r"gh[pousr]_[A-Za-z0-9]{36,}",
         "replace_with": "[REDACTED-GH-TOKEN]",
+    },
+    {
+        "kind": "gitlab_pat",
+        "regex": r"glpat-[A-Za-z0-9_\-]{20,}",
+        "replace_with": "[REDACTED-GITLAB-TOKEN]",
+    },
+    {
+        "kind": "slack_token",
+        "regex": r"xox[abprs]-[A-Za-z0-9-]{10,}",
+        "replace_with": "[REDACTED-SLACK-TOKEN]",
     },
     {
         "kind": "jwt",
@@ -52,9 +93,27 @@ _DEFAULT_PATTERNS: list[dict[str, str]] = [
         "replace_with": "[REDACTED-JWT]",
     },
     {
-        "kind": "rsa_private",
-        "regex": r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----",
-        "replace_with": "[REDACTED-PRIVATE-KEY-HEADER]",
+        "kind": "bearer",
+        "regex": r"(?i)bearer\s+[A-Za-z0-9._\-+/=]{20,}",
+        "replace_with": "Bearer [REDACTED-BEARER]",
+    },
+    {
+        # A literal ``PASSWORD=...`` line. The negative lookahead keeps this
+        # from re-redacting a value a more specific pattern already replaced,
+        # which would both hide the specific marker and double-count the hit.
+        "kind": "generic_password_env",
+        "regex": r"(?i)\b(PASSWORD|PASSWD|SECRET|TOKEN)=((?!\[REDACTED)[^\s\"']+)",
+        "replace_with": r"\1=[REDACTED]",
+    },
+    {
+        "kind": "mongodb_uri",
+        "regex": r"mongodb(?:\+srv)?://[^\s\"']+",
+        "replace_with": "mongodb://[REDACTED]",
+    },
+    {
+        "kind": "postgres_uri",
+        "regex": r"postgres(?:ql)?://[^\s\"']+",
+        "replace_with": "postgres://[REDACTED]",
     },
 ]
 

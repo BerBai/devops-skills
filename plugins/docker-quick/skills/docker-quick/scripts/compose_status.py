@@ -61,6 +61,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import _runtime
+import _ssh_core_locator as _locator
+from _version import add_version_flag, handle_version
+
 # --- Constants ---------------------------------------------------------------
 
 LIST_TIMEOUT_S = 30
@@ -102,6 +106,7 @@ def _envelope(
 
 
 def _emit(result: dict[str, Any], as_json: bool) -> None:
+    _runtime.utf8_stdio()
     if as_json:
         json.dump(result, sys.stdout, ensure_ascii=False)
         sys.stdout.write("\n")
@@ -120,26 +125,12 @@ def _emit(result: dict[str, Any], as_json: bool) -> None:
 
 
 def _ssh_execute_path() -> Path:
-    """Locate ssh-core's ssh_execute.py relative to this file.
+    """Locate ssh-core's ssh_execute.py (honours DEVOPS_SSH_CORE_DIR).
 
-    Layout::
-
-        plugins/ssh-core/skills/ssh-core/scripts/ssh_execute.py
-        plugins/docker-quick/skills/docker-quick/scripts/compose_status.py
-                                                                         ^ here
-
-    parents[0]=scripts, [1]=docker-quick (skill), [2]=skills,
-    [3]=docker-quick (plugin), [4]=plugins.
+    Only used for the remote route; callers check ``.exists()`` and emit a
+    precondition envelope when ssh-core is not installed alongside.
     """
-    here = Path(__file__).resolve()
-    return (
-        here.parents[4]
-        / "ssh-core"
-        / "skills"
-        / "ssh-core"
-        / "scripts"
-        / "ssh_execute.py"
-    )
+    return _locator.ssh_core_script("ssh_execute.py")
 
 
 # --- Local execution --------------------------------------------------------
@@ -150,12 +141,23 @@ def _run_local(
     timeout: int,
     cwd: str | None = None,
 ) -> dict[str, Any]:
-    """Run a docker/compose command directly on this host (no ssh)."""
+    """Run a docker/compose command directly on this host (no ssh).
+
+    The two "not found" failures are separated because they have different
+    fixes and both used to be ``remote_error`` (DQ-01):
+
+    * ``NotADirectoryError`` (Windows) / ``FileNotFoundError`` whose
+      ``filename`` is the cwd (POSIX) → ``project_dir_invalid``.
+    * ``FileNotFoundError`` for the executable → ``dependency_missing``:
+      install docker, don't go looking at the network.
+    """
     try:
         proc = subprocess.run(
             argv,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
             cwd=cwd,
@@ -170,19 +172,28 @@ def _run_local(
             ),
             data={"failure_class": "timeout"},
         )
-    except FileNotFoundError as e:
+    except (FileNotFoundError, NotADirectoryError) as e:
+        # A bad cwd and a missing binary raise the same FileNotFoundError on
+        # Windows (errno 2, filename=None), so the ambiguity is resolved by
+        # _runtime.classify_spawn_failure -- which checks the cwd on disk.
+        failure = _runtime.classify_spawn_failure(e, cwd)
+        if failure == "project_dir_invalid":
+            return _envelope(
+                False,
+                EXIT_FAIL,
+                stderr=(
+                    f"compose_status: project dir is not a directory: {cwd}\n"
+                ),
+                data={"failure_class": "project_dir_invalid"},
+            )
         return _envelope(
             False,
-            EXIT_FAIL,
-            stderr=f"compose_status: command not found: {e}\n",
-            data={"failure_class": "remote_error"},
-        )
-    except NotADirectoryError as e:
-        return _envelope(
-            False,
-            EXIT_FAIL,
-            stderr=f"compose_status: cwd not a directory: {e}\n",
-            data={"failure_class": "remote_error"},
+            _runtime.EXIT_DEPENDENCY_MISSING,
+            stderr=(
+                f"compose_status: no '{argv[0]}' executable on this host. "
+                "Install docker, or target a remote alias that has it.\n"
+            ),
+            data={"failure_class": failure},
         )
     return _envelope(
         proc.returncode == 0,
@@ -220,6 +231,8 @@ def _run_via_ssh_execute(
             argv,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout + connect_timeout + 5,
             check=False,
         )
@@ -585,6 +598,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit the shared JSON output contract on stdout",
     )
+    add_version_flag(p)
     return p
 
 
@@ -592,8 +606,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("compose_status.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
 
+    # Step 0: compose is docker-only (`podman-compose` is out of scope), so
+    # this only needs the missing-binary case to say `dependency_missing`
+    # instead of `remote_error` -- handled inside `_run_local`.
     # Step 1: list services via `docker compose ps`.
     list_env = _list_services(
         args.host, args.project_dir, args.connect_timeout

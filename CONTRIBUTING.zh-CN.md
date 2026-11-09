@@ -37,38 +37,37 @@ devops-skills/
 5. **`subprocess.run(list, ...)`，永不传 shell 字符串。** 不要例外，哪怕输入"可信"。测试用例里专门塞了 `;`、`&&` 和 `` ` ``。
 6. **skill 输出不要 emoji**（除非用户显式要求）。Skill markdown 同样保持无 emoji。
 
-## V1 状态
+## 状态
 
 按已接受的 rollout 口径，V1 已完成：
 
 - 8 个 plugin 的 V1 CLI surface 均已发布。
-- 每个脚本都支持 `--help`；每个运行型脚本都支持 JSON 输出契约。
+- 每个公开脚本都支持 `--help`；每个运行型脚本都支持 JSON 输出契约。
 - 已发布脚本具备 unit 覆盖；依赖环境的 integration 测试保持 skip-safe。
-- `ssh-core` 现已同步自独立版 1.4.0（ADR-004）。传输层包含 `ssh_session.py`、`ssh_daemon.py`、`selfcheck.py` 和 `audit.py`；其他 plugin 仍通过 `ssh_execute.py` shell out。
+- `ssh-core` 已跟踪独立版 **1.5.0**（ADR-004、ADR-005）。它是本 marketplace 的「远程连接子功能」：传输、认证、会话、隧道、传输文件、`~/.ssh/config` CRUD，以及 `selfcheck.py` / `doctor.py` 能力探针。其他 plugin 只通过 `ssh_execute.py` shell out，不 import 它。
 
-V1 脚本清单：
+Plugin 能力清单：
 
-| Plugin | V1 状态 |
+| Plugin | 已发布 |
 |---|---|
-| `ssh-core` | `ssh_execute`、`ssh_session`、`ssh_cluster`、`ssh_tunnel`、`ssh_server_transfer`、`ssh_config_manager`、`ssh_upload`、`ssh_download`、`deploy_pubkey`、`ssh_daemon`、`selfcheck`、`audit` 已发布至 1.4.0。 |
-| `ssh-guarded` | request drafters、`run_request`、`exec_detached`、`scan_software`、`redact_check` 已发布。 |
-| `remote-debug` | `diagnose_host`、`tail_log`、`port_check`、`compare_across_hosts` 已发布。 |
-| `k8s-debug` | `check_namespace`、`diagnose_pod`、`cluster_health`、`helm_status` 已发布。 |
-| `docker-quick` | `inspect_container`、`image_audit`、`compose_status` 已发布。 |
-| `log-aggregator` | `tail_multi`、`correlate`、`grep_across_sources` 已发布。 |
-| `iac-state` | `state_inspect`、`drift_check`、`module_validate` 已发布。 |
-| `cicd-debug` | `pipeline_analyzer`、`runner_check`、`secret_scope_audit` 已发布。 |
+| `ssh-core` | `ssh_execute`、`ssh_session`、`ssh_slice`、`ssh_cluster`、`ssh_tunnel`、`ssh_server_transfer`、`ssh_config_manager`、`ssh_upload`、`ssh_download`、`deploy_pubkey`、`ssh_daemon`、`selfcheck`、`doctor`、`audit`（1.5.0），以及 `run.cmd` / `run.sh` 启动器。 |
+| `ssh-guarded` | request drafters、`run_request`、`exec_detached`、`scan_software`、`redact_check`、`gc_artifacts`。 |
+| `remote-debug` | `diagnose_host`、`tail_log`、`port_check`、`compare_across_hosts` —— 均支持 `local`；`diagnose_host` 有 Windows 探针族（`--target-os`），`tail_log` 支持流式 `--follow`，`port_check` 支持 `--udp`。 |
+| `k8s-debug` | `check_namespace`、`diagnose_pod`、`cluster_health`、`helm_status`（pending release 会列出卡住的 pod）。 |
+| `docker-quick` | `inspect_container`、`image_audit`、`compose_status`。 |
+| `log-aggregator` | `tail_multi`、`correlate`、`grep_across_sources`。 |
+| `iac-state` | `state_inspect`、`drift_check`、`module_validate` —— 静态 HCL 分析对远程模块同样可用（经 ssh-core 取文件、本机解析）。 |
+| `cicd-debug` | `pipeline_analyzer`、`runner_check`、`secret_scope_audit` —— 可选首参 `<host>` 会在远端跑 `gh`/`glab`，并先做一次登录预检。 |
 
-## V1.1 路线图
+## 路线图
 
 优先推进能解锁多个后续能力的传输层基础工作：
 
-1. `ssh-core`：保持 1.4.0 源/目标同步最新，并在发布前用插件测试验证新的运行时修复。
+1. `ssh-core`：保持插件树与独立版发布字节一致（当前 1.5.0），每次同步后重跑插件测试。
 2. `ssh_server_transfer.py`：在更多主机类型上验证 named-OpenSSH/tar/rsync 模式。
-3. `ssh_tunnel.py`：实现 `--idle-timeout`，并在连接复用决策后重新评估 Windows 支持。
-4. 长时间日志 follow：改进 `tail_multi.py`、`tail_log.py` 等 follow / reconnect 工作流。
-5. 脱敏强化：多行 private key 缓冲、默认 catalog 导出、可选 regex timeout 防护。
-6. 插件级增强：CI secret-scope 深层风险标记、request upload-root 可配置，以及其他已记录的 V1.1 follow-up。
+3. `ssh_tunnel.py`：连接复用决策之后重新评估 Windows 支持（`--idle-timeout` 已在 1.4.0 落地）。
+4. 脱敏强化：默认 catalog 导出、可选 regex timeout 防护。
+5. 插件级增强：CI secret-scope 深层风险标记、request upload-root 可配置，以及其他已记录的 follow-up。
 
 ## 环境准备
 
@@ -86,8 +85,30 @@ uv sync --all-extras
 pytest tests/
 ```
 
-CI 最低要求：
+CI 在 Linux 上跑三个 job（`.github/workflows/ci.yml`），覆盖四条检查：
 
 1. JSON-lint 每个 `marketplace.json` 和 `plugin.json`
-2. 检查每个 `SKILL.md` 是否含必备字段（`description`、`When to use`、`Workflow`）
-3. 对每个脚本 smoke 测 `--help`（所有脚本必须支持）
+2. 检查每个 `SKILL.md` 是否含 `## When to use` 与流程小节（`## Workflow` 或 `## Decision tree`）—— 由 `tests/test_manifests.py` 强制
+3. 对每个公开脚本 smoke 测 `--help`（私有 `_*.py` 辅助模块豁免）
+4. 断言各 plugin 内的内嵌辅助文件与模板一致 —— 由 `tests/test_manifests.py::test_vendored_locator_matches_template` 与 `::test_vendored_version_helper_matches_template` 强制
+
+## 内嵌文件
+
+有两个辅助文件被复制进多个 plugin，因为 plugin 独立分发、不能跨 plugin import
+（见 `docs/architecture.md`），但靠手工同步多份副本迟早会把真实修复悄悄改回去。
+两者各由一份模板生成：
+
+| 模板 | 副本数 | 作用 |
+|---|---|---|
+| `scripts/templates/_ssh_core_locator.py` | 7 | 定位 ssh-core 安装位置，所有远端调用都依赖它 |
+| `scripts/templates/_version.py` | 7 | 从 plugin manifest 回答 `--version` |
+
+```bash
+# 只改模板，然后重新渲染所有副本
+$EDITOR scripts/templates/_ssh_core_locator.py
+python scripts/sync_vendored.py
+python scripts/sync_vendored.py --check     # CI 跑的就是这条
+```
+
+模板与渲染后的副本要一起提交。**不要原地改副本**：副本一旦与模板不一致 CI 就会失败，
+正确的修法是重新渲染，而不是把旧文件覆盖回去。

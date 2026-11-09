@@ -24,6 +24,12 @@ Per-script failure_class namespace (exit codes 90-99):
     92  pair_unmatched
     93-99 reserved
 
+Shared log-aggregator failure classes (table in ``lib/envelope.py``):
+    40  source_spec_invalid
+    41  partial_fetch           (any source failed to fetch — see SKILL.md)
+    44  no_sources_resolved
+    124 ssh idle/connect timeout (propagated)
+
 See:
     .trellis/tasks/05-25-log-aggregator-correlate/prd.md
     .trellis/tasks/05-25-log-aggregator-correlate/design.md
@@ -45,21 +51,15 @@ from typing import Any
 
 # Make ``lib`` importable when run directly: ``python correlate.py ...``.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lib import clock_skew, fetchers, filters, source_spec, time_norm  # type: ignore[import-not-found]  # noqa: E402
+from lib import clock_skew, envelope as envelope_lib  # type: ignore[import-not-found]  # noqa: E402
+from lib import fetchers, filters, source_spec, time_norm  # type: ignore[import-not-found]  # noqa: E402
 from lib.fetchers import FetcherError, RawLine  # type: ignore[import-not-found]  # noqa: E402
 from lib.source_spec import ResolvedSource, SpecError  # type: ignore[import-not-found]  # noqa: E402
+from _version import add_version_flag, handle_version
 
-_EXIT_CODES: dict[str | None, int] = {
-    None: 0,
-    "anchor_not_found": 90,
-    "window_invalid": 91,
-    "pair_unmatched": 92,
-    "source_spec_invalid": 40,
-    "fetcher_failed": 41,
-    "no_sources_resolved": 44,
-    "_generic": 1,
-    "_timeout": 124,
-}
+#: Shared with the other two CLIs (see lib/envelope.py); copied so a caller
+#: cannot mutate the contract for its siblings.
+_EXIT_CODES: dict[str | None, int] = dict(envelope_lib.EXIT_CODES)
 
 _HUMAN_HINTS: dict[str, str] = {
     "anchor_not_found": "No line matched --anchor in the --since window. Try widening --since.",
@@ -67,6 +67,8 @@ _HUMAN_HINTS: dict[str, str] = {
     "pair_unmatched": "--pair-mode needs at least 2 anchor matches.",
     "source_spec_invalid": "Check source spec syntax: <scheme>://<host>/<payload>[?k=v].",
     "no_sources_resolved": "Brace/glob expansion produced 0 sources; check --sources.",
+    "partial_fetch": "One or more sources could not be fetched; the window only "
+                     "covers the sources that answered. See data.failed_fetchers.",
 }
 
 _WINDOW_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhd])$")
@@ -117,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pair-mode", action="store_true", help="Anchor matches twice; emit duration")
     p.add_argument("--since", default="1h", help="How far back to search for the anchor")
     p.add_argument("--json", action="store_true")
+    add_version_flag(p)
     return p
 
 
@@ -270,7 +273,7 @@ def _build_success_envelope(
             3,
         )
 
-    return {
+    envelope = {
         "success": True,
         "exit_code": 0,
         "stdout": "",
@@ -286,14 +289,58 @@ def _build_success_envelope(
             "summary": summary,
             "sources": [src.source_tag for src in sources],
             "clock_skew_ms": skew,
-            "failed_fetchers": [
-                {"source": failure.source_tag, "error": failure.error}
-                for failure in failed_fetchers
-            ],
+            "failed_fetchers": [],
             "failure_class": None,
             "elapsed_s": round(elapsed_s, 3),
         },
     }
+    # DEVOPS-BUG-011/012: a missing source must never look like a clean run.
+    return envelope_lib.apply_fetch_failures(envelope, failed_fetchers)
+
+
+def _build_no_anchor_envelope(
+    *,
+    reason: str,
+    window_s: float,
+    sources: list[ResolvedSource],
+    skew: dict[str, int | None],
+    failed_fetchers: list[FetcherFailure],
+    elapsed_s: float,
+) -> dict[str, Any]:
+    """Envelope for "no anchor" / "pair unmatched" when a source was missing.
+
+    With a failed fetcher in play, "the anchor is not in the window" is not a
+    sound conclusion — the missing source may have had the match. The run is
+    therefore reported as ``partial_fetch`` (the shared rule) instead of a
+    confident ``anchor_not_found`` / ``pair_unmatched``; ``data.summary.reason``
+    still says what the search itself found.
+    """
+    envelope = {
+        "success": False,
+        "exit_code": envelope_lib.PARTIAL_FETCH_EXIT_CODE,
+        "stdout": "",
+        "stderr": "",
+        "data": {
+            "anchor": None,
+            "window": {"seconds": window_s},
+            "window_lines": [],
+            "summary": {
+                "sources_with_hits": 0,
+                "events_in_window": 0,
+                "anchor_severity": None,
+                "likely_root_cause_hint": None,
+                "partial_fetch": True,
+                "anchor_found": False,
+                "reason": reason,
+            },
+            "sources": [src.source_tag for src in sources],
+            "clock_skew_ms": skew,
+            "failed_fetchers": [],
+            "failure_class": None,
+            "elapsed_s": round(elapsed_s, 3),
+        },
+    }
+    return envelope_lib.apply_fetch_failures(envelope, failed_fetchers)
 
 
 def _emit_three_sections_human(
@@ -349,16 +396,15 @@ def _emit_failure(
         "stdout": "",
         "stderr": stderr,
         "data": {
-            "sources": args.sources,
+            "sources": getattr(args, "sources", []),
             "anchor": getattr(args, "anchor", None),
             "window": getattr(args, "window", None),
             "since": getattr(args, "since", None),
             "pair_mode": getattr(args, "pair_mode", None),
-            "failure_class": fclass,
-            "failed_fetchers": [
-                {"source": failure.source_tag, "error": failure.error}
-                for failure in (failed_fetchers or [])
-            ],
+            "failure_class": envelope_lib.canonical_failure_class(fclass),
+            "failed_fetchers": envelope_lib.failed_fetcher_records(
+                failed_fetchers or []
+            ),
         },
     }
     if args.json:
@@ -372,7 +418,49 @@ def _emit_failure(
     return exit_code
 
 
+def _emit_no_anchor(
+    *,
+    reason: str,
+    stderr_msg: str,
+    window_s: float,
+    sources: list[ResolvedSource],
+    skew: dict[str, int | None],
+    failed_fetchers: list[FetcherFailure],
+    elapsed_s: float,
+    args: argparse.Namespace,
+) -> int:
+    """Report "no anchor" — unless a source was missing, in which case 41.
+
+    A missing source can hold the very line we are looking for, so
+    ``anchor_not_found`` / ``pair_unmatched`` is only a sound conclusion when
+    every source answered. With a failed fetcher the shared partial-fetch rule
+    wins and ``data.summary.reason`` keeps the specific cause for machines.
+    """
+    if not failed_fetchers:
+        return _emit_failure(reason, _EXIT_CODES[reason], stderr_msg, args)
+    envelope = _build_no_anchor_envelope(
+        reason=reason,
+        window_s=window_s,
+        sources=sources,
+        skew=skew,
+        failed_fetchers=failed_fetchers,
+        elapsed_s=elapsed_s,
+    )
+    if args.json:
+        sys.stdout.write(json.dumps(envelope, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+        return envelope["exit_code"]
+    sys.stderr.write(stderr_msg + ("" if stderr_msg.endswith("\n") else "\n"))
+    for failure in failed_fetchers:
+        sys.stderr.write(f"failed_fetcher: {failure.source_tag}: {failure.error}\n")
+    sys.stderr.write(f"hint: {_HUMAN_HINTS['partial_fetch']}\n")
+    return envelope["exit_code"]
+
+
 def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0915 — CLI orchestration
+    early = handle_version("correlate.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     start_t = time.monotonic()
 
@@ -413,16 +501,26 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0915 — CL
     try:
         anchor = _find_anchor(lines, anchor_re, pair_mode=args.pair_mode)
     except PairUnmatchedError as exc:
-        return _emit_failure(
-            "pair_unmatched", _EXIT_CODES["pair_unmatched"],
-            f"pair_unmatched: {exc}", args, failed_fetchers=failed_fetchers,
+        return _emit_no_anchor(
+            reason="pair_unmatched",
+            stderr_msg=f"pair_unmatched: {exc}",
+            window_s=window_s,
+            sources=sources,
+            skew=skew,
+            failed_fetchers=failed_fetchers,
+            elapsed_s=time.monotonic() - start_t,
+            args=args,
         )
     if anchor is None:
-        return _emit_failure(
-            "anchor_not_found", _EXIT_CODES["anchor_not_found"],
-            "anchor_not_found: no line matched --anchor in --since window",
-            args,
+        return _emit_no_anchor(
+            reason="anchor_not_found",
+            stderr_msg="anchor_not_found: no line matched --anchor in --since window",
+            window_s=window_s,
+            sources=sources,
+            skew=skew,
             failed_fetchers=failed_fetchers,
+            elapsed_s=time.monotonic() - start_t,
+            args=args,
         )
 
     window_lines = _filter_window(lines, anchor, window_s)
@@ -449,7 +547,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0915 — CL
         if failed_fetchers:
             for failure in failed_fetchers:
                 sys.stderr.write(f"failed_fetcher: {failure.source_tag}: {failure.error}\n")
-    return 0
+    return envelope["exit_code"]
 
 
 def _to_anchor(line: NormalizedLine, idx: int) -> Anchor:
@@ -506,10 +604,7 @@ def _canonical_level(level: str) -> str:
 
 
 def _format_fetch_error(exc: BaseException) -> str:
-    if isinstance(exc, FetcherError):
-        tail = exc.stderr_tail.strip().splitlines()[-1] if exc.stderr_tail else ""
-        return f"rc={exc.returncode} {tail}".strip()
-    return f"{type(exc).__name__}: {exc}".strip()
+    return envelope_lib.format_fetch_error(exc)
 
 
 if __name__ == "__main__":

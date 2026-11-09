@@ -4,7 +4,7 @@
 Public surface (locked at v0.2 stub — do NOT add flags without a PRD bump)::
 
     tail_multi.py --sources <spec> [<spec>...]
-        [--follow] [--since <duration>]
+        [--follow] [--since <duration>] [--lines N]
         [--min-level trace|debug|info|warn|error|fatal]
         [--suppress] [--aggressive-suppress]
         [--max-concurrent N]
@@ -31,15 +31,21 @@ Behavior:
     6. Human-mode prefix ``[<source_tag> HH:MM:SS.fff] <body>``; ``--json``
        mode emits NDJSON events + a final envelope summary line.
 
-Per-script failure_class namespace (exit codes 40-49):
+``--lines N`` (default 10000) bounds a non-follow snapshot: ``tail -n N`` for
+``file://``, ``--tail N`` for ``docker://`` / ``kube://``. It has no effect on
+``--follow`` (an unbounded stream) or on ``journal://`` (journalctl has no
+"last N lines" flag; use ``--since``).
+
+Failure classes (exit codes 40-49, table in ``lib/envelope.py``):
     40  source_spec_invalid
-    41  fetcher_failed       (every fetcher failed)
+    41  partial_fetch        (>=1 fetcher failed — see SKILL.md "Output")
     42  clock_skew_failed    (reserved — v1.0 warns only, does not trigger)
     43  normalize_failed     (>50% of lines failed time normalization)
     44  no_sources_resolved  (brace/glob expansion produced 0 sources)
-    45  partial_fetch        (>=1 fetcher failed; warning, exit 0)
-    46-49  reserved
-    124  ssh idle/connect timeout (propagated)
+    124 ssh idle/connect timeout (propagated)
+
+``fetcher_failed`` is the v1.0 name for 41 and is still accepted as an alias;
+the emitted class is always ``partial_fetch`` (DEVOPS-BUG-012).
 
 See:
     .trellis/tasks/05-25-log-aggregator-tail-multi/prd.md      — R1-R12
@@ -70,37 +76,33 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import (  # noqa: E402
     clock_skew,
+    envelope as envelope_lib,
     fetchers,
     filters,
     source_spec,
     time_norm,
 )
-from lib.fetchers import FetcherError, RawLine  # noqa: E402
+from lib.fetchers import DEFAULT_LINES, RawLine  # noqa: E402
+from lib.fetchers import FetcherError  # noqa: E402,F401  (re-exported for callers/tests)
 from lib.source_spec import ResolvedSource, SpecError  # noqa: E402
+from _version import add_version_flag, handle_version
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_EXIT_CODES: dict[str | None, int] = {
-    None: 0,
-    "source_spec_invalid": 40,
-    "fetcher_failed": 41,
-    "clock_skew_failed": 42,
-    "normalize_failed": 43,
-    "no_sources_resolved": 44,
-    "partial_fetch": 0,  # warning class — exit 0, paired failure_class
-    "_generic": 1,
-    "_timeout": 124,
-}
+#: Shared with the other two CLIs so "partial fetch" cannot drift again.
+#: A copy, not the shared object: a caller poking this table must not be able
+#: to change the contract for the other two scripts.
+_EXIT_CODES: dict[str | None, int] = dict(envelope_lib.EXIT_CODES)
 
 _HUMAN_HINTS: dict[str, str] = {
     "source_spec_invalid": "Check source spec syntax: <scheme>://<host>/<payload>[?k=v]",
-    "fetcher_failed": "All fetchers died; see data.failed_fetchers for per-source detail.",
+    "partial_fetch": "One or more fetchers died; the sources that worked are "
+                     "still in the output. See data.failed_fetchers.",
     "clock_skew_failed": "Clock-skew probe failed for all remote hosts.",
     "normalize_failed": ">50% of lines could not be time-normalized.",
     "no_sources_resolved": "Brace/glob expansion produced 0 sources; check --sources.",
-    "partial_fetch": "One or more fetchers died; remaining sources continued.",
 }
 
 _REORDER_MAX_PENDING = 256
@@ -133,6 +135,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Lookback duration or ISO timestamp (default: 5min)",
     )
     p.add_argument(
+        "--lines", type=int, default=DEFAULT_LINES,
+        help=(
+            "How many lines a non-follow snapshot requests: 'tail -n N' for "
+            "file://, '--tail N' for docker:// and kube:// "
+            f"(default: {DEFAULT_LINES}; ignored by --follow and journal://)"
+        ),
+    )
+    p.add_argument(
         "--min-level",
         choices=["trace", "debug", "info", "warn", "error", "fatal"],
         default="trace",
@@ -148,6 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable built-in noise deny-list",
     )
     p.add_argument("--json", action="store_true")
+    add_version_flag(p)
     return p
 
 
@@ -341,7 +352,11 @@ def _run_fetcher(
     timeout = 120 if not args.follow else 600
     try:
         for raw in fetchers.iter_lines(
-            src, since=args.since, follow=args.follow, timeout=timeout,
+            src,
+            since=args.since,
+            follow=args.follow,
+            timeout=timeout,
+            lines=getattr(args, "lines", DEFAULT_LINES),
         ):
             if stop_event.is_set():
                 break
@@ -431,7 +446,7 @@ def _build_envelope(
     elapsed_s: float,
     terminated_by: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    envelope = {
         "success": success,
         "exit_code": exit_code,
         "stdout": "",
@@ -441,9 +456,7 @@ def _build_envelope(
             "clock_skew_ms": skew,
             "events_emitted": events_emitted,
             "failure_class": failure_class,
-            "failed_fetchers": [
-                {"source": tag, "error": err} for tag, err in failed_fetchers
-            ],
+            "failed_fetchers": envelope_lib.failed_fetcher_records(failed_fetchers),
             "lines_in": counters.get("lines_in", 0),
             "lines_dropped": counters.get("dropped", 0),
             "normalize_failed_count": counters.get("normalize_failed", 0),
@@ -451,6 +464,7 @@ def _build_envelope(
             "terminated_by": terminated_by,
         },
     }
+    return envelope
 
 
 def _emit_failure(
@@ -463,7 +477,7 @@ def _emit_failure(
         "stderr": stderr_msg + ("\n" if not stderr_msg.endswith("\n") else ""),
         "data": {
             "sources": args.sources,
-            "failure_class": fclass,
+            "failure_class": envelope_lib.canonical_failure_class(fclass),
             "events_emitted": 0,
             "failed_fetchers": [],
         },
@@ -485,6 +499,9 @@ def _emit_failure(
 
 
 def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915 — single-entry orchestration
+    early = handle_version("tail_multi.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     start_t = time.monotonic()
 
@@ -567,15 +584,15 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915 — single-entr
         terminated_by = "signal"
 
     # 5. failure_class resolution ------------------------------------------
+    # One rule shared with grep_across_sources and correlate (lib/envelope.py):
+    # any failed source -> success=false, exit 41, partial_fetch, and the data
+    # that *was* fetched still ships. "Every fetcher failed" is the same
+    # outcome, not a different class.
     failure_class: str | None = None
     exit_code = 0
-    n_failed = len(failed_fetchers)
-    if n_failed == len(sources) and n_failed > 0:
-        failure_class = "fetcher_failed"
-        exit_code = _EXIT_CODES["fetcher_failed"]
-    elif n_failed > 0:
-        failure_class = "partial_fetch"
-        exit_code = _EXIT_CODES["partial_fetch"]
+    if failed_fetchers:
+        failure_class = envelope_lib.PARTIAL_FETCH
+        exit_code = envelope_lib.exit_code_for(failure_class)
     elif counters["lines_in"] > 0 and (
         counters["normalize_failed"] * 2 > counters["lines_in"]
     ):
@@ -583,7 +600,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915 — single-entr
         exit_code = _EXIT_CODES["normalize_failed"]
 
     envelope = _build_envelope(
-        success=(exit_code == 0),
+        success=(failure_class is None),
         exit_code=exit_code,
         stderr="",
         sources=sources,
@@ -595,15 +612,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915 — single-entr
         elapsed_s=time.monotonic() - start_t,
         terminated_by=terminated_by,
     )
+    if failed_fetchers:
+        # Final authority for the partial-fetch rule; grep_across_sources and
+        # correlate call the same helper, so the three cannot drift again.
+        envelope_lib.apply_fetch_failures(envelope, failed_fetchers)
     writer.summary(envelope)
-    return exit_code
+    return envelope["exit_code"]
 
 
 def _format_fetch_error(exc: BaseException) -> str:
-    if isinstance(exc, FetcherError):
-        tail = exc.stderr_tail.strip().splitlines()[-1] if exc.stderr_tail else ""
-        return f"rc={exc.returncode} {tail}".strip()
-    return f"{type(exc).__name__}: {exc}".strip()
+    return envelope_lib.format_fetch_error(exc)
 
 
 if __name__ == "__main__":

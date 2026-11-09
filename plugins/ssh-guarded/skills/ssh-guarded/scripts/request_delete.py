@@ -12,6 +12,7 @@ v1.0 surface:
         [--recursive]                       (required if remote path is dir)
         [--expires-in 1h]
         [--project-id <id>]                 (SUPPRESS)
+        [--reports-dir <path>]              (override the state root)
         [--json]                            (SUPPRESS)
 
 Payload (operation="delete"):
@@ -23,10 +24,18 @@ Implementation notes:
   import, design §7 forbids cross-plugin imports). Network/auth failure
   → exit 49 ``pre_check_stat_failed``. Result ``"dir"`` and
   ``--recursive`` missing → exit 46 ``recursive_required_for_directory``.
+- ``~`` handling (BUG-001): the pre-check resolves the remote ``$HOME``
+  once and quotes the resulting **absolute** path. ``shlex.quote('~/x')``
+  keeps the tilde literal, so ``[ -d '~/x' ]`` is always false and the
+  ``--recursive`` gate never fired for the most common path spelling.
+  Resolution lives in ``lib/remote_path.py`` and is shared with
+  ``run_request.py``. A failed resolution is exit 49, never "none".
 - Denylist match warns + writes (C3 pedagogical: explicit refusal at
   execute time).
 - ``risk_summary.irreversible`` is ALWAYS true for delete (D4).
-- ``risk_summary.scope`` is ``tree`` iff ``--recursive`` else ``single-file``.
+- ``risk_summary.scope`` is ``tree`` iff the pre-check says directory (or
+  ``--recursive`` was passed) else ``single-file``.
+- State lives outside the plugin tree (GAP-006): see ``lib/state.py``.
 """
 
 from __future__ import annotations
@@ -48,9 +57,15 @@ if str(_SCRIPTS_DIR) not in sys.path:
 from lib import (  # noqa: E402, I001
     SSH_CORE_SCRIPTS_DIR,
     ArtifactError,
+    GuardedArgumentParser,
     RequestArtifact,
+    add_version_flag,
     allocate_request_id,
     compute_risk,
+    emit,
+    expand_remote_tilde,
+    failure_envelope,
+    handle_version,
     is_in_denylist,
     is_inside_sandbox,
     iso_utc_now,
@@ -58,7 +73,12 @@ from lib import (  # noqa: E402, I001
     normalize_remote_path,
     parse_expires_in,
     resolve_project_id,
+    resolve_remote_home,
+    success_envelope,
+    uses_tilde,
+    warn_legacy_reports,
 )
+from lib import requests_dir as state_requests_dir  # noqa: E402
 
 # --- Constants --------------------------------------------------------------
 
@@ -92,7 +112,7 @@ def _build_common_parser() -> argparse.ArgumentParser:
 
 def build_parser() -> argparse.ArgumentParser:
     common = _build_common_parser()
-    p = argparse.ArgumentParser(
+    p = GuardedArgumentParser(
         prog="request_delete.py",
         parents=[common],
         description="Draft a remote delete request artifact for review/execute.",
@@ -105,29 +125,73 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Required if the remote path is a directory")
     p.add_argument("--expires-in", dest="expires_in", default="1h",
                    help="<n>{m,h,d}; min 60s, max 7d, default 1h")
+    p.add_argument("--reports-dir", dest="reports_dir", default=None,
+                   help="Override the state root (default: $SSH_GUARDED_HOME/reports)")
+    add_version_flag(p)
     return p
 
 
 # --- Remote stat via ssh_execute (B3 drift) ---------------------------------
 
 
-def _remote_stat_kind(alias: str, remote_path: str) -> str:
+def _build_remote_stat_command(remote_path_abs: str) -> str:
+    """Build the POSIX-shell probe that prints exactly ``dir``/``file``/``none``.
+
+    ``remote_path_abs`` must already be absolute (``~`` resolved against the
+    remote ``$HOME``). Quoting the whole path once is safe *because* no shell
+    expansion is needed any more — this is the part that used to be wrong:
+    ``shlex.quote('~/x')`` → ``'~/x'``, and a tilde inside single quotes is
+    never expanded by a POSIX shell (BUG-001).
+    """
+    q = shlex.quote(remote_path_abs)
+    return (
+        f"if [ -d {q} ]; then echo dir; "
+        f"elif [ -e {q} ]; then echo file; "
+        f"else echo none; fi"
+    )
+
+
+def _resolve_home_for_precheck(alias: str) -> str:
+    """Resolve the remote ``$HOME`` for the pre-check, failing as exit 49.
+
+    Kept as a module-level indirection so unit tests can stub the one SSH
+    round-trip it needs without stubbing the command construction below it.
+    """
+    return resolve_remote_home(
+        alias,
+        timeout_seconds=PRE_CHECK_TIMEOUT_SECONDS,
+        failure_class="pre_check_stat_failed",
+        exit_code=_EXIT_CODES["pre_check_stat_failed"],
+    )
+
+
+def _remote_stat_kind(
+    alias: str,
+    remote_path: str,
+    remote_home: str | None = None,
+) -> str:
     """Return ``"dir"`` | ``"file"`` | ``"none"`` for ``remote_path`` on ``alias``.
+
+    ``~`` in ``remote_path`` is expanded against ``remote_home`` before the
+    probe is built. When ``remote_home`` is not supplied it is resolved with a
+    single SSH round-trip; a failure to resolve is ``pre_check_stat_failed``
+    (exit 49) and must never be reported as ``none``.
 
     Implemented via a single ``ssh_execute.py`` subprocess: we run a
     POSIX-shell expression that prints one of those three literals.
     Subprocess or transport failure raises ``ArtifactError`` with
     ``pre_check_stat_failed``/exit 49.
     """
-    ssh_execute = SSH_CORE_SCRIPTS_DIR / "ssh_execute.py"
-    q = shlex.quote(remote_path)
-    # Print exactly one of dir/file/none. The wrapping is safe because we
-    # only ever quote remote_path once.
-    remote_cmd = (
-        f"if [ -d {q} ]; then echo dir; "
-        f"elif [ -e {q} ]; then echo file; "
-        f"else echo none; fi"
+    if uses_tilde(remote_path) and remote_home is None:
+        # Failure here is exit 49 ("could not stat"), never "none".
+        remote_home = _resolve_home_for_precheck(alias)
+    resolved = (
+        expand_remote_tilde(remote_path, remote_home)
+        if remote_home is not None
+        else remote_path
     )
+    ssh_execute = SSH_CORE_SCRIPTS_DIR / "ssh_execute.py"
+    remote_cmd = _build_remote_stat_command(resolved)
     argv = [
         sys.executable,
         str(ssh_execute),
@@ -193,31 +257,21 @@ def _remote_stat_kind(alias: str, remote_path: str) -> str:
 # --- Helpers ---------------------------------------------------------------
 
 
-def _resolve_requests_dir() -> Path:
-    skill_root = _THIS.parent.parent
-    return skill_root / "reports" / "requests"
-
-
-def _emit(envelope: dict[str, Any], as_json: bool) -> None:
-    if as_json:
-        json.dump(envelope, sys.stdout, ensure_ascii=False)
-        sys.stdout.write("\n")
-        return
-    if envelope["success"]:
-        data = envelope["data"]
-        sys.stdout.write(
-            f"drafted {data['request_id']} -> {data['artifact_path']}\n"
-            f"risk: {data['risk_summary']['blast_radius']}\n"
-        )
-    else:
-        err = envelope["error"]
-        sys.stderr.write(f"{err['failure_class']}: {err['message']}\n")
+def _resolve_requests_dir(
+    project_id: str,
+    reports_dir: str | None = None,
+) -> Path:
+    """Return ``$SSH_GUARDED_HOME/reports/<project_id>/requests``."""
+    return state_requests_dir(project_id, reports_dir=reports_dir)
 
 
 # --- Main ------------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("request_delete.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     as_json = getattr(args, "json", False)
     try:
@@ -240,7 +294,8 @@ def main(argv: list[str] | None = None) -> int:
 
         # Pre-check remote via ssh_execute. We still pre-check even when
         # out-of-sandbox / denylist hits, so the artifact carries the
-        # accurate is_directory_pre_check value. Failures bubble as exit 49.
+        # accurate is_directory_pre_check value. Resolution/transport
+        # failures bubble as exit 49, never as "none".
         kind = _remote_stat_kind(args.alias, normalized_remote)
         if kind == "none":
             sys.stderr.write(
@@ -267,7 +322,10 @@ def main(argv: list[str] | None = None) -> int:
         # Sanity: delete is always irreversible by lib contract.
         assert risk.irreversible is True
 
-        requests_dir = _resolve_requests_dir()
+        warn_legacy_reports()
+        requests_dir = _resolve_requests_dir(
+            project_id, getattr(args, "reports_dir", None)
+        )
         request_id = allocate_request_id(OPERATION, requests_dir)
         artifact_path = requests_dir / f"{request_id}.json"
 
@@ -284,9 +342,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         artifact.save(artifact_path)
 
-        envelope = {
-            "success": True,
-            "data": {
+        envelope = success_envelope(
+            stdout=(
+                f"drafted {request_id} -> {artifact_path}\n"
+                f"risk: {risk.blast_radius}\n"
+            ),
+            data={
                 "artifact_path": str(artifact_path),
                 "request_id": request_id,
                 "operation": OPERATION,
@@ -298,21 +359,18 @@ def main(argv: list[str] | None = None) -> int:
                     "blast_radius": risk.blast_radius,
                 },
             },
-            "error": None,
-        }
-        _emit(envelope, as_json)
+        )
+        emit(envelope, as_json)
         return 0
     except ArtifactError as exc:
-        envelope = {
-            "success": False,
-            "data": None,
-            "error": {
-                "message": exc.message,
-                "failure_class": exc.failure_class,
-                "exit_code": exc.exit_code,
-            },
-        }
-        _emit(envelope, as_json)
+        envelope = failure_envelope(
+            failure_class=exc.failure_class,
+            message=exc.message,
+            exit_code=exc.exit_code,
+            stderr=f"{exc.failure_class}: {exc.message}\n",
+            data=None,
+        )
+        emit(envelope, as_json)
         return exc.exit_code
 
 

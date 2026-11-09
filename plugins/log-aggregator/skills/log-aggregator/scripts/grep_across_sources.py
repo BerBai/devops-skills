@@ -22,8 +22,9 @@ Per-script failure_class namespace (exit codes 180-189):
     180  pattern_invalid
     181-189 reserved
 
-Shared log-aggregator failure classes:
+Shared log-aggregator failure classes (table in ``lib/envelope.py``):
     40  source_spec_invalid
+    41  partial_fetch           (any source failed to fetch — see SKILL.md)
     44  no_sources_resolved
     124 ssh idle/connect timeout (propagated)
 
@@ -47,23 +48,21 @@ from typing import Any
 
 # Make ``lib`` importable when run directly: ``python grep_across_sources.py ...``.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lib import fetchers, source_spec  # type: ignore[import-not-found]  # noqa: E402
+from lib import envelope as envelope_lib, fetchers, source_spec  # type: ignore[import-not-found]  # noqa: E402
 from lib.fetchers import FetcherError, RawLine  # type: ignore[import-not-found]  # noqa: E402
 from lib.source_spec import ResolvedSource, SpecError  # type: ignore[import-not-found]  # noqa: E402
+from _version import add_version_flag, handle_version
 
-_EXIT_CODES: dict[str | None, int] = {
-    None: 0,
-    "source_spec_invalid": 40,
-    "no_sources_resolved": 44,
-    "pattern_invalid": 180,
-    "_generic": 1,
-    "_timeout": 124,
-}
+#: Shared with the other two CLIs (see lib/envelope.py); copied so a caller
+#: cannot mutate the contract for its siblings.
+_EXIT_CODES: dict[str | None, int] = dict(envelope_lib.EXIT_CODES)
 
 _HUMAN_HINTS: dict[str, str] = {
     "source_spec_invalid": "Check source spec syntax: <scheme>://<host>/<payload>[?k=v].",
     "no_sources_resolved": "Brace/glob expansion produced 0 sources; check --sources.",
     "pattern_invalid": "Regex failed to compile; check --pattern syntax.",
+    "partial_fetch": "One or more sources could not be fetched; the counts only "
+                     "cover the ones that worked. See data.failed_fetchers.",
 }
 
 _SAMPLE_WIDTH = 80
@@ -98,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--format", choices=["summary", "raw", "json"], default="summary")
     p.add_argument("--max-samples", type=int, default=5)
     p.add_argument("--json", action="store_true", help="Equivalent to --format json")
+    add_version_flag(p)
     return p
 
 
@@ -207,7 +207,7 @@ def _emit_json(
     writer: Any,
     *,
     elapsed_s: float = 0.0,
-) -> None:
+) -> dict[str, Any]:
     sorted_groups = _sort_groups(groups)
     for group in sorted_groups:
         for ts, body in group.events:
@@ -226,15 +226,16 @@ def _emit_json(
             "per_source": per_source,
             "sources": [group.source_tag for group in sorted_groups],
             "is_heatmap": is_heatmap,
-            "failed_fetchers": [
-                {"source": failure.source_tag, "error": failure.error}
-                for failure in failures
-            ],
-            "failure_class": "partial_fetch" if failures else None,
+            "failed_fetchers": [],
+            "failure_class": None,
             "elapsed_s": round(elapsed_s, 3),
         },
     }
+    # Same partial-fetch rule as tail_multi / correlate: the counts above only
+    # describe the sources that answered, so success must not read as "true".
+    envelope_lib.apply_fetch_failures(envelope, failures)
     print(json.dumps(envelope, ensure_ascii=False), file=writer)
+    return envelope
 
 
 def _emit_failure(
@@ -271,6 +272,9 @@ def _emit_failure(
 
 
 def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
+    early = handle_version("grep_across_sources.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     start_t = time.monotonic()
 
@@ -309,17 +313,25 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
     )
     fmt = "json" if args.json else args.format
     is_heatmap = pattern is None
+    exit_code = 0
     if fmt == "summary":
         _emit_summary(groups, is_heatmap, sys.stdout)
     elif fmt == "raw":
         _emit_raw(groups, sys.stdout)
     else:
-        _emit_json(groups, failures, is_heatmap, sys.stdout, elapsed_s=time.monotonic() - start_t)
+        envelope = _emit_json(
+            groups, failures, is_heatmap, sys.stdout,
+            elapsed_s=time.monotonic() - start_t,
+        )
+        exit_code = envelope["exit_code"]
 
     if fmt != "json" and failures:
         for failure in failures:
             sys.stderr.write(f"failed_fetcher: {failure.source_tag}: {failure.error}\n")
-    return 0
+        # Human formats print no envelope, so the exit code is the only signal
+        # that the counts are incomplete.
+        exit_code = envelope_lib.exit_code_for(envelope_lib.PARTIAL_FETCH)
+    return exit_code
 
 
 def _sort_groups(groups: list[HitGroup]) -> list[HitGroup]:
@@ -346,10 +358,7 @@ def _truncate(value: str, width: int) -> str:
 
 
 def _format_fetch_error(exc: BaseException) -> str:
-    if isinstance(exc, FetcherError):
-        tail = exc.stderr_tail.strip().splitlines()[-1] if exc.stderr_tail else ""
-        return f"rc={exc.returncode} {tail}".strip()
-    return f"{type(exc).__name__}: {exc}".strip()
+    return envelope_lib.format_fetch_error(exc)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import emit, json_result  # type: ignore[import-not-found]  # noqa: E402, I001
 from lib.kubectl import KubectlError, KubectlResult, run_kubectl  # type: ignore[import-not-found]  # noqa: E402
+from _version import add_version_flag, handle_version
 
 _TEN_MB = 10 * 1024 * 1024
 _TRUNCATE_MARKER = "\n... <truncated 10MB cap>\n"
@@ -55,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("namespace")
     parser.add_argument("--since", type=int, default=60, help="Look this many minutes back in Events")
     parser.add_argument("--json", action="store_true")
+    add_version_flag(parser)
     return parser
 
 
@@ -403,6 +405,9 @@ def _format_human(result: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    early = handle_version("check_namespace.py", argv)
+    if early is not None:
+        return early
     args = build_parser().parse_args(argv)
     try:
         result = _check(args)

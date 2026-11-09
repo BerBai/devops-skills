@@ -40,7 +40,14 @@ Got a K8s symptom?
 └─ Helm release 状态？
     └─ helm_status.py <host> <namespace> <release>
          → helm status + 关联资源 + 失败 hook
+         → release 卡在 pending-* 时，再 get 一次该 release 的 pods，
+           把没起来的那些按名字列出来（含 Waiting reason 与重启次数）
 ```
+
+`pending-*` 的 release 会额外输出 `data.stuck_resources`：每项是
+`{name, phase, reasons, restarts, node}`，并同时生成 `Pod` 级别的 findings，
+所以报告里写的是「api-1 是 ImagePullBackOff」，而不是再重复一遍「release pending」。
+取 pods 失败时 `data.stuck_resources_error` 记录该 domain 的失败，不影响其余结论。
 
 ## Host model
 
@@ -55,7 +62,7 @@ Got a K8s symptom?
 ```bash
 # 命名空间健康
 python scripts/check_namespace.py local production --json
-python scripts/check_namespace.py bastion-prod production --since 30min
+python scripts/check_namespace.py bastion-prod production --since 30
 
 # 单 Pod 诊断
 python scripts/diagnose_pod.py local production payment-svc-abc123

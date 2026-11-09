@@ -1,0 +1,86 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The repository is a plugin marketplace, not an installed package: the job
+# checks the marketplace surface (manifests, skill docs, script CLIs) and runs
+# the unit suite. `live_*` tests need a real host and stay opt-in.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.8 is the floor declared by ssh-core (ADR-006) — the transport has to
+        # run on Kylin 3 / CentOS 7 hosts. 3.12 is what the dev boxes use.
+        python-version: ["3.8", "3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # python-hcl2 8.x needs a newer interpreter; on 3.8 the two scripts
+          # that use it must still import cleanly and report dependency_missing.
+          if [ "${{ matrix.python-version }}" = "3.8" ]; then
+            pip install pytest pyyaml
+          else
+            pip install pytest pyyaml 'python-hcl2>=8.1,<9'
+          fi
+
+      - name: JSON-lint every manifest
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+          files = sorted(pathlib.Path(".").rglob("*.json"))
+          bad = []
+          for path in files:
+              if any(part in {".git", ".venv", "node_modules", "__pycache__"} for part in path.parts):
+                  continue
+              try:
+                  json.loads(path.read_text(encoding="utf-8"))
+              except Exception as exc:
+                  bad.append(f"{path}: {exc}")
+          print(f"checked {len(files)} JSON files")
+          if bad:
+              print("\n".join(bad), file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: Run the suite
+        run: pytest tests/ -q
+
+      - name: Marketplace surface (manifests, skill docs, --help)
+        run: pytest tests/test_manifests.py -q
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - name: ruff
+        run: ruff check .
+
+  floor:
+    # Guard the declared Python floor: syntax that parses on 3.12 but not on
+    # 3.8 would otherwise only fail on a customer's Kylin box. The checker
+    # lives in tools/ so a developer can run exactly what CI runs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Refuse 3.9+/3.10+ only constructs in the plugin tree
+        run: python tools/check_python_floor.py
