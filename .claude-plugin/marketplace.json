@@ -13,7 +13,6 @@
       "name": "ssh-core",
       "source": "./plugins/ssh-core",
       "version": "1.5.0",
-      "version": "1.5.0",
       "description": "SSH transport primitives — byte-safe command execution, password/key auth, interactive sessions, cluster broadcast, tunnels, transfers, sudo, retries and ~/.ssh/config CRUD. The fast lane.",
       "category": "transport",
       "tags": [
