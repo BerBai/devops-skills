@@ -79,11 +79,12 @@ from lib import (  # noqa: E402, I001
     emit,
     json_result,
     merged_ssh_config,
+    normalized_exit_code,
     read_ssh_config_metadata,
     read_text_auto,
     validate_ssh_option,
 )
-from lib.cli import SSHArgumentParser, handle_version  # noqa: E402
+from lib.cli import SSHArgumentParser, guarded_main, handle_version  # noqa: E402
 from lib.exit_codes import (  # noqa: E402
     EXIT_AUTH,
     EXIT_CONFIRMATION_REQUIRED,
@@ -114,8 +115,10 @@ from lib.session import (  # noqa: E402
     SessionError,
     authenticate,
     closed_by_device,
+    device_output_text,
     leave_session,
     make_session,
+    prompt_returned,
     records_show_failure,
     run_script,
     snapshot_path,
@@ -154,8 +157,14 @@ def build_ssh_argv(
     ssh_options: list[str] | None = None,
     accept_new_hostkey: bool = False,
     interactive: bool = False,
+    user: str | None = None,
 ) -> list[str]:
-    """Compose the ssh argv for a password-auth session."""
+    """Compose the ssh argv for a password-auth session.
+
+    ``user`` is the same escape hatch ``ssh_execute.py`` gained (review B1): a
+    device or host reached by bare IP has no ``user@`` and no ``User`` block, so
+    ssh would try the local account name.
+    """
     argv: list[str] = [
         "ssh",
         # BatchMode would abort at the first prompt — exactly what we must
@@ -173,6 +182,8 @@ def build_ssh_argv(
     ssh_config_path = merged_ssh_config(ssh_config)
     if ssh_config_path:
         argv += ["-F", ssh_config_path]
+    if user:
+        argv += ["-l", user]
     for option in ssh_options or []:
         argv += ["-o", option]
     argv.append("--")
@@ -283,7 +294,10 @@ def execute_single(
         elapsed = round(time.monotonic() - start, 3)
         return json_result(
             success=False,
-            exit_code=e.exit_code,
+            # BUG-009: every failure exit goes through the mask-then-table path,
+            # so a Windows `GetExitCodeProcess` DWORD (4294967295) can never
+            # reach the envelope as anything but 0-255.
+            exit_code=_class_code(e.failure_class, e.exit_code),
             stderr=e.message + "\n",
             data={
                 "route": "remote",
@@ -313,12 +327,26 @@ def execute_single(
         rc = session.close()
 
     elapsed = round(time.monotonic() - start, 3)
+    # BUG-009: mask Windows' unsigned DWORD / POSIX signal form before any
+    # comparison below, or `rc == 4294967295` looks like a remote exit status
+    # and is passed straight into the envelope.
+    rc, signal_number = normalized_exit_code(rc)
     closed_after_output = False
-    if rc != 0 and not is_network and output and closed_by_device(output):
-        # The device answered the command and then closed the channel, so ssh
-        # reports 255 with no exit status. The output is complete.
-        closed_after_output = True
-        rc = EXIT_OK
+    prompt_after_output = False
+    if rc != 0 and output:
+        if is_network:
+            # BUG-008: a device that printed its output *and* re-printed its
+            # prompt executed the command. Whether ssh managed to read the
+            # channel close before the device dropped TCP (rc 0 vs 255) must not
+            # change the verdict — that jitter is what made the same call report
+            # success and "auth" on alternating runs.
+            prompt_after_output = prompt_returned(output)
+        else:
+            # The device answered the command and then closed the channel, so
+            # ssh reports 255 with no exit status. The output is complete.
+            closed_after_output = closed_by_device(output)
+        if prompt_after_output or closed_after_output:
+            rc = EXIT_OK
     if rc != 0 and graceful and not records_show_failure(records, is_network=is_network):
         rc = EXIT_OK
     if rc == 0:
@@ -335,11 +363,25 @@ def execute_single(
                 "elapsed_s": elapsed,
                 "failure_class": None,
                 "results": records,
-                **({"device_closed_after_output": True} if closed_after_output else {}),
+                **(
+                    {"device_closed_after_output": True}
+                    if closed_after_output or prompt_after_output
+                    else {}
+                ),
+                **({"terminated_by_signal": signal_number} if signal_number else {}),
             },
         )
     stderr_tail = output if rc == 255 else ""
-    failure_class = classify_failure(rc, output) or "remote_error"
+    # `command_output` is what keeps a device farewell from reading as a
+    # credential problem (BUG-008). Only the network route passes it: its
+    # transcript is the device CLI's own words (minus ssh's closure chatter,
+    # which `device_output_text` removes), whereas the server route's merged
+    # stream also carries ssh's client diagnostics.
+    failure_class = (
+        classify_failure(rc, output, command_output=device_output_text(output))
+        if is_network
+        else classify_failure(rc, output)
+    ) or "remote_error"
     return json_result(
         success=False,
         exit_code=_class_code(failure_class, rc),
@@ -353,13 +395,27 @@ def execute_single(
             "ssh_argv": _public_argv(argv),
             "elapsed_s": elapsed,
             "failure_class": failure_class,
+            **({"terminated_by_signal": signal_number} if signal_number else {}),
         },
     )
 
 
 def _class_code(failure_class: str | None, rc: int) -> int:
+    """Failure class + raw returncode -> a 0-255 exit code (BUG-009).
+
+    ``rc`` first goes through :func:`lib.normalized_exit_code`, which masks
+    Windows' unsigned-DWORD form (``4294967295``) into ``0-255`` and turns a
+    POSIX signal death (``-15``) into the shell's ``128+N``. Without that,
+    ``ssh exited 4294967295`` reached the envelope *and* stderr: a value no
+    shell, CI check or agent branch can interpret.
+
+    After normalisation, 255 means "the ssh client failed" and is translated
+    through the single ``failure_class`` -> exit_code table; anything else is
+    the *remote command's* own status and is passed through untouched.
+    """
     from lib.exit_codes import exit_code_for
 
+    rc, _signal = normalized_exit_code(rc)
     if rc not in (0, 255):
         return rc  # remote command's own exit status
     return exit_code_for(failure_class, default=rc)
@@ -430,6 +486,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("host", help="Host alias from ~/.ssh/config (or user@host)")
+    p.add_argument(
+        "--user", "-l", default=None, metavar="USER",
+        help=(
+            "Login user, forwarded as `ssh -l USER`. A network device reached by "
+            "bare IP has no `user@` and often no `User` block, which is exactly "
+            "when ssh picks the local account name and the login fails with a "
+            "misleading 'Permission denied' (review B1)"
+        ),
+    )
     p.add_argument(
         "--command", action="append", default=[], dest="commands",
         help="Command to send, in order; repeatable",
@@ -674,6 +739,7 @@ def run_session(args: argparse.Namespace) -> dict:
         ssh_options=args.ssh_option,
         accept_new_hostkey=args.accept_new_hostkey,
         interactive=True,
+        user=getattr(args, "user", None),
     )
     # FA-03c: an invalid --prompt-regex used to raise re.error out of main()
     # before any envelope existed. It is compiled above, before the password
@@ -688,7 +754,7 @@ def run_session(args: argparse.Namespace) -> dict:
     except SessionError as e:
         return json_result(
             success=False,
-            exit_code=e.exit_code,
+            exit_code=_class_code(e.failure_class, e.exit_code),
             stderr=e.message + "\n",
             data={**data, "failure_class": e.failure_class},
         )
@@ -736,7 +802,7 @@ def run_session(args: argparse.Namespace) -> dict:
             )
         return json_result(
             success=False,
-            exit_code=e.exit_code,
+            exit_code=_class_code(e.failure_class, e.exit_code),
             stderr=e.message + "\n",
             data={
                 **data,
@@ -753,7 +819,24 @@ def run_session(args: argparse.Namespace) -> dict:
         rc = session.close()
 
     elapsed = round(time.monotonic() - start, 3)
-    if rc != 0 and graceful and not records_show_failure(records, is_network=True):
+    # BUG-009: the mask happens before any comparison *and* before the number
+    # is echoed into stderr. Windows reports a killed child as the unsigned
+    # DWORD 4294967295, which used to reach both the envelope and the message
+    # (`ssh exited 4294967295`), breaking the documented 0-255 contract.
+    rc, signal_number = normalized_exit_code(rc)
+    # BUG-008: align with `execute_single`. The device re-printed its prompt
+    # after the last command, so the session completed — whatever rc says. A
+    # command that reported a device-level error keeps the session red. The
+    # long-standing `graceful` shortcut is preserved as-is (it also covers a
+    # session that ran no command at all, e.g. --snapshot-cmd only).
+    if (
+        rc != 0
+        and not records_show_failure(records, is_network=True)
+        and (
+            graceful
+            or (records and prompt_returned(records[-1].get("output") or ""))
+        )
+    ):
         rc = EXIT_OK
 
     if audit_on:
@@ -791,7 +874,7 @@ def run_session(args: argparse.Namespace) -> dict:
     if rc != 0:
         return json_result(
             success=False,
-            exit_code=rc if rc not in (255,) else EXIT_REMOTE_ERROR,
+            exit_code=_class_code("remote_error", rc),
             stderr=f"ssh exited {rc}\n",
             data={
                 **data,
@@ -801,6 +884,7 @@ def run_session(args: argparse.Namespace) -> dict:
                 "results": records,
                 "failure_class": "remote_error",
                 **_truncation_fields(session),
+                **({"terminated_by_signal": signal_number} if signal_number else {}),
             },
         )
     return json_result(
@@ -832,4 +916,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main("ssh_session.py", main))

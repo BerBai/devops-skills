@@ -19,6 +19,16 @@ Usage::
     python scripts/selfcheck.py --write-matrix references/platform-matrix.md
                                                 # regenerate the doc (DV-26)
 
+Scope note (OPT-001): this script answers "which binaries exist on *this*
+machine" and deliberately stops there. It does not probe the backends of the
+other plugins in the marketplace (``docker``/``podman``, ``kubectl``/``helm``,
+``terraform``/``tofu``, ``gh``/``glab``, ``yaml``/``hcl2``), because that answer
+depends on the *target*, needs a real ssh round trip, and would put a network
+call behind a command documented as dependency-free. The report therefore ends
+with a pointer to ``doctor.py --profile full [--host ALIAS]`` (and carries the
+same string in ``data.profile_hint``) instead of growing a second, divergent
+implementation of the same probe.
+
 Exit codes: ``0`` everything required is present (optional gaps are reported,
 not fatal), ``9`` when a ``--check`` target is missing, ``2`` argv error.
 ``--strict`` turns "no optional transfer backend at all" into exit 9 so CI can
@@ -45,7 +55,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).parent))
 from lib import CHILD_TEXT_KWARGS, msys_safe_env  # noqa: E402
-from lib.cli import SSHArgumentParser, handle_version  # noqa: E402
+from lib.cli import SSHArgumentParser, guarded_main, handle_version  # noqa: E402
 from lib.exit_codes import (  # noqa: E402
     EXIT_INTERNAL,
     EXIT_INVALID_ARGUMENTS,
@@ -73,10 +83,12 @@ SCRIPT_FILES: tuple[str, ...] = (
     "ssh_upload.py",
     "ssh_download.py",
     "ssh_server_transfer.py",
+    "ssh_slice.py",
     "deploy_pubkey.py",
     "ssh_config_manager.py",
     "audit.py",
     "selfcheck.py",
+    "doctor.py",
 )
 
 #: Optional capabilities and what disappears when they are missing.
@@ -102,6 +114,17 @@ CHECK_ALIASES: dict[str, str] = {
     "ssh-keygen": "ssh-keygen",
     "tar": "tar",
 }
+
+#: Where the cross-plugin answer lives (OPT-001). selfcheck stays a local,
+#: dependency-free probe; the marketplace-wide readiness report (docker /
+#: kubectl / terraform / gh / yaml / hcl2, optionally against a target) is
+#: `doctor.py --profile full`. Repeating the probe here would mean two
+#: implementations that disagree about the same binaries.
+PROFILE_HINT = (
+    "other plugins' backends (docker/kubectl/terraform/gh/hcl2/yaml) are not "
+    "probed here; run `doctor.py --profile full [--host ALIAS]` for the "
+    "per-plugin readiness report"
+)
 
 
 @dataclass
@@ -146,6 +169,9 @@ class SelfCheck:
             "executable": sys.executable,
             "checks": [c.as_dict() for c in self.checks],
             "capabilities": self.capabilities,
+            # OPT-001: where the cross-plugin answer lives. A pointer, not a
+            # second implementation — see PROFILE_HINT.
+            "profile_hint": PROFILE_HINT,
         }
 
 
@@ -352,6 +378,7 @@ def render_human(check: SelfCheck) -> str:
         "  Note: `unavailable` entries are optional backends; exec / session / "
         "tunnel / config work with ssh alone."
     )
+    lines.append("  " + PROFILE_HINT)
     return "\n".join(lines) + "\n"
 
 
@@ -449,8 +476,9 @@ def matrix_markdown(check: SelfCheck) -> str:
         "| Capability | Linux | macOS | Windows |",
         "|---|---|---|---|",
         "| Command execution (key auth) | yes | yes | yes |",
-        "| Command execution (password auth) | yes (pty or askpass) | yes (pty) | "
-        "yes (`ssh -tt` + `SSH_ASKPASS`) |",
+        "| Command execution (password auth) | yes (`SSH_ASKPASS`, no pty "
+        "needed) | yes (`SSH_ASKPASS` or pty) | yes (`SSH_ASKPASS` over an "
+        "exec channel) |",
         "| Interactive device sessions | yes | yes | yes (pipe transport) |",
         "| Fleet broadcast | yes | yes | yes |",
         "| Port forwards `-L`/`-R`/`-D` | yes | yes | yes |",
@@ -467,17 +495,31 @@ def matrix_markdown(check: SelfCheck) -> str:
         "| Audit trail / rotation | yes | yes | yes |",
         "| TCP `--probe` | yes | yes | yes |",
         "| `ssh_daemon` | yes | yes | yes |",
+        "| `ssh_slice` (windowed reads + cursor) | yes | yes | yes |",
+        "| `doctor` (live capability probes) | yes | yes | yes |",
         "",
         "### Windows specifics",
         "",
-        "- Password auth and interactive sessions run over `ssh -tt` plus an",
-        "  `SSH_ASKPASS` helper; there is no pty, and the code says so instead of",
-        "  pretending otherwise.",
+        "- Password auth answers OpenSSH's prompt with a temporary",
+        "  `SSH_ASKPASS` helper over a normal **exec** channel — no pty, no",
+        "  `-tt`, so stdout/stderr stay separate and the remote exit code is",
+        "  real. The helper lives in a private directory (`SSH_CORE_ASKPASS_DIR`",
+        "  overrides it) that is tightened with `icacls`, because",
+        "  `mkdir(mode=0o700)` can produce a DACL without the creating user.",
         "- `--control-master auto` is refused with `dependency_missing` and points",
         "  at `--commands-file` / `ssh_daemon.py`, which give the same",
         "  one-handshake benefit without a POSIX socket.",
+        "- There is usually no `python` on `PATH` inside a DSH install:",
+        "  `scripts\\run.cmd <script.py> ...` resolves `$SSH_CORE_PYTHON`,",
+        "  `$DSH_PYTHON`, `python`/`py -3` and the bundled runtime, in that order.",
         "- Process liveness uses `OpenProcess` + `GetExitCodeProcess`, never",
         "  `os.kill(pid, 0)` (which would *terminate* the process on Windows).",
+        "- The `local` route starts a real process, so only an `.exe`/`.cmd`/`.bat`",
+        "  on `PATH` works directly. `cmd.exe` builtins (`echo`, `dir`, `copy`,",
+        "  `set`, \u2026) and PowerShell cmdlets need `cmd /c ...` /",
+        "  `powershell -Command ...` or `--shell cmd|powershell`; `bash` is not",
+        "  assumed to exist. The native tail/read paths and `port_check.py`",
+        "  probes need no shell at all.",
         "",
         "### Python",
         "",
@@ -486,6 +528,14 @@ def matrix_markdown(check: SelfCheck) -> str:
         "3.12, and `tools/check_python_floor.py` enforces the floor against",
         "the code (including `write_text(newline=)` and",
         "`TemporaryDirectory(ignore_cleanup_errors=)`, both 3.10+).",
+        "",
+        "### Verifying a machine",
+        "",
+        "`selfcheck.py` reports which binaries exist; `doctor.py` runs the",
+        "capability (a staged askpass helper, a real login, a real upload and",
+        "download with a sha256 check, an optional `sudo -n` probe) so a green",
+        "line means the operation works, not that the tool is installed.",
+        "`doctor.py --require NAME` exits 9 when a required capability regressed.",
         "",
     ]
     return "\n".join(lines)
@@ -609,4 +659,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main("selfcheck.py", main))

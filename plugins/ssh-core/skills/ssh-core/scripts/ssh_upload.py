@@ -5,8 +5,9 @@ v1.2 surface::
 
     ssh_upload.py <alias> <local-path> <remote-path>
         [--transport auto|sftp|scp]   # default: auto (SSH-11)
-        [--resume]                    # SFTP only
+        [--resume]                    # SFTP only; implies --overwrite
         [--recursive]
+        [--overwrite]                 # replace an existing remote file
         [--preserve]                  # mtime + mode, like cp -p (DV-19)
         [--delete --yes]              # mirror: prune extra remote entries
         [--no-progress]
@@ -26,6 +27,23 @@ Transport choice
 fallback is the difference between "no file transfer at all on this host" and
 "transfer works, minus resume/progress" (SSH-11). ``data.transport`` says
 which one ran.
+
+Overwrite policy (GAP-003)
+--------------------------
+The default is **refuse to clobber**. Before a single-file copy the script
+asks the remote side once what is at the destination (SFTP ``stat`` when
+paramiko is available, otherwise one ``ssh 'test -d/-e/-h'``) and, if anything
+is there, fails with ``failure_class: "remote_path_exists"`` and exit **168**
+without touching it. ``--overwrite`` allows the replacement; ``--resume`` and
+``--delete`` (mirror) imply it, because both are defined as writing over what
+is already there. When the destination cannot be inspected at all the copy is
+refused as ``transfer_io`` with ``data.remote_path_state: "unknown"`` rather
+than writing blind.
+
+``--recursive`` is exempt on purpose: it copies the *contents* of the local
+directory into the remote directory, so an existing directory target is the
+normal case and must not start failing. Clobbering individual files inside a
+tree is what the ``--delete`` mirror is for.
 
 Integrity
 ---------
@@ -47,8 +65,8 @@ Metadata and mirroring (DV-19)
 Failure classes come from :mod:`lib.exit_codes`: ``local_path_missing`` 160,
 ``local_path_is_directory`` 161, ``remote_path_missing`` 162,
 ``remote_path_invalid`` 163, ``transfer_io`` 164, ``integrity_mismatch`` 165,
-``permission`` 8, ``auth`` 100, ``host_key`` 101, ``network`` 102,
-``dependency_missing`` 3, ``timeout`` 124.
+``remote_path_exists`` 168, ``permission`` 8, ``auth`` 100, ``host_key`` 101,
+``network`` 102, ``dependency_missing`` 3, ``timeout`` 124.
 """
 
 from __future__ import annotations
@@ -57,7 +75,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # Keep the tree free of __pycache__/*.pyc: a plain `python3 <script>` would
 # otherwise write bytecode into the installed (verified) skill directory.
@@ -68,6 +86,7 @@ from lib import (  # noqa: E402
     append_audit,
     audit_cli_flags,
     audit_enabled,
+    classify_failure,
     emit,
     json_result,
 )
@@ -75,7 +94,7 @@ from lib.askpass import askpass_env  # noqa: E402
 from lib.auth import AUTH_CHOICES, DEFAULT_PASSWORD_ENV  # noqa: E402
 from lib.auth import auth_options  # noqa: E402
 from lib.auth import resolve as resolve_auth  # noqa: E402
-from lib.cli import SSHArgumentParser, handle_version  # noqa: E402
+from lib.cli import SSHArgumentParser, guarded_main, handle_version  # noqa: E402
 from lib.exit_codes import (  # noqa: E402
     EXIT_AUTH,
     EXIT_DEPENDENCY_MISSING,
@@ -108,7 +127,14 @@ from lib.sftp_transport import (  # noqa: E402
     upload_file,
     upload_tree,
 )
-from lib.transfer import paramiko_available, run_scp  # noqa: E402
+from lib.transfer import (  # noqa: E402
+    REMOTE_PATH_ABSENT,
+    REMOTE_PATH_UNKNOWN,
+    paramiko_available,
+    probe_remote_path_detail,
+    remote_path_kind,
+    run_scp,
+)
 
 DEFAULT_BLOCK_SIZE = 131072
 
@@ -135,6 +161,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--resume", action="store_true", help="Resume a partial SFTP transfer")
     p.add_argument("--recursive", action="store_true")
+    p.add_argument(
+        "--overwrite", action="store_true",
+        help=(
+            "Replace the remote file if it already exists. Without this flag "
+            "an existing destination is refused with "
+            "failure_class=remote_path_exists (exit 168) and left untouched "
+            "(GAP-003). --resume and --delete (mirror) imply it, because both "
+            "of them are defined as writing over what is already there. "
+            "Recursive uploads land *inside* the remote directory, so an "
+            "existing directory target is normal and is never refused"
+        ),
+    )
     p.add_argument(
         "--preserve", action="store_true",
         help=(
@@ -217,6 +255,7 @@ def _failure(
             "remote_path": args.remote_path,
             "recursive": args.recursive,
             "resume": args.resume,
+            "overwrite": _overwrite_permitted(args),
             "bytes_transferred": 0,
             "elapsed_s": 0.0,
             "sha256_verified": False,
@@ -284,6 +323,135 @@ def _audit(args: argparse.Namespace, result: dict) -> None:
     )
 
 
+def _overwrite_permitted(args: argparse.Namespace) -> bool:
+    """True when this invocation is allowed to replace an existing target.
+
+    ``--overwrite`` is the explicit form; ``--resume`` and ``--delete`` imply it
+    because both are defined as "continue writing into what is already there"
+    (a resume with no target is a plain copy, and a mirror without replacement
+    is not a mirror). GAP-003.
+    """
+    return bool(
+        getattr(args, "overwrite", False)
+        or getattr(args, "resume", False)
+        or getattr(args, "delete", False)
+    )
+
+
+def _refuse_existing(
+    args: argparse.Namespace,
+    failure_class: str,
+    stderr: str,
+    *,
+    kind: str,
+    transport: str,
+) -> dict[str, Any]:
+    result = _failure(
+        args,
+        failure_class=failure_class,
+        stderr=stderr,
+        transport=transport,
+        exit_code=exit_code_for(failure_class),
+    )
+    result["data"]["remote_path_state"] = kind
+    result["data"]["overwrite"] = False
+    result["data"]["requires"] = "--overwrite"
+    return result
+
+
+def _overwrite_guard(
+    args: argparse.Namespace,
+    probe: Callable[[str], tuple[str, int, str]],
+    *,
+    transport: str,
+) -> dict[str, Any] | None:
+    """Refuse to clobber an existing remote file unless it was asked for.
+
+    Returns a failure envelope, or ``None`` when the transfer may proceed. The
+    rule (GAP-003):
+
+    * ``--overwrite`` / ``--resume`` / ``--delete`` → always allowed;
+    * **single file only** — one probe of the *final* target path. A recursive
+      upload copies *into* the remote directory, so an existing directory there
+      is the normal case and must not start failing;
+    * target present → ``remote_path_exists`` (168), nothing written;
+    * probe impossible → fail closed with ``transfer_io`` (164) plus
+      ``data.remote_path_state == "unknown"``, instead of assuming the
+      destination is free. "I could not tell" is exactly the situation in which
+      a default clobber destroys data;
+    * ssh itself failed → report that failure class (auth/network/host_key), so
+      an unreachable host is not blamed on the destination.
+    """
+    if _overwrite_permitted(args):
+        return None
+    if getattr(args, "recursive", False):
+        return None
+    kind, returncode, stderr_text = probe(args.remote_path)
+    if kind == REMOTE_PATH_ABSENT:
+        return None
+    if kind == REMOTE_PATH_UNKNOWN or returncode not in (0,):
+        classified = classify_failure(returncode, stderr_text or "")
+        if classified in ("auth", "host_key", "network", "alias_not_found", "kex"):
+            detail = (stderr_text or "").strip()
+            return _refuse_existing(
+                args,
+                classified,
+                (
+                    f"ssh_upload: could not check whether '{args.remote_path}' "
+                    f"already exists on {args.alias}: {detail or classified}. "
+                    "Nothing was written.\n"
+                ),
+                kind="unknown",
+                transport=transport,
+            )
+        # Cannot prove the destination is free: fail closed rather than
+        # overwrite blind. `transfer_io` (164) is the transfer family's "the
+        # copy could not be performed" class; `remote_path_state` says why.
+        return _refuse_existing(
+            args,
+            "transfer_io",
+            (
+                f"ssh_upload: cannot determine whether '{args.remote_path}' "
+                f"already exists on {args.alias} "
+                f"({(stderr_text or '').strip() or 'no answer from the remote shell'}). "
+                "Refusing to overwrite blind. Re-run with --overwrite if "
+                "replacing it is intended, or fix the transport and retry.\n"
+            ),
+            kind="unknown",
+            transport=transport,
+        )
+    return _refuse_existing(
+        args,
+        "remote_path_exists",
+        (
+            f"ssh_upload: '{args.alias}:{args.remote_path}' already exists "
+            f"({kind}). Refusing to overwrite it; the remote file was left "
+            "untouched. Re-run with --overwrite to replace it, or pick another "
+            "destination (GAP-003).\n"
+        ),
+        kind=kind,
+        transport=transport,
+    )
+
+
+def _probe_with_ssh(args: argparse.Namespace, password: str | None):
+    """Adapter: ``(kind, rc, stderr)`` from one ``ssh 'test -e'`` probe."""
+
+    def probe(path: str) -> tuple[str, int, str]:
+        return probe_remote_path_detail(
+            args.alias,
+            path,
+            password=password,
+            ssh_config=args.ssh_config,
+            accept_new_hostkey=args.accept_new_hostkey,
+            port=args.port,
+            identity=args.identity,
+            timeout=min(int(getattr(args, "timeout", 30) or 30), 60),
+        )
+
+    return probe
+
+
 def _run_sftp(args: argparse.Namespace, chmod_int: int | None) -> dict[str, Any]:
     try:
         with SftpSession(
@@ -303,6 +471,17 @@ def _run_sftp(args: argparse.Namespace, chmod_int: int | None) -> dict[str, Any]
                     delete=getattr(args, "delete", False),
                 )
             else:
+                # GAP-003: one SFTP stat on the *final* target, taken on the
+                # session that is already open. No second connection, no
+                # per-file walk, and only for the single-file case: with
+                # --recursive the destination is a directory that the contents
+                # are placed into, so an existing one is normal.
+                def probe(path: str) -> tuple[str, int, str]:
+                    return remote_path_kind(args.alias, path, session=session), 0, ""
+
+                guard = _overwrite_guard(args, probe, transport="sftp")
+                if guard is not None:
+                    return guard
                 tr = upload_file(
                     session, args.local_path, args.remote_path,
                     resume=args.resume, chmod=chmod_int,
@@ -364,6 +543,15 @@ def _run_sftp(args: argparse.Namespace, chmod_int: int | None) -> dict[str, Any]
 def _run_scp(args: argparse.Namespace, password: str | None = None) -> dict[str, Any]:
     started = time.monotonic()
     preserve = bool(getattr(args, "preserve", False))
+    # GAP-003: exactly one `ssh 'test -e'` before the copy, never a per-file
+    # storm. It is skipped for --recursive (the destination is a directory the
+    # contents go into) and whenever --overwrite/--resume/--delete said the
+    # replacement is intended.
+    guard = _overwrite_guard(
+        args, _probe_with_ssh(args, password), transport="scp",
+    )
+    if guard is not None:
+        return guard
     outcome = run_scp(
         args.local_path,
         f"{args.alias}:{args.remote_path}",
@@ -592,4 +780,4 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main("ssh_upload.py", main))

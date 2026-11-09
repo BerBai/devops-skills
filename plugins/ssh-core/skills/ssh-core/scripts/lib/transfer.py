@@ -16,18 +16,37 @@ paramiko missing        ``scp -O/-r`` (-o BatchMode=yes) + local sha256
 ======================  ==============================================
 
 Every helper returns the same :class:`TransferOutcome` so the three scripts
-can keep one envelope shape regardless of transport.
+can keep one envelope shape regardless of transport. The outcome carries both
+``bytes_transferred`` and ``files_transferred``; a backend that cannot measure
+them must say so, never return a placeholder (BUG-007).
+
+Counting is deliberately centralised:
+
+* :class:`TarEntryCounter` reads the tar headers of a stream that is already
+  being relayed, so the server-to-server direct mode and the no-paramiko
+  recursive download both report the file payload they actually moved;
+* :func:`pump_stream` is the only relay loop, so ``bytes`` cannot drift from
+  ``bytes written``;
+* ``rsync --stats`` is parsed by :func:`parse_rsync_stats` for ``--use-rsync``.
+
+:func:`probe_remote_path` answers "what is at that destination?" with one ssh
+round-trip; ``ssh_upload`` uses it to refuse an unrequested overwrite
+(GAP-003) without paying a per-file probe.
 """
 
 from __future__ import annotations
 
 import contextlib
 import hashlib
+import re
 import shutil
+import stat as _stat
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import IO, Any
 
 from . import CHILD_TEXT_KWARGS, merged_ssh_config, msys_safe_env
 from .askpass import askpass_env
@@ -60,11 +79,19 @@ class TransferOutcome:
     failure_class: str | None = None
     stderr: str = ""
     argv: list[str] = field(default_factory=list)
-    files: int = 1
+    #: How many regular files the transport actually moved (BUG-007). It lives
+    #: here, not in the caller, so every backend has to answer it: the direct
+    #: tar stream used to report a hardcoded ``1`` for a whole tree.
+    files_transferred: int = 1
     detail: str = ""
     #: ``None`` when `--preserve` was not requested, ``True`` when the transport
     #: honoured it (FA-05: scp now passes `-p` instead of pretending).
     preserved: bool | None = None
+
+    @property
+    def files(self) -> int:
+        """Deprecated alias for :attr:`files_transferred` (kept for callers)."""
+        return self.files_transferred
 
     def as_data(self) -> dict:
         return {
@@ -73,7 +100,7 @@ class TransferOutcome:
             "elapsed_s": round(self.elapsed_s, 3),
             "sha256_verified": self.sha256_verified,
             "failure_class": self.failure_class,
-            "files_transferred": self.files,
+            "files_transferred": self.files_transferred,
         }
 
 
@@ -147,6 +174,166 @@ def remote_sha256(
 def _quote(value: str) -> str:
     """Single-quote a path for the remote POSIX shell."""
     return "'" + value.replace("'", "'\\''") + "'"
+
+
+# --- remote destination probe (GAP-003) -------------------------------------
+#
+# `ssh_upload` used to overwrite whatever was already at the remote path because
+# `scp` does: two uploads to `/tmp/release.tgz` both returned `success: true`
+# and the first payload was gone. Refusing by default needs exactly one question
+# answered before the copy starts: "is something already there?".
+#
+# It is **one** extra ssh round-trip per upload, never one per file:
+#   * a single file has one destination, so one probe covers it;
+#   * `--recursive` uploads *into* a directory (contents land under it), so an
+#     existing directory target is normal and nothing is probed. Clobbering an
+#     individual file inside the tree is what `--delete`/mirror is for.
+#
+# The answer is deliberately not a bare bool. `absent` means "the shell said
+# there is nothing there"; `dir`/`file`/`symlink` say what is there; `unknown`
+# means "this transport cannot tell" (ssh missing, timeout, a shell without
+# `test`, a garbled answer), and the caller must **fail closed** rather than
+# assume absence — an unanswerable probe is exactly the situation in which a
+# default-clobber destroys data.
+
+REMOTE_PATH_DIR = "dir"
+REMOTE_PATH_FILE = "file"
+REMOTE_PATH_LINK = "symlink"
+REMOTE_PATH_ABSENT = "absent"
+REMOTE_PATH_UNKNOWN = "unknown"
+
+#: Every kind except these two means "something is already at that path".
+_ABSENT_KINDS = frozenset({REMOTE_PATH_ABSENT, REMOTE_PATH_UNKNOWN})
+
+#: Sentinels echoed by the probe; anything else on stdout means "no answer".
+_PROBE_TOKENS = {
+    "SSHCORE:dir": REMOTE_PATH_DIR,
+    "SSHCORE:file": REMOTE_PATH_FILE,
+    "SSHCORE:link": REMOTE_PATH_LINK,
+    "SSHCORE:absent": REMOTE_PATH_ABSENT,
+}
+
+
+def probe_remote_path(
+    alias: str,
+    remote_path: str,
+    *,
+    timeout: int = 30,
+    password: str | None = None,
+    ssh_config: str | None = None,
+    accept_new_hostkey: bool = False,
+    port: int | None = None,
+    identity: str | None = None,
+) -> str:
+    """Ask the remote side what is at ``remote_path``. One ssh round-trip.
+
+    Returns one of the ``REMOTE_PATH_*`` kinds. Never raises: a transport
+    problem is ``unknown``, which callers treat as "refuse to overwrite".
+
+    ``test -d/-e/-h`` are POSIX and work on busybox/dash as well as bash. The
+    symlink case matters twice: a dangling symlink still counts as "something is
+    there" (scp would write through it), and a link to a directory downloads
+    like the directory it points at.
+    """
+    return probe_remote_path_detail(
+        alias,
+        remote_path,
+        timeout=timeout,
+        password=password,
+        ssh_config=ssh_config,
+        accept_new_hostkey=accept_new_hostkey,
+        port=port,
+        identity=identity,
+    )[0]
+
+
+def probe_remote_path_detail(
+    alias: str,
+    remote_path: str,
+    *,
+    timeout: int = 30,
+    password: str | None = None,
+    ssh_config: str | None = None,
+    accept_new_hostkey: bool = False,
+    port: int | None = None,
+    identity: str | None = None,
+) -> tuple[str, int, str]:
+    """``(kind, ssh_returncode, ssh_stderr)`` for one remote existence probe.
+
+    The return code and stderr are handed back so a caller can tell "the path is
+    free" (``kind == absent``, rc 0) from "ssh itself failed" (rc 255): the
+    upload guard must report ``network``/``auth`` when the host is unreachable
+    instead of blaming the destination.
+    """
+    if not have("ssh"):
+        return REMOTE_PATH_UNKNOWN, 127, "ssh is not on PATH"
+    quoted = _quote(remote_path)
+    remote_cmd = (
+        f"if [ -d {quoted} ]; then echo SSHCORE:dir; "
+        f"elif [ -e {quoted} ]; then echo SSHCORE:file; "
+        f"elif [ -h {quoted} ]; then echo SSHCORE:link; "
+        f"else echo SSHCORE:absent; fi"
+    )
+    argv = ["ssh", *auth_options(bool(password)), "-o", "ConnectTimeout=8"]
+    if accept_new_hostkey:
+        argv += ["-o", "StrictHostKeyChecking=accept-new"]
+    elif password:
+        argv += ["-o", "StrictHostKeyChecking=yes"]
+    if ssh_config:
+        argv += ["-F", ssh_config]
+    if port is not None:
+        argv += ["-p", str(port)]
+    if identity:
+        argv += ["-i", str(Path(identity).expanduser())]
+    argv += ["--", alias, remote_cmd]
+    env = msys_safe_env()
+    ctx = None
+    if password:
+        ctx = askpass_env(password)
+        env = ctx.__enter__()
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, check=False,
+            env=env, **CHILD_TEXT_KWARGS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return REMOTE_PATH_UNKNOWN, 255, f"remote probe failed: {exc}"
+    finally:
+        if ctx is not None:
+            ctx.__exit__(None, None, None)
+    if proc.returncode != 0:
+        return REMOTE_PATH_UNKNOWN, proc.returncode, (proc.stderr or "").strip()
+    # A login banner can land on stdout on some appliances, so match a whole
+    # line rather than requiring the entire stream to be the sentinel.
+    for line in (proc.stdout or "").splitlines():
+        kind = _PROBE_TOKENS.get(line.strip())
+        if kind is not None:
+            return kind, 0, ""
+    return REMOTE_PATH_UNKNOWN, 0, "remote probe returned no recognizable answer"
+
+
+def remote_path_kind(
+    alias: str,
+    remote_path: str,
+    *,
+    session: Any = None,
+    **kwargs: Any,
+) -> str:
+    """``probe_remote_path``, using an open SFTP session when there is one."""
+    if session is not None:
+        try:
+            attr = session.stat(remote_path)
+        except Exception:  # noqa: BLE001 — a failed stat is "cannot tell"
+            return REMOTE_PATH_UNKNOWN
+        if attr is None:
+            return REMOTE_PATH_ABSENT
+        mode = int(getattr(attr, "st_mode", 0) or 0)
+        if _stat.S_ISDIR(mode):
+            return REMOTE_PATH_DIR
+        if _stat.S_ISLNK(mode):
+            return REMOTE_PATH_LINK
+        return REMOTE_PATH_FILE
+    return probe_remote_path(alias, remote_path, **kwargs)
 
 
 #: ``program`` → does its ``scp`` understand ``-O``? Cached per process.
@@ -243,6 +430,163 @@ def scp_argv(
         argv += ["-o", option]
     argv += ["--", source, destination]
     return argv
+
+
+# --- tar stream accounting (BUG-006 / BUG-007) ------------------------------
+
+
+class TarEntryCounter:
+    """Count the regular files — and their payload bytes — inside a tar stream.
+
+    ``tar -tv`` on the producer side would cost a *second* full read of the
+    tree (and, server-to-server, a second ssh round-trip), so the archive is
+    counted where it already is: in the bytes this process relays. That is both
+    cheaper and exact for the entries that actually moved, which is what the
+    envelope claims.
+
+    ``bytes`` counts **file payload**, not archive bytes: a 6-byte file occupies
+    1536 bytes of tar (a header, a padded block and a share of the
+    end-of-archive blocks), while every other transport in this skill reports
+    the content size. ``stream`` mode counts the chunks it writes into each
+    destination file, so ``--mode direct`` has to answer the same number or two
+    modes disagree for identical trees.
+
+    Parsing is incremental and tolerant: a 512-byte header is buffered, its
+    typeflag says whether the entry is a regular file, and the stream is then
+    skipped to the next header. PAX/GNU long-name extensions are skipped by
+    size, so names are never decoded. Anything unexpected (truncated header,
+    corrupt size field) stops the accounting instead of raising — the transfer
+    itself is still valid, and a wrong number is worse than a missing one.
+    """
+
+    BLOCK = 512
+
+    def __init__(self) -> None:
+        self.files = 0
+        self.bytes = 0
+        self._header = b""
+        self._skip = 0
+        self._stopped = False
+
+    @property
+    def stopped(self) -> bool:
+        """True when the stream was not a parseable tar (counts are a lower bound)."""
+        return self._stopped
+
+    def feed(self, block: bytes) -> None:
+        if self._stopped or not block:
+            return
+        try:
+            offset = 0
+            while offset < len(block):
+                if self._skip:
+                    step = min(self._skip, len(block) - offset)
+                    self._skip -= step
+                    offset += step
+                    continue
+                room = self.BLOCK - len(self._header)
+                piece = block[offset:offset + room]
+                self._header += piece
+                offset += len(piece)
+                if len(self._header) < self.BLOCK:
+                    continue
+                header, self._header = self._header, b""
+                self._consume_header(header)
+        except Exception:  # noqa: BLE001 — accounting must never break a copy
+            self._stopped = True
+
+    def _consume_header(self, header: bytes) -> None:
+        if header == b"\0" * self.BLOCK:
+            # End-of-archive marker; keep reading harmlessly (padding follows).
+            return
+        size_field = header[124:136].split(b"\0", 1)[0].strip() or b"0"
+        try:
+            size = int(size_field, 8)
+        except ValueError:
+            self._stopped = True
+            return
+        if size < 0:
+            self._stopped = True
+            return
+        if header[156:157] in (b"0", b"\0", b"7"):
+            self.files += 1
+            self.bytes += size
+        if size:
+            # Tar pads every entry to a 512-byte boundary.
+            self._skip = size + (-size % self.BLOCK)
+
+
+class StreamTimeout(RuntimeError):
+    """A relayed stream ran past its deadline."""
+
+
+def pump_stream(
+    source: IO[bytes] | None,
+    sink: IO[bytes] | None,
+    *,
+    counter: TarEntryCounter | None = None,
+    bwlimit_kbs: int | None = None,
+    started: float | None = None,
+    timeout: float | None = None,
+) -> int:
+    """Relay ``source`` into ``sink`` while counting (BUG-006 / BUG-007).
+
+    Returns the number of bytes actually written. This is the only place a tar
+    stream is measured, so "bytes moved" cannot drift from "bytes reported":
+
+    * ``counter`` sees every chunk, which is where the file count comes from;
+    * ``bwlimit_kbs`` throttles the relay itself — the only point where a rate
+      can be enforced when neither endpoint supports a cap;
+    * ``timeout`` raises :class:`StreamTimeout` so the caller can kill both
+      ends; the caller's ``finally`` still runs.
+
+    The sink is closed when the source ends, even after an error: the consumer
+    finishes only when it sees EOF, so a dead producer must not leave it hanging
+    until its own timeout.
+    """
+    written = 0
+    limit_bps = bwlimit_kbs * 1024 if bwlimit_kbs else None
+    try:
+        if source is not None and sink is not None:
+            while True:
+                block = source.read(1 << 20)
+                if not block:
+                    break
+                if counter is not None:
+                    counter.feed(block)
+                try:
+                    sink.write(block)
+                    sink.flush()
+                except (BrokenPipeError, OSError, ValueError):
+                    # The consumer exited early; its exit code and stderr say why.
+                    break
+                written += len(block)
+                if limit_bps and started is not None:
+                    expected = written / limit_bps
+                    actual = time.monotonic() - started
+                    if expected > actual:
+                        time.sleep(expected - actual)
+                if (
+                    timeout is not None
+                    and started is not None
+                    and time.monotonic() - started > timeout
+                ):
+                    raise StreamTimeout(f"stream exceeded {timeout}s")
+    finally:
+        if sink is not None:
+            with contextlib.suppress(OSError, ValueError):
+                sink.close()
+        if source is not None:
+            with contextlib.suppress(OSError, ValueError):
+                source.close()
+    return written
+
+
+def _split_remote_path(remote_path: str) -> tuple[str, str]:
+    """``/a/b/c`` → ``("/a/b", "c")``; ``/`` → ``("/", "/")``."""
+    trimmed = remote_path.rstrip("/") or "/"
+    parent, _, leaf = trimmed.rpartition("/")
+    return (parent or "/"), (leaf or trimmed)
 
 
 def _classify(stderr: str) -> str:
@@ -408,7 +752,11 @@ def run_rsync(
         ssh_flavour += ["-o", "StrictHostKeyChecking=accept-new"]
     for option in ssh_options or []:
         ssh_flavour += ["-o", option]
-    remote_rsync = "rsync -a"
+    # ``--stats`` is what makes the envelope honest (BUG-007): rsync already
+    # knows how many files it moved and how many bytes it sent, and asking it
+    # costs nothing. Without it `ssh_server_transfer --use-rsync` had to invent
+    # both numbers.
+    remote_rsync = "rsync -a --stats"
     if bwlimit_kbs:
         remote_rsync += f" --bwlimit={int(bwlimit_kbs)}"
     inner_ssh = " ".join(["ssh", *(_quote(token) for token in ssh_flavour)])
@@ -465,13 +813,50 @@ def run_rsync(
             stderr=stderr or f"rsync exited {proc.returncode}",
             argv=argv, elapsed_s=elapsed,
         )
+    files, nbytes = parse_rsync_stats(proc.stdout or "")
     return TransferOutcome(
         success=True, transport="rsync", elapsed_s=elapsed, argv=argv,
+        bytes_transferred=nbytes, files_transferred=files,
         detail=(
             "rsync ran on the source host (incremental copy); both endpoints "
             "are remote, so it cannot run from this machine"
         ),
     )
+
+
+def parse_rsync_stats(output: str) -> tuple[int, int]:
+    """``(files, bytes)`` from ``rsync --stats`` on stdout.
+
+    Measured shape (rsync 3.x, single file and 2-file tree)::
+
+        Number of regular files transferred: 2
+        Total file size: 4 bytes
+
+    ``Total file size`` is the size of the files in the transfer, which is the
+    same thing ``stream`` mode counts as ``bytes``. ``Total bytes sent`` would
+    be wire bytes (231 for a 4-byte tree), so it is deliberately not used. A
+    missing/old rsync yields ``(0, 0)`` rather than an invented number.
+    """
+    files = 0
+    nbytes = 0
+    for line in (output or "").splitlines():
+        text = line.strip()
+        if text.startswith("Number of regular files transferred:"):
+            files = _leading_int(text.rpartition(":")[2])
+        elif text.startswith("Total file size:"):
+            nbytes = _leading_int(text.rpartition(":")[2])
+    return files, nbytes
+
+
+def _leading_int(text: str) -> int:
+    """``" 4 bytes"`` → ``4``; anything unparseable → ``0``."""
+    match = re.search(r"\d[\d,]*", text or "")
+    if match is None:
+        return 0
+    try:
+        return int(match.group(0).replace(",", ""))
+    except ValueError:
+        return 0
 
 
 def run_tar_stream(
@@ -509,10 +894,7 @@ def run_tar_stream(
         base += ["-o", "StrictHostKeyChecking=yes"]
     if ssh_config:
         base += ["-F", ssh_config]
-    trimmed = src_path.rstrip("/")
-    parent, _, leaf = trimmed.rpartition("/")
-    src_dir = parent or "/"
-    leaf = leaf or trimmed
+    src_dir, leaf = _split_remote_path(src_path)
     producer = [
         "ssh", *base, "--", src_alias,
         f"tar -C {_quote(src_dir)} -cf - {_quote(leaf)}",
@@ -554,39 +936,39 @@ def run_tar_stream(
     if password:
         ctx = askpass_env(password)
         env = ctx.__enter__()
+    counter = TarEntryCounter()
+    relayed = 0
     try:
         src_proc = subprocess.Popen(
             producer, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=env,
         )
+        # ``stdin=PIPE`` (not the producer's own handle): the bytes have to pass
+        # through this process to be counted, and that is exactly what the
+        # envelope promises. ``stdout`` is discarded — the consumer prints
+        # nothing, and an undrained pipe is a deadlock waiting for a slow day.
         dst_proc = subprocess.Popen(
-            consumer, stdin=src_proc.stdout, stdout=subprocess.PIPE,
+            consumer, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE, env=env,
         )
-        if src_proc.stdout is not None:
-            src_proc.stdout.close()
-        total = 0
-        assert dst_proc.stdout is not None
-        chunk_size = 1 << 20
-        limit_bps = bwlimit_kbs * 1024 if bwlimit_kbs else None
-        while True:
-            block = dst_proc.stdout.read(chunk_size)
-            if not block:
-                break
-            total += len(block)
-            if limit_bps:
-                expected = total / limit_bps
-                actual = time.monotonic() - started
-                if expected > actual:
-                    time.sleep(expected - actual)
-            if time.monotonic() - started > timeout:
-                src_proc.kill()
-                dst_proc.kill()
-                return TransferOutcome(
-                    success=False, transport="direct", failure_class="timeout",
-                    stderr=f"direct tar stream exceeded {timeout}s",
-                    argv=producer + consumer, elapsed_s=time.monotonic() - started,
-                )
+        src_err = StreamDrain(src_proc.stderr)
+        dst_err = StreamDrain(dst_proc.stderr)
+        try:
+            pump_stream(
+                src_proc.stdout, dst_proc.stdin,
+                counter=counter, bwlimit_kbs=bwlimit_kbs,
+                started=started, timeout=timeout,
+            )
+        except StreamTimeout:
+            src_proc.kill()
+            dst_proc.kill()
+            return TransferOutcome(
+                success=False, transport="direct", failure_class="timeout",
+                stderr=f"direct tar stream exceeded {timeout}s",
+                argv=producer + consumer, elapsed_s=time.monotonic() - started,
+            )
+        src_err.join()
+        dst_err.join()
         dst_rc = dst_proc.wait(timeout=remaining_timeout(started, timeout))
         src_rc = src_proc.wait(timeout=remaining_timeout(started, timeout))
     except (OSError, subprocess.SubprocessError) as exc:
@@ -599,12 +981,7 @@ def run_tar_stream(
             ctx.__exit__(None, None, None)
     elapsed = time.monotonic() - started
     if src_rc != 0 or dst_rc != 0:
-        stderr = b""
-        for proc in (src_proc, dst_proc):
-            if proc.stderr is not None:
-                with contextlib.suppress(ValueError):
-                    stderr += proc.stderr.read() or b""
-        text = stderr.decode("utf-8", "replace").strip()
+        text = (src_err.text() + dst_err.text()).strip()
         fclass = _classify(text)
         # "mv: cannot stat" means the copy itself worked but the rename did
         # not; that is still a failed transfer, just with a clearer cause.
@@ -614,11 +991,58 @@ def run_tar_stream(
             success=False, transport="direct", failure_class=fclass,
             stderr=text[:2000], elapsed_s=elapsed,
         )
+    # BUG-007: the counts come from the archive itself, not from a hardcoded 1.
+    # ``counter.bytes`` is the payload of the regular files that went through,
+    # which is the number every other transport in this skill reports (a 6-byte
+    # file costs 1536 bytes of tar, so relaying archive bytes would be a lie).
+    detail = "streamed with tar over ssh (no local staging)"
+    if counter.stopped:
+        detail += "; tar accounting incomplete (unparseable archive stream)"
     return TransferOutcome(
-        success=True, transport="direct", bytes_transferred=total,
+        success=True, transport="direct",
+        bytes_transferred=counter.bytes,
+        files_transferred=counter.files,
         elapsed_s=elapsed,
-        detail="streamed with tar over ssh (no local staging)",
+        detail=detail,
+        # Not a claim of verification: tar over ssh has no hash step.
+        sha256_verified=False,
+        argv=producer + consumer,
     )
+
+
+class StreamDrain:
+    """Read a child's stderr to EOF on a daemon thread.
+
+    Both ends of a piped transfer have an stderr pipe. Reading them only after
+    ``wait()`` deadlocks as soon as one of them says more than a pipe buffer's
+    worth (a failing ``tar`` over a big tree does), and the timeout then reports
+    a hang instead of the actual error. Draining while the pipe is live is the
+    only way to keep both the bytes and the diagnosis.
+    """
+
+    def __init__(self, stream: IO[bytes] | None) -> None:
+        self._chunks: list[bytes] = []
+        self._thread: threading.Thread | None = None
+        if stream is not None:
+            self._thread = threading.Thread(target=self._run, args=(stream,), daemon=True)
+            self._thread.start()
+
+    def _run(self, stream: IO[bytes]) -> None:
+        try:
+            for block in iter(lambda: stream.read(65536), b""):
+                self._chunks.append(block)
+        except (OSError, ValueError):
+            pass
+        finally:
+            with contextlib.suppress(OSError, ValueError):
+                stream.close()
+
+    def join(self, timeout: float | None = 5.0) -> None:
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+    def text(self) -> str:
+        return b"".join(self._chunks).decode("utf-8", "replace")
 
 
 def remaining_timeout(started: float, timeout: float) -> float:
@@ -626,9 +1050,22 @@ def remaining_timeout(started: float, timeout: float) -> float:
 
 
 __all__ = [
+    "REMOTE_PATH_ABSENT",
+    "REMOTE_PATH_DIR",
+    "REMOTE_PATH_FILE",
+    "REMOTE_PATH_LINK",
+    "REMOTE_PATH_UNKNOWN",
+    "StreamDrain",
+    "StreamTimeout",
+    "TarEntryCounter",
     "TransferOutcome",
     "have",
     "paramiko_available",
+    "parse_rsync_stats",
+    "probe_remote_path",
+    "probe_remote_path_detail",
+    "pump_stream",
+    "remote_path_kind",
     "remote_sha256",
     "run_rsync",
     "run_scp",

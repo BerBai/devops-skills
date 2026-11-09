@@ -21,6 +21,9 @@ Modes (SSH-14 — all four are implemented now)
     The two hosts talk to each other: ``ssh src 'tar -cf -' | ssh dst 'tar -xf -'``
     (or ``rsync`` started on the source host with ``--use-rsync``). No paramiko,
     no local disk, and the machine running the script only shuttles bytes.
+    ``bytes`` and ``files_transferred`` are measured on the stream that actually
+    passes through this process (the tar header counter) or read from
+    ``rsync --stats``; nothing is hardcoded.
 ``hybrid``
     ``direct`` first; if either host lacks ``tar``/``rsync`` it falls back to
     ``stream``. Reported as ``data.hybrid_resolved_to``.
@@ -62,7 +65,7 @@ from lib import (  # noqa: E402, I001
 )
 from lib.auth import AUTH_CHOICES, DEFAULT_PASSWORD_ENV  # noqa: E402
 from lib.auth import resolve as resolve_auth  # noqa: E402
-from lib.cli import SSHArgumentParser, handle_version  # noqa: E402
+from lib.cli import SSHArgumentParser, guarded_main, handle_version  # noqa: E402
 from lib.exit_codes import (  # noqa: E402
     EXIT_AUTH,
     EXIT_DEPENDENCY_MISSING,
@@ -540,9 +543,12 @@ def _run_direct(args: argparse.Namespace, password: str | None = None) -> dict[s
             elapsed=elapsed, detail=outcome.stderr,
             mode_used="direct", transport=outcome.transport,
         )
-    files = 1
+    # BUG-007: both counts come from the backend that did the work. `files = 1`
+    # used to be hardcoded here, so a 2-file tree and a single file reported
+    # the same number while `bytes` stayed 0 for both.
     return _success_envelope(
-        args, "direct", outcome.transport, outcome.bytes_transferred, files,
+        args, "direct", outcome.transport,
+        outcome.bytes_transferred, outcome.files_transferred,
         elapsed, extra={"detail": outcome.detail} if outcome.detail else None,
     )
 
@@ -656,4 +662,4 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main("ssh_server_transfer.py", main))

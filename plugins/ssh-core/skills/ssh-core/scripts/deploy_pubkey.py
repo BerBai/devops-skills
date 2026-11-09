@@ -76,7 +76,7 @@ from lib import (  # noqa: E402, I001
     json_result,
     msys_safe_env,
 )
-from lib.cli import SSHArgumentParser, handle_version  # noqa: E402
+from lib.cli import SSHArgumentParser, guarded_main, handle_version  # noqa: E402
 from lib.exit_codes import (  # noqa: E402
     EXIT_AUTH,
     EXIT_HOST_KEY,
@@ -634,4 +634,4 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main("deploy_pubkey.py", main))

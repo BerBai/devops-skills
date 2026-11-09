@@ -78,7 +78,7 @@ from lib import (  # noqa: E402, I001
     terminate,
     validate_ssh_option,
 )
-from lib.cli import SSHArgumentParser, handle_version  # noqa: E402
+from lib.cli import SSHArgumentParser, guarded_main, handle_version  # noqa: E402
 from lib.exit_codes import (  # noqa: E402
     EXIT_AMBIGUOUS_STOP,
     EXIT_AUTH,
@@ -1364,4 +1364,4 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main("ssh_tunnel.py", main))

@@ -6,7 +6,7 @@ change the probe in selfcheck.py and regenerate, otherwise this table
 and reality drift apart (DV-26).
 -->
 
-Generated on `Windows-11-10.0.26100-SP0` with Python 3.12.14 for **ssh-core 1.3.2**.
+Generated on `Windows-11-10.0.26100-SP0` with Python 3.12.14 for **ssh-core 1.5.0**.
 
 ## This machine
 
@@ -43,7 +43,7 @@ actually reports. Anything a script cannot do, it refuses with a
 | Capability | Linux | macOS | Windows |
 |---|---|---|---|
 | Command execution (key auth) | yes | yes | yes |
-| Command execution (password auth) | yes (pty or askpass) | yes (pty) | yes (`ssh -tt` + `SSH_ASKPASS`) |
+| Command execution (password auth) | yes (`SSH_ASKPASS`, no pty needed) | yes (`SSH_ASKPASS` or pty) | yes (`SSH_ASKPASS` over an exec channel) |
 | Interactive device sessions | yes | yes | yes (pipe transport) |
 | Fleet broadcast | yes | yes | yes |
 | Port forwards `-L`/`-R`/`-D` | yes | yes | yes |
@@ -58,17 +58,31 @@ actually reports. Anything a script cannot do, it refuses with a
 | Audit trail / rotation | yes | yes | yes |
 | TCP `--probe` | yes | yes | yes |
 | `ssh_daemon` | yes | yes | yes |
+| `ssh_slice` (windowed reads + cursor) | yes | yes | yes |
+| `doctor` (live capability probes) | yes | yes | yes |
 
 ### Windows specifics
 
-- Password auth and interactive sessions run over `ssh -tt` plus an
-  `SSH_ASKPASS` helper; there is no pty, and the code says so instead of
-  pretending otherwise.
+- Password auth answers OpenSSH's prompt with a temporary
+  `SSH_ASKPASS` helper over a normal **exec** channel — no pty, no
+  `-tt`, so stdout/stderr stay separate and the remote exit code is
+  real. The helper lives in a private directory (`SSH_CORE_ASKPASS_DIR`
+  overrides it) that is tightened with `icacls`, because
+  `mkdir(mode=0o700)` can produce a DACL without the creating user.
 - `--control-master auto` is refused with `dependency_missing` and points
   at `--commands-file` / `ssh_daemon.py`, which give the same
   one-handshake benefit without a POSIX socket.
+- There is usually no `python` on `PATH` inside a DSH install:
+  `scripts\run.cmd <script.py> ...` resolves `$SSH_CORE_PYTHON`,
+  `$DSH_PYTHON`, `python`/`py -3` and the bundled runtime, in that order.
 - Process liveness uses `OpenProcess` + `GetExitCodeProcess`, never
   `os.kill(pid, 0)` (which would *terminate* the process on Windows).
+- The `local` route starts a real process, so only an `.exe`/`.cmd`/`.bat`
+  on `PATH` works directly. `cmd.exe` builtins (`echo`, `dir`, `copy`,
+  `set`, …) and PowerShell cmdlets need `cmd /c ...` /
+  `powershell -Command ...` or `--shell cmd|powershell`; `bash` is not
+  assumed to exist. The native tail/read paths and `port_check.py`
+  probes need no shell at all.
 
 ### Python
 
@@ -77,3 +91,11 @@ CentOS 7 with EPEL) keep working; the CI matrix covers 3.8 / 3.10 /
 3.12, and `tools/check_python_floor.py` enforces the floor against
 the code (including `write_text(newline=)` and
 `TemporaryDirectory(ignore_cleanup_errors=)`, both 3.10+).
+
+### Verifying a machine
+
+`selfcheck.py` reports which binaries exist; `doctor.py` runs the
+capability (a staged askpass helper, a real login, a real upload and
+download with a sha256 check, an optional `sudo -n` probe) so a green
+line means the operation works, not that the tool is installed.
+`doctor.py --require NAME` exits 9 when a required capability regressed.

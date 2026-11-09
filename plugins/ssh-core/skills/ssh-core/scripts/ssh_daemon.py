@@ -87,7 +87,7 @@ from lib import (  # noqa: E402, I001
     validate_ssh_option,
 )
 from lib.askpass import askpass_env  # noqa: E402
-from lib.cli import SSHArgumentParser, handle_version  # noqa: E402
+from lib.cli import SSHArgumentParser, guarded_main, handle_version  # noqa: E402
 from lib.exit_codes import (  # noqa: E402
     EXIT_AUTH,
     EXIT_DAEMON_NOT_RUNNING,
@@ -925,4 +925,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main("ssh_daemon.py", main))

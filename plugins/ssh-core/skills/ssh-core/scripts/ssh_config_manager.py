@@ -99,7 +99,7 @@ from lib import (  # noqa: E402, I001
     json_result,
     msys_safe_env,
 )
-from lib.cli import SSHArgumentParser, handle_version  # noqa: E402
+from lib.cli import SSHArgumentParser, guarded_main, handle_version  # noqa: E402
 from lib.configfile import (  # noqa: E402
     ConfigLock,
     ConfigLockTimeout,
@@ -1792,4 +1792,4 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main("ssh_config_manager.py", main))

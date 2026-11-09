@@ -9,6 +9,136 @@ The remote commands are ordinary shell one-liners; the point of the page is the
 JSON envelope, host identifiers are redacted, and nothing lands in shell
 history.
 
+## When the command gets complicated: send a script, do not build one
+
+Every command crosses **three** quoting layers: your local shell (pwsh or
+bash) → `ssh-core`'s argv → the remote `sh`. An `awk '{print $1}'`, a nested
+quote, a `$` that must survive to the far side, or a `grep -E 'a|b'` will be
+eaten by one of them sooner or later, and the failure looks like
+
+```
+awk: cmd. line:1: {print \\ :\\substr(\\,index(\\,\\))}
+bash: -c:行0: 寻找匹配的"时遇到了未预期的文件结束符
+```
+
+The reliable answer is `--script-file`: write the script locally, let
+`ssh-core` pipe it into `bash -s` on the far side. The script never touches
+argv, so there is no quoting left to get wrong.
+
+```bash
+# local: probe.sh  (any editor, any line endings)
+#   #!/bin/bash
+#   journalctl --no-pager -n 5000 \
+#     | awk '$0 ~ /error|panic/ {print NR": "$0}' \
+#     | tail -40
+
+python scripts/ssh_execute.py lab-231 --script-file ./probe.sh --json
+scripts\run.cmd ssh_execute.py lab-231 --script-file .\probe.sh --json
+```
+
+What the envelope tells you:
+
+- `data.command` is `bash -s` (or `sh -s` when the shebang is not bash);
+- `data.script_file` names the local file that ran;
+- `data.stdin_normalized` says whether a BOM/CRLF rewrite happened;
+- `data.range`-style cursors are not needed here — the script's own output is
+  the answer.
+
+### The PowerShell trap: BOM + CRLF
+
+`Set-Content` and `Out-File` write **UTF-8 with a BOM** and **CRLF** line
+endings on Windows. Piped to `bash -s` that becomes
+
+```
+﻿hostname：未找到命令
+```
+
+because the BOM is glued to the first word, and the trailing `\r` turns every
+line into a syntax error. `--script-file` normalises by default; if you pass
+the payload yourself, do it explicitly:
+
+```powershell
+# 1. let ssh-core normalise (recommended)
+python scripts/ssh_execute.py lab-231 --script-file .\probe.sh --json
+
+# 2. or write the file without a BOM yourself
+[System.IO.File]::WriteAllText("$PWD\probe.sh", $body, [System.Text.UTF8Encoding]::new($false))
+```
+
+`--stdin-file` stays **byte-exact** on purpose (a caller may be piping a tar
+stream through it). Opt into the rewrite with `--normalize-lf`, opt out of the
+`--script-file` default with `--keep-crlf`.
+
+### "I only want to look at a window of that 235 MB log"
+
+Do not `scp` it and do not hand-write `sed -n`. `ssh_slice.py` reads a bounded
+window, quotes the path itself, and returns a cursor:
+
+```bash
+python scripts/ssh_slice.py lab-231 /var/log/app.log --stat --json
+python scripts/ssh_slice.py lab-231 /var/log/app.log --lines 299700-302600 --json
+python scripts/ssh_slice.py lab-231 /var/log/app.log --grep 'ERROR|panic' --context 2 --json
+python scripts/ssh_slice.py lab-231 /var/log/app.log --tail 200
+
+# resume where the last answer stopped (data.range.next_offset / data.range.eof)
+python scripts/ssh_slice.py lab-231 /var/log/app.log --lines 12000-24000 \
+    --output-file ./window.txt --append
+```
+
+`data.range` carries `start` / `end` / `next_offset` / `eof` / `truncated` /
+`offset_unit`. The sliced text itself is in the envelope under `--json`:
+`data.content` (and `stdout`, matching `ssh_execute`), with
+`data.content_bytes`, `data.content_lines`, `data.content_sha256` and
+`data.content_truncated`. `--grep` keeps its line-number prefixes in `content`
+exactly as on stdout, and `content` is byte-identical to a fresh
+(non-`--append`) `--output-file`.
+
+The cursor makes a loop able to reconstruct a file larger than any envelope:
+
+```bash
+start=1
+while :; do
+  python scripts/ssh_slice.py lab-231 /var/log/app.log \
+      --lines "$start-$((start+9999))" --output-file ./app.log --append --json \
+      > slice.json
+  next=$(python -c "import json;print(json.load(open('slice.json'))['data']['range']['next_offset'])")
+  eof=$(python -c "import json;print(json.load(open('slice.json'))['data']['range']['eof'])")
+  [ "$eof" = "True" ] && break
+  start=$next
+done
+```
+
+### "The output is bigger than the envelope"
+
+`ssh_execute --output-file PATH` streams stdout straight to disk as it arrives
+(the 10 MB in-envelope cap is bypassed, memory stays flat) and returns
+`data.output_file = {path, bytes, sha256, error?}` instead of the transcript:
+
+```bash
+python scripts/ssh_execute.py lab-231 "journalctl -u nginx --no-pager" \
+    --output-file ./nginx.log --json
+```
+
+If the command times out you still get the bytes received so far, with
+`data.output_file.partial: true`.
+
+### "grep -c returned 1 and ssh-core called it a failure"
+
+`grep -c` exits 1 when it finds nothing, `diff` exits 1 when the files differ,
+`curl` exits 22/28 on an HTTP/network answer. That is the command *answering*,
+not failing. Say so with `--allow-exit` (alias `--expect-exit`):
+
+```bash
+python scripts/ssh_execute.py lab-231 "grep -c ERROR /var/log/app.log" \
+    --allow-exit 0,1 --json      # success:true, exit_code:1, data.exit_allowed:true
+```
+
+The real exit code is preserved in `exit_code`; only `success` flips. Network,
+auth, host-key and timeout failures are never converted — those mean the
+command never ran. In `--commands-file` batches the flag applies per command
+and to the batch verdict, and `data.results[i].exit_allowed` marks the entries
+that were expected to be non-zero.
+
 ## Run several probes over ONE connection
 
 Two tools do this, and they answer different questions.

@@ -1,7 +1,7 @@
 {
   "name": "ssh-core",
-  "version": "1.4.0",
-  "description": "SSH transport primitives: command execution (key and password auth), interactive network-device sessions, cluster broadcast, port-forward tunnels (-L/-R/-D), SFTP/scp/tar file transfer, non-interactive sudo, log following, retry with backoff, fleet health probes and ~/.ssh/config CRUD. Every call returns one JSON envelope and every write to ~/.ssh/config is locked, validated and reversible. Use whenever the task touches ssh, scp, rsync, a remote host alias, user@host, an IP address (192.168.x.x, 10.0.x.x), a jumphost/bastion, or a switch/router/firewall CLI. Excludes localhost-only operations.",
+  "version": "1.5.0",
+  "description": "SSH transport primitives for the devops-skills suite: command execution (key and password auth), interactive network-device sessions, cluster broadcast, port-forward tunnels (-L/-R/-D), SFTP/scp/tar/rsync file transfer, non-interactive sudo, log following and slicing, retry with backoff, capability probing (selfcheck/doctor), fleet health probes and ~/.ssh/config CRUD. Every call returns one JSON envelope and every write to ~/.ssh/config is locked, validated and reversible. Use whenever the task touches ssh, scp, rsync, a remote host alias, user@host, an IP address (192.168.x.x, 10.0.x.x), a jumphost/bastion, or a switch/router/firewall CLI. Excludes localhost-only operations.",
   "author": {
     "name": "devops-skills contributors"
   },

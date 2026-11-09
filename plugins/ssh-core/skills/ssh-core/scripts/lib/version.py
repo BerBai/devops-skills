@@ -37,11 +37,17 @@ History
         one UTF-8 decode, login-banner filtering, live human mode, signal
         exit codes, validated budgets, cluster --ssh-config/stdin forwarding,
         named openssh transfer backend, explicit HostName metadata
+1.5.0   field-review release (A1..D5): launcher for hosts without `python`,
+        readable askpass scratch dirs + Windows ACL repair + envelope on
+        askpass failure, doctor.py (real capability probes), --user /
+        user_required, --allow-exit, batch results[].stderr + consistent
+        batch exit code, data.host_id, --output-file, ssh_slice.py,
+        --script-file / --normalize-lf
 """
 
 from __future__ import annotations
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 #: Human-readable one-liner used by ``--version`` and the README badge.
 VERSION_LINE = f"ssh-core {__version__}"

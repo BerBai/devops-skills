@@ -40,7 +40,9 @@ from . import (
     KEX_PATTERN,
     MAX_STREAM_BYTES,
     NETWORK_PATTERN,
+    PROMPT_LINE_RE,
     classify_failure,
+    credentials_rejected,
     is_windows,
     terminate,
 )
@@ -83,11 +85,10 @@ CONFIRM_PROMPT_RE = re.compile(
 )
 # Host-key trust prompt (only auto-answered when --accept-new-hostkey).
 HOSTKEY_PROMPT_RE = re.compile(r"(?i)are you sure you want to continue connecting")
-# Default prompt heuristic: `<Switch>`, `[Switch-GigabitEthernet0/0/1]`,
-# `admin@host:~$`, `#`, `>` at end of line.
-DEFAULT_PROMPT_RE = re.compile(
-    r"(?:<[^<>\r\n]{1,80}>|\[[^\[\]\r\n]{1,120}\]|[\w.@:/~-]{0,64}[>$#%])\s*$"
-)
+#: Default prompt heuristic: `<Switch>`, `[Switch-GigabitEthernet0/0/1]`,
+#: `admin@host:~$`, `#`, `>` at end of line. Defined once, in ``lib``, so
+#: ``classify_failure`` and the interactive drivers cannot drift apart.
+DEFAULT_PROMPT_RE = PROMPT_LINE_RE
 # Lines that mean authentication is over (password rejected).
 #
 # Split in two on purpose: the numeric form ("2 failed attempts") is what VRP
@@ -105,10 +106,24 @@ AUTH_FAILED_DEVICE_RE = re.compile(
 )
 # Device-side farewells. VRP closes the SSH channel after `quit` without an
 # exit-status, so ssh reports 255 even though the logout was clean.
+#
+# BUG-008: the VRP variant a *successful command* ends with was missing, so
+# ``closed_by_device()`` said False while ``classify_failure()`` said "auth" —
+# the same transcript produced two opposite verdicts from the two entry points.
+# All three shapes OpenSSH prints when the peer ends the session are listed
+# here; none of them says anything about credentials:
+#
+#     Received disconnect from 1.2.3.4 port 22:2: The connection is closed by
+#     SSH server
+#     Disconnected from 1.2.3.4 port 22
+#     Connection to 1.2.3.4 closed.
 GRACEFUL_CLOSE_RE = re.compile(
     r"(?i)Connection to .* closed|Goodbye|Connection closed by|"
     r"User logged out|session is closing|"
-    r"client_loop: send disconnect: Broken pipe"
+    r"client_loop: send disconnect: Broken pipe|"
+    r"The connection is closed by SSH server|"
+    r"Received disconnect .*:2:|"
+    r"Disconnected from .* port 22"
 )
 
 
@@ -207,6 +222,11 @@ class PtySession:
         self.fd: int | None = None
         self.exit_status: int | None = None
         self.graceful_close = False
+        #: What the login driver saw *before* authentication finished, so a
+        #: merged (-tt / pty) transcript can be split. Empty when the snapshot
+        #: was unusable — see :func:`_record_login_banner` (BUG-008b).
+        self.login_banner = ""
+        self.login_banner_unusable = False
         # FA-18: bounded (10 MB) instead of an unbounded string; the tail is
         # what prompt matching needs, and the cap is what SKILL.md promises.
         self._buf = _BoundedBuffer()
@@ -405,6 +425,10 @@ class PipeSession:
         self.proc: Any = None
         self.exit_status: int | None = None
         self.graceful_close = False
+        #: See :func:`_record_login_banner` (BUG-008b): the pre-auth snapshot of
+        #: a merged stream, or empty when it could not be trusted.
+        self.login_banner = ""
+        self.login_banner_unusable = False
         self._buf = _BoundedBuffer()
         self._lock = threading.Lock()
         self._eof = False
@@ -715,7 +739,12 @@ def _login_via_askpass(session: Any, deadline: float) -> None:
             )
         if AUTH_FAILED_RE.search(tail) or (
             saw_prompt and AUTH_FAILED_DEVICE_RE.search(tail)
-        ):
+        ) or credentials_rejected(tail):
+            # BUG-008: the third clause is the device-side wording a VRP/Comware
+            # CLI uses on its own login prompt ("Error: Local authentication is
+            # rejected."), which the sshd-shaped patterns above do not cover.
+            # Without it a wrong password fell through to `remote_error` (104)
+            # as soon as the device re-printed its banner.
             text = _scrub(session.buffer(), session.password)
             raise SessionError("auth", 255, text.strip())
         if PASSWORD_PROMPT_RE.search(tail):
@@ -754,14 +783,55 @@ def _record_login_banner(session: Any, tail: str) -> None:
     extent is known from this moment: everything before authentication
     finished is transport noise. Stored on the session, not returned, so the
     login driver's contract does not change.
+
+    BUG-008b: on a fast device the *whole* exchange can be in the buffer at the
+    first poll — greeting, the command's result, the prompt it re-printed and
+    ssh's farewell. Recording that as "the banner" made the caller strip the
+    result and the prompt, and a completed command was then classified as
+    ``auth`` / exit 100. When the transcript already shows the session ending
+    (:func:`closed_by_device`), the pre-auth boundary is unknowable, so nothing
+    is recorded — the caller then keeps the transcript as it arrived instead of
+    deleting everything before the farewell. The fact is exposed so
+    ``ssh_execute`` can say in ``data`` that the banner was deliberately not
+    applied rather than silently dropping a greeting it never got.
+
+    A tail that already contains a prompt line is treated the same way: on a
+    merged stream the prompt marks the end of the greeting, so a "banner"
+    holding one has run past its own boundary.
+
+    Only *whole* lines are recorded. A read can land in the middle of a line,
+    and a marker that ends mid-line cannot be cut cleanly: the caller would
+    strip it and leave the rest of that line behind as a fragment of the
+    greeting. Dropping the partial line keeps the boundary at a line break —
+    the leftover bytes then stay where they belong, at the start of the
+    transcript.
     """
     text = tail.strip()
     if not text:
         return
+    cut = text.rfind("\n")
+    if cut >= 0:
+        text = text[:cut].strip()
+    if not text:
+        return
     try:
+        if closed_by_device(text) or prompt_line_present(text):
+            session.login_banner = ""
+            session.login_banner_unusable = True
+            return
         session.login_banner = text
     except AttributeError:  # read-only fake in a test
         pass
+
+
+def prompt_line_present(text: str, prompt_re: re.Pattern[str] | None = None) -> bool:
+    """True when any line of ``text`` looks like a device/shell prompt."""
+    if not text:
+        return False
+    pattern = DEFAULT_PROMPT_RE if prompt_re is None else prompt_re
+    return any(
+        pattern.search(line.strip()) for line in text.splitlines() if line.strip()
+    )
 
 
 def _answer_chained_password_prompts(
@@ -896,6 +966,55 @@ def closed_by_device(text: str) -> bool:
     return bool(GRACEFUL_CLOSE_RE.search(text))
 
 
+def prompt_returned(
+    text: str, prompt_re: re.Pattern[str] | None = None
+) -> bool:
+    """True when a merged device transcript shows a prompt after real output.
+
+    This is the shared "the command really completed" criterion both entry
+    points use for network devices (BUG-008). A VRP/Comware box answers the
+    command, prints its prompt again, and then hangs up; OpenSSH reports that
+    hang-up as exit 255 *or* 0 depending on whether it managed to read the
+    channel close before the device dropped the TCP connection. Keying success
+    on the transcript — "there is device output, and a prompt line exists" — is
+    what makes the verdict deterministic instead of a race.
+
+    Two refusals keep it from manufacturing a success:
+
+    * an unambiguous credential rejection in the text -> False, whatever else is
+      there (:func:`lib.credentials_rejected`). That is the issue's second
+      acceptance criterion: a wrong password stays ``auth``, whether ssh or the
+      device CLI said so;
+    * an empty transcript, or one that contains only ssh's own farewell lines
+      (:func:`lib.device_output_text`) -> False.
+    """
+    if not text or not text.strip():
+        return False
+    if credentials_rejected(text):
+        # BUG-008 acceptance criterion: a wrong password must stay `auth`, and
+        # this helper must never turn a rejection into a success. A device CLI
+        # answers a bad password on its own login prompt and then re-displays
+        # the banner/prompt, so a prompt alone is not proof a command ran.
+        return False
+    pattern = DEFAULT_PROMPT_RE if prompt_re is None else prompt_re
+    return any(
+        pattern.search(line.strip())
+        for line in device_output_text(text).splitlines()
+        if line.strip()
+    )
+
+
+def device_output_text(text: str) -> str:
+    """The part of a merged transcript the *device* produced (BUG-008).
+
+    Thin alias for :func:`lib.device_output_text`, kept here because every
+    interactive caller already imports this module. See there for the why.
+    """
+    from . import device_output_text as _device_output_text
+
+    return _device_output_text(text)
+
+
 def leave_session(session: Any, *, timeout: float) -> None:
     """Ask the remote shell to exit, tolerating nested views and dialects."""
     per_attempt = max(0.5, timeout / MAX_EXIT_ATTEMPTS)
@@ -961,9 +1080,12 @@ __all__ = [
     "SessionError",
     "authenticate",
     "closed_by_device",
+    "device_output_text",
     "last_prompt",
     "leave_session",
     "make_session",
+    "prompt_line_present",
+    "prompt_returned",
     "records_show_failure",
     "run_script",
     "snapshot_path",

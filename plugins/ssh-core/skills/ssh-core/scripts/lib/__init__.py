@@ -8,8 +8,18 @@ Stable surface:
     filter_ssh_noise(stderr) -> tuple[str, list[str]]  # split known-hosts noise out
     split_login_banner(stderr, command_output=...) -> tuple[str, list[str]]
         # peel sshd's pre-auth banner off stderr (SSHCORE-017)
-    classify_failure(returncode, stderr) -> str | None
-        # None|network|auth|host_key|kex|remote_error
+    classify_failure(returncode, stderr, *, command_output="") -> str | None
+        # None|network|auth|host_key|kex|remote_error; the disconnect wording a
+        # device uses after a *successful* command only counts as `auth` when
+        # the transcript shows no command output at all (BUG-008)
+    device_output_text(text) -> str
+        # strip ssh's own closure chatter — whole lines and the suffix glued to
+        # the last command line — from a merged (-tt / pty) transcript
+    strip_ssh_farewell(text) -> (str, int)
+        # same filter, plus how many farewell lines went away
+    greeting_prefix(text) -> str
+        # the leading run of pre-login greeting lines of a merged transcript
+        # (BUG-008b: the boundary the login driver records is a race)
     stream_capture(stream, cap=MAX_STREAM_BYTES) -> BoundedCapture
         # drains a *binary* stream into a bounded sink (see BoundedCapture.text)
     normalized_exit_code(returncode) -> int
@@ -225,16 +235,240 @@ NETWORK_PATTERN = re.compile(
 UNRESOLVED_HOST_RE = re.compile(
     r"Could not resolve hostname ([^\s:]+)", re.IGNORECASE
 )
+#: Unambiguous credential rejections. These mean "auth" whenever ssh exits 255,
+#: whatever else the transcript contains.
 AUTH_PATTERN = re.compile(
     r"Permission denied \(|"
     r"Permission denied, please try again|"
     r"Too many authentication failures|"
     r"Authentication failed|"
     r"password authentication failed|"
-    r"No more authentication methods|"
+    r"No more authentication methods",
+    re.IGNORECASE,
+)
+#: Default prompt heuristic, shared by ``lib.session`` (which re-exports it as
+#: ``DEFAULT_PROMPT_RE``) so "did the device re-print its prompt?" has exactly
+#: one definition: ``<Switch>``, ``[Switch-GigabitEthernet0/0/1]``,
+#: ``admin@host:~$``, ``#``, ``>`` at the end of a line.
+PROMPT_LINE_RE = re.compile(
+    r"(?:<[^<>\r\n]{1,80}>|\[[^\[\]\r\n]{1,120}\]|[\w.@:/~-]{0,64}[>$#%])\s*$"
+)
+
+#: Device-side credential rejections (BUG-008). A VRP / Comware / IOS CLI
+#: answers a bad password on its **own** login prompt ("Error: Local
+#: authentication is rejected.") instead of sshd's ``Permission denied``, and it
+#: re-displays the banner and prompt afterwards. Two consequences:
+#:
+#: * "a prompt came back" is not proof that a command ran
+#:   (``lib.session.prompt_returned`` vetoes on this pattern too);
+#: * a wrong password on a device must still report ``failure_class: "auth"``
+#:   / exit 100, which is an explicit acceptance criterion of the issue.
+#:
+#: Deliberately tiny and device-specific: a broad word like "login failed" would
+#: also match the *output of a remote command* (``grep login /var/log/auth``
+#: followed by exit 255), and turning that into ``auth`` is the exact
+#: wrong-direction conclusion this issue is about.
+DEVICE_AUTH_REJECT_PATTERN = re.compile(
+    r"(?i)(authentication is rejected|bad login name or password|"
+    r"authentication rejected|invalid username or password)"
+)
+
+#: The *ambiguous* disconnect wording (BUG-008). Huawei VRP / Comware close the
+#: channel themselves once the command has run, and OpenSSH reports that with
+#: the same sentence sshd uses when it rejects a client mid-handshake:
+#:
+#:     Received disconnect from 1.2.3.4 port 22:2: The connection is closed by
+#:     SSH server
+#:
+#: Sending an operator to "check the password" for a command that already
+#: produced its output is worse than saying "remote_error", so this pattern only
+#: classifies as ``auth`` when the transcript shows no command output — no
+#: result and, crucially, no prompt echo (a real rejection never echoes a prompt
+#: first). See :func:`classify_failure`'s ``command_output`` argument.
+AUTH_DISCONNECT_PATTERN = re.compile(
     r"Received disconnect .*The connection is closed by SSH server",
     re.IGNORECASE,
 )
+
+#: ssh's own closure chatter on a merged (``-tt`` / pty) stream. Everything
+#: matching this is transport noise, not something the device command printed:
+#: every network-device session ends with one or two of these lines, so "did the
+#: command produce output?" cannot be answered on the raw text without removing
+#: them first (BUG-008).
+#:
+#: ``client_loop: send disconnect: Connection reset`` (BUG-008b) is the shape a
+#: VRP box produces when it drops the TCP connection instead of closing the SSH
+#: channel politely. It used to be glued to the last command line
+#: (``...on line is 0.client_loop: ...``), so the line-shaped filter could not
+#: see it; :func:`strip_ssh_farewell` cuts that suffix off before this regex
+#: runs. The reset wording carries no verdict either way — it is the *client*
+#: reporting a dead socket, and the verdict comes from the transcript.
+TRANSPORT_NOISE_RE = re.compile(
+    r"(?i)^(?:"
+    r"Connection to .* closed\.?|Shared connection to .* closed\.?|"
+    r"Received disconnect from .*|Disconnected from .*|"
+    r"Connection closed by .*|client_loop: send disconnect: .*|"
+    r"Warning: Permanently added .*|"
+    r"ssh: .*|ssh_exchange_identification: .*"
+    r")\s*$"
+)
+
+#: ssh's farewell as a *suffix* of a line (BUG-008b). On a merged ``-tt`` stream
+#: the last line is ``<command output>Received disconnect ...`` or
+#: ``...is 0.client_loop: send disconnect: Connection reset`` — ssh never added
+#: the newline the device did not send, so "starts with a farewell" is false and
+#: a line-anchored filter keeps the whole thing as command output.
+#:
+#: Only ssh's own wording is listed. A device line that legitimately contains
+#: one of these phrases with output *after* it stays untouched (the pattern is
+#: anchored at the end of the line).
+SSH_FAREWELL_SUFFIX_RE = re.compile(
+    r"(?i)(?:"
+    r"Connection to \S+ closed\.|Shared connection to \S+ closed\.|"
+    r"client_loop: send disconnect: .*|"
+    r"Received disconnect from \S+ port \S+:\d+(?::\s.*)?|"
+    r"Disconnected from (?:[\w.:-]+|\[[^\]]+\]) port \d+|"
+    r"Connection closed by (?:[\w.:-]+|\[[^\]]+\]) port \d+|"
+    r"Connection reset by (?:[\w.:-]+|\[[^\]]+\]) port \d+"
+    r")\s*$"
+)
+
+
+#: Lines that belong to a **pre-login greeting** and never to command output
+#: (BUG-008b). On a merged ``-tt`` stream the greeting and the answer arrive in
+#: the same buffer, and the login driver's snapshot boundary is a race: on a fast
+#: device the answer is already there when the first poll happens, so "everything
+#: recorded before authentication finished" can include the command's result.
+#: Cutting that whole prefix deleted the result and the prompt with it, and the
+#: leftovers classified as ``auth``.
+#:
+#: These markers are the wording devices actually greet with: Huawei VRP's VTY
+#: notice and login time, Comware/IOS's "Press ENTER/RETURN to get started",
+#: Linux's last-login line and MOTD greeting. The list is deliberately about the
+#: *greeting*, never about results — a device that prints none of these keeps its
+#: greeting in ``stdout`` (a nuisance) instead of risking a deleted answer.
+#:
+#: ``Copyright (C) ...`` is deliberately **not** listed even though many login
+#: banners carry it: ``display version`` prints the same line, so matching it
+#: would make the cut eat a line of the command's own answer.
+LOGIN_GREETING_LINE_RE = re.compile(
+    r"(?i)(?:"
+    r"\bVTY users\b|current login time|"
+    r"press (?:ENTER|RETURN) to (?:get started|continue)|"
+    r"unauthorized access|authorized users only|"
+    r"last (?:successful )?login\b|user last login|"
+    r"welcome to\b|"
+    r"^\s*(?:username|login|user name)\s*:\s*$"
+    r")"
+)
+
+
+def greeting_prefix(text: str) -> str:
+    """Return the leading run of greeting lines of ``text``, endings intact.
+
+    The run stops at the first line that is not a known greeting marker, so a
+    snapshot that ran into the command's answer yields the greeting only
+    (BUG-008b). An empty result means "this transcript does not start with a
+    greeting we recognise", and callers must then cut nothing.
+    """
+    if not text:
+        return ""
+    kept: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if not LOGIN_GREETING_LINE_RE.search(line):
+            break
+        kept.append(line)
+    return "".join(kept)
+
+
+def strip_ssh_farewell(text: str) -> tuple[str, int]:
+    """Drop ssh's trailing closure chatter, including the glued form (BUG-008b).
+
+    Returns ``(text_without_farewell, removed_line_count)``.
+
+    Two shapes exist on a merged (``-tt`` / pty) stream and only the first was
+    handled before BUG-008b:
+
+    * whole lines — ``Received disconnect from <host> port 22:2: ...`` then
+      ``Disconnected from <host> port 22``. Every network-device session ends
+      with one or both, and they are ssh talking, not the command;
+    * a **suffix glued to the command's last line** — a VRP/Comware box answers
+      ``display clock`` without a trailing newline, so the transcript reads
+      ``...on line is 0.Received disconnect from ...`` or
+      ``...on line is 0.client_loop: send disconnect: Connection reset``.
+
+    The second shape is what made "did the command print anything?" answer
+    "nothing" on the runs where the device dropped the TCP connection: the raw
+    line did not *start* with a farewell, so it survived the line filter and
+    ``stdout`` kept ssh's own trailer. Cutting the suffix first is what makes
+    the device verdict independent of *how* the box hung up.
+
+    The count is returned so a caller can report how much transport noise was
+    removed instead of silently shrinking the transcript.
+    """
+    if not text:
+        return "", 0
+    removed = 0
+    kept: list[str] = []
+    for line in text.split("\n"):
+        body = line.rstrip("\r")
+        if not body.strip():
+            kept.append(line)
+            continue
+        if TRANSPORT_NOISE_RE.match(body.strip()):
+            removed += 1
+            continue
+        trimmed = SSH_FAREWELL_SUFFIX_RE.sub("", body)
+        if trimmed != body:
+            removed += 1
+            if trimmed.strip():
+                kept.append(trimmed)
+            continue
+        kept.append(line)
+    return "\n".join(kept), removed
+
+
+def device_output_text(text: str) -> str:
+    """The part of a merged transcript the *device* produced (BUG-008).
+
+    ``ssh -tt`` merges the device CLI's output with ssh's own diagnostics, so
+    "did the command print anything?" cannot be answered from the raw text:
+    every device session ends with ``Received disconnect ...`` /
+    ``Disconnected from ...``, which is ssh talking, not the command.
+
+    Removing those lines is what lets :func:`classify_failure` keep calling a
+    bare disconnect an ``auth`` rejection while a transcript that ends with a
+    prompt and a result is not one. This is :func:`strip_ssh_farewell` without
+    the count, so the line filter and the glued-suffix filter can never drift
+    apart; anything unrecognised stays (fail-open, the same rule as
+    :func:`filter_ssh_noise`).
+    """
+    return strip_ssh_farewell(text)[0]
+
+
+def credentials_rejected(text: str) -> bool:
+    """True when a merged transcript carries an unambiguous credential failure.
+
+    Two sources, both narrow on purpose:
+
+    * ssh's own wording (``Permission denied (``, ``Authentication failed`` ...),
+      which is what a Linux host or a device with sshd-style auth prints;
+    * the device CLI's own wording (``Error: Local authentication is rejected.``).
+
+    This is the veto both success tests consult, so a rejected login can never
+    be reported as a completed command just because the device re-printed its
+    banner and prompt afterwards (BUG-008 acceptance criterion: a wrong password
+    is still ``failure_class: "auth"`` / exit 100).
+    """
+    if not text:
+        return False
+    device_text = device_output_text(text)
+    return bool(
+        AUTH_PATTERN.search(device_text)
+        or DEVICE_AUTH_REJECT_PATTERN.search(device_text)
+    )
+
+
 HOST_KEY_PATTERN = re.compile(
     r"Host key verification failed|"
     r"REMOTE HOST IDENTIFICATION HAS CHANGED|"
@@ -375,7 +609,12 @@ def _unresolved_is_alias(stderr: str) -> bool:
     return bool(name) and "." not in name and ":" not in name and not name.isdigit()
 
 
-def classify_failure(returncode: int, stderr: str) -> str | None:
+def classify_failure(
+    returncode: int,
+    stderr: str,
+    *,
+    command_output: str = "",
+) -> str | None:
     """Map (returncode, stderr) to a failure class.
 
     Returns one of ``None`` / ``network`` / ``alias_not_found`` / ``auth`` /
@@ -391,6 +630,15 @@ def classify_failure(returncode: int, stderr: str) -> str | None:
     auth-shaped words, but the remediation (known_hosts / KexAlgorithms) is
     entirely different from fixing credentials.
 
+    ``command_output`` (BUG-008) is whatever the *command* produced, when the
+    caller has it (the interactive/network routes work on one merged stream, so
+    the transcript doubles as both). It gates the one ambiguous pattern: a
+    device that says ``Received disconnect ... The connection is closed by SSH
+    server`` after it answered the command is closing the session normally, not
+    rejecting credentials, so with output present that wording classifies as
+    ``remote_error``. Callers that pass nothing keep the old, conservative
+    behaviour (see :data:`AUTH_DISCONNECT_PATTERN`).
+
     Note: this function does NOT return "timeout". The caller is the only
     code path that knows whether `subprocess.TimeoutExpired` was raised,
     so timeout classification belongs there, not here.
@@ -404,6 +652,17 @@ def classify_failure(returncode: int, stderr: str) -> str | None:
             return "kex"
         if AUTH_PATTERN.search(stderr):
             return "auth"
+        if DEVICE_AUTH_REJECT_PATTERN.search(stderr):
+            # A device CLI rejects a bad password on its own login prompt
+            # ("Error: Local authentication is rejected."), which ssh reports
+            # with exit 255 like any other client failure (BUG-008).
+            return "auth"
+        if AUTH_DISCONNECT_PATTERN.search(stderr):
+            # Only a real rejection when nothing was produced first: a device
+            # that echoes a prompt and then hangs up executed the command.
+            if not command_output.strip():
+                return "auth"
+            return "remote_error"
         if _unresolved_is_alias(stderr):
             return "alias_not_found"
         if NETWORK_PATTERN.search(stderr):

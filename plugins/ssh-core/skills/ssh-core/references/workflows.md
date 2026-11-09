@@ -11,8 +11,28 @@ caller (Claude Code / agent)
 ssh_execute.py <alias> "<cmd>"
    │
    ├─ key route:   native ssh -o BatchMode=yes -o ConnectTimeout=N [-- <host> <cmd>]
-   └─ password route:  pty (POSIX)  |  ssh -tt + SSH_ASKPASS (Windows)
+   └─ password route:  SSH_ASKPASS over an exec channel (no pty, no -tt)
 ```
+
+**Expected non-zero exit codes.** `grep -c` exits 1 when it finds nothing,
+`diff` exits 1 when the files differ, `curl` exits 22/28 on an HTTP or network
+answer. Those are *answers*, not failures. `--allow-exit 0,1` (alias
+`--expect-exit`) reports `success: true` while keeping the real `exit_code`:
+
+```json
+{"success": true, "exit_code": 1,
+ "data": {"exit_allowed": true, "allowed_exit_codes": [0, 1],
+          "observed_failure_class": "remote_error", "failure_class": null}}
+```
+
+Network / auth / host-key / timeout failures are never converted — those mean
+the command never ran. The flag is accepted by `ssh_execute.py` (single, local
+and batch) and `ssh_cluster.py`, where it applies per host and to the aggregate.
+
+**Large output.** `--output-file PATH` streams stdout to disk while the command
+runs (flat memory, no 10 MB cap) and puts `{path, bytes, sha256}` in
+`data.output_file` instead of the transcript. A timeout keeps what was received
+and marks `data.output_file.partial: true`.
 
 `ssh_execute.py --control-master auto` opts into OpenSSH ControlMaster reuse
 (POSIX only — Windows OpenSSH needs a POSIX socket; there it refuses with
@@ -20,10 +40,28 @@ ssh_execute.py <alias> "<cmd>"
 
 **Batching beats reuse.** `--commands-file PATH` (or repeated `--command`)
 runs N commands inside **one** connection: `ssh <alias> sh -s` reads a script
-from stdin, and every command's output plus its own exit status lands in
-`data.results[]`. 20 commands cost one handshake on every platform, including
-Windows. Use it instead of ControlMaster whenever you have more than one
-command for a host.
+from stdin, and every command's own `stdout`, `stderr` and exit status lands in
+`data.results[]`:
+
+```json
+{"results": [{"index": 0, "stdout": "", "exit_code": 2,
+              "stderr": "ls: cannot access '/nope': No such file or directory"},
+             {"index": 1, "stdout": "ok", "exit_code": 0, "stderr": ""}],
+ "failed_indexes": [0], "batch_commands": 2}
+```
+
+The batch's stderr is captured per command (a private temp file inside the
+batch, replayed after each exit marker) — before 1.5 every message landed in
+the top-level `stderr` and there was no way to tell which command produced it.
+Anything on the top-level `stderr` now is a *summary* of what happened outside
+the results (a dead connection, a DNS failure) and is mirrored in
+`data.stderr_outside_results`.
+
+The batch's own `exit_code` mirrors the single-command route: it is the first
+failing command's status (`1` for that `grep -c`), so a caller does not need
+two rules. `104` is reserved for an incomplete batch
+(`data.batch_incomplete`) and an unparseable transcript
+(`data.batch_parse_error`).
 
 Each command runs as `( cmd ) < /dev/null`, for two reasons: a command that
 reads stdin (`cat`, `read`, `ssh`, `sudo -S`) gets EOF instead of swallowing
@@ -35,6 +73,13 @@ green light.
 **Ad-hoc hosts.** `user@host`, `user@host:2222` and `[v6addr]:22` are accepted
 directly (translated to `-p`), and `--port` / `--identity` override the
 config. You no longer have to write a `Host` block before touching a machine.
+
+**Password auth needs a username, not just a password.** With `--auth
+password`, ssh-core resolves the login user from `--user USER`, then from
+`user@host`, then from a real `User` directive in the matched `Host` block. If
+none exists it refuses with `failure_class: "user_required"` (exit 115) instead
+of letting ssh try the local account name and fail with a misleading
+`Permission denied`. `data.user_source` says which of the three supplied it.
 
 **A command that starts with `-`.** Both `ssh_execute.py <alias> -- -v` and
 `ssh_execute.py <alias> -v` work; the second form is recognised because `-v`
@@ -117,10 +162,53 @@ one JSON document at the end. That is what lets `... --follow --json | jq` keep
 working after Ctrl-C. The transcript is still bounded by the usual 10 MB cap;
 `data.truncated` / `data.bytes_elided` report anything dropped.
 
-`--tail N` wraps the command as `stdbuf -oL -eL sh -c '<cmd>' | tail -n N -f`
-(with a plain-pipe fallback when `stdbuf` is missing), which is what makes a
-slow log appear immediately. Do not combine it with a command that is already
-`tail -f`: the inner `tail` would never flush through a pipe.
+## 1b-bis. Reading a window of a large file (`ssh_slice.py`)
+
+`--follow` is for *live* logs. For a 200 MB file that already exists, do not
+`scp` it and do not hand-write `sed -n`: `ssh_slice.py` quotes the path itself
+and returns a cursor.
+
+```
+ssh_slice.py web-01 /var/log/app.log --stat                      # 3 418 992 lines, 231 MB
+ssh_slice.py web-01 /var/log/app.log --lines 299700-302600 --json
+# -> data.content holds those 2 901 lines; data.range.next_offset = 302601
+ssh_slice.py web-01 /var/log/app.log --grep 'ERROR|panic' --context 2 --json
+# -> data.content keeps the "120346:..." line numbers, so a hit becomes a --lines window
+ssh_slice.py web-01 /var/log/app.log --tail 200
+ssh_slice.py web-01 /var/log/app.log --bytes 1048576-2097151
+```
+
+Every mode returns the sliced text itself — `data.content` (identical to
+`stdout` in `--json` mode) — plus its companions:
+
+```
+data.content_bytes / data.content_lines / data.content_sha256
+data.content_truncated        true when the answer is not the whole window
+data.content_hint             what to do about it, or null
+```
+
+and the cursor block:
+
+```json
+{"data": {"range": {"mode": "lines", "start": 299700, "end": 302600,
+                     "next_offset": 302601, "eof": false, "truncated": false,
+                     "offset_unit": "line", "bytes": 184320, "lines": 2901}}}
+```
+
+`content_truncated` is true when the byte/line budget cut the window, when the
+10 MB transport cap elided bytes (`data.transport_bytes_elided`), or when
+`--append` dropped a half line so the file stays resumable. When it is true,
+`content_hint` names the escape hatch instead of leaving you to guess, and human
+mode prints the same sentence on stderr (stdout stays byte-exact).
+`data.range.truncated` means the byte/line budget cut the window short; `eof`
+means the range ran past the end of the file.
+
+`next_offset` is the cursor for the next call, so
+`--lines … --output-file out.txt --append` in a loop reconstructs any file
+regardless of size. `--output-file` writes the same bytes as `data.content`, so
+for a fresh (non-`--append`) file `data.content_sha256 ==
+data.output_file.sha256`; with `--append` the digest is `null` on purpose (the
+file is cumulative) and `data.content` is the bytes *this* call added.
 
 ## 1c. Retrying (`--retry`)
 
@@ -190,14 +278,25 @@ ssh_cluster.py "<cmd>" --hosts web-1,web-2 \
 ```
 
 - `--health-check-command CMD` replaces `true`. A non-zero exit marks the host
-  unhealthy, sets `failure_class: "health_check_failed"`, `skipped: true`, and
-  the broadcast never touches it.
+  unhealthy, sets `skipped: true` and `skipped_reason: "health_check_failed"`,
+  and the broadcast never touches it. The older `failure_class:
+  "health_check_failed"` is still emitted for consumers that knew only that
+  field; when `skipped` is true, `skipped_reason` is authoritative and the
+  `failure_class` is legacy-only. **A skipped host does not fail the batch**:
+  a run where every host is either ok or skipped is `success: true`, exit 0,
+  and `summary.fail` stays 0.
 - `--probe [tcp:|port:]PORT` is a plain socket connect that never touches sshd.
   That is how you tell the two outage shapes apart: *port closed* (host down /
   service not listening) versus *port open but ssh refuses me* (auth, host key,
   wedged sshd). Records land in `data.results[alias].probe` as
   `{ok, probes, failed, failed_targets}` plus the raw `probe_records`.
 - Both run in parallel before the broadcast; a host failing either is skipped.
+- `data.ok_hosts` / `data.failed_hosts` / `data.skipped_hosts` list the aliases
+  per bucket (disjoint, declaration order), so you do not have to walk
+  `data.results` to find out who was skipped and why. Human mode prints a
+  `hosts: N (ok= fail= skipped=)` header, then one indented
+  `class  count  alias, alias` line per group, and a
+  `probe: tcp:22 ok, tcp:3306 refused` line per host when `--probe` is used.
 
 ### 2b. Retry: only what is transient
 
@@ -233,6 +332,33 @@ falls back otherwise:
 `data.transport_note` says what the fallback cannot do. The fallback exists
 because "paramiko is not installed" used to mean "this skill cannot move a
 single byte", while `scp` ships with every OpenSSH client.
+
+**Uploads refuse to clobber.** Before a single-file upload the script asks the
+remote side once — an SFTP `stat` on the session it already has, otherwise a
+single `ssh 'test -d/-e/-h'` — and if anything is already at the destination it
+stops with `failure_class: "remote_path_exists"` (exit **168**) and leaves the
+file untouched: `data.remote_path_state` is `dir | file | link`,
+`data.overwrite: false`, `data.requires: "--overwrite"`. `--overwrite` allows
+the replacement (sha256 is still verified afterwards). `--resume` and `--delete`
+imply it, because both are defined as writing over what is already there.
+`--recursive` is exempt on purpose: it copies the *contents* of the local
+directory into the remote directory, so an existing directory target is the
+normal case; overwriting individual files inside a tree is what the `--delete`
+mirror is for. When the destination cannot be inspected at all the copy is
+refused rather than written blind: ssh-level failures keep their own class
+(`auth` / `host_key` / `network`), and an unanswerable probe reports
+`transfer_io` (164) with `data.remote_path_state: "unknown"`. One probe per
+upload, never one per file.
+
+**Recursive downloads land the contents, not the directory.** The layout is
+identical on all three backends: the files inside the remote directory appear
+directly under the local destination (`out/a.txt`, `out/sub/b.txt`), never
+`out/<remote-basename>/…`. The tar fallback gets there with
+`--strip-components=1`, which drops the `<leaf>/` prefix that
+`tar -C <parent> -cf - <leaf>` puts on every entry; GNU tar and Windows'
+`tar.exe` (bsdtar/libarchive) both accept the flag. Downloading a *file* with
+`--recursive` keeps the single-file layout and does not strip.
+`data.layout` is `"contents"` or `"single-entry"`.
 
 `--transport openssh` names that fallback explicitly (it is the `scp` backend
 under a clearer name); `--transport scp` still works. An SFTP-only flag on that
@@ -280,6 +406,17 @@ without pruning would be a lie. `--preserve` is honoured on both transports.
 | `auto` | `stream` if paramiko is importable, else `direct` | — | reported as `auto_resolved_to` |
 
 All four modes are implemented; nothing is deferred any more.
+
+`data.bytes` and `data.files_transferred` are **measured**, not estimated, in
+every mode. `direct` counts the tar entries that actually pass through this
+process (`files_transferred` = regular files, `bytes` = their payload — the same
+number `stream` writes per destination file, not archive bytes: a 6-byte file
+costs 1536 bytes of tar). `direct --use-rsync` reads `rsync --stats` on the
+source host (`Number of regular files transferred`, `Total file size`).
+`data.transport` is `direct | rsync` (or `sftp` for `stream`), `data.mode_used`
+is the mode that ran, `data.detail` carries the one-line transport note, and
+`data.auto_resolved_to` / `data.hybrid_resolved_to` still say how
+`auto`/`hybrid` decided.
 
 ## 4. Port-forward tunnels
 
@@ -391,11 +528,11 @@ The wrapper inspects what's in `~/.ssh/config` for the alias:
 
 | Config | Path | Status |
 |---|---|---|
-| `IdentityFile` set, key exists, no passphrase | native ssh (fastest) | ✓ |
-| `IdentityFile` set, key has a passphrase + `ssh-agent` loaded | native ssh + agent | ✓ |
-| `# auth: password` metadata (or `--auth password`) | pty (POSIX) / `ssh -tt` + askpass (Windows) | ✓ |
-| `# device-type: network` metadata | interactive session | ✓ |
-| Neither | refuse, ask user | ✓ |
+| `IdentityFile` set, key exists, no passphrase | native ssh (fastest) | yes |
+| `IdentityFile` set, key has a passphrase + `ssh-agent` loaded | native ssh + agent | yes |
+| `# auth: password` metadata (or `--auth password`) | pty (POSIX) / `ssh -tt` + askpass (Windows) | yes |
+| `# device-type: network` metadata | interactive session | yes |
+| Neither | refuse, ask user | yes |
 
 The password itself is never stored by us: export `SSH_PASSWORD` (or the
 variable named by `--password-env`) for the call. Passwords recorded in

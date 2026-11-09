@@ -30,7 +30,8 @@ The contract now is:
   100s   ssh_execute / ssh_session / ssh_cluster
   120s   ssh_tunnel
   140s   deploy_pubkey
-  160s   transfer (upload / download / server_transfer)
+  160s   transfer (upload / download / server_transfer), including 168 for
+         "the destination already exists and nobody said --overwrite"
   180s   config_manager write-path extras
   200s   daemon
   220s   audit tooling (summarize / prune / rotate)
@@ -104,6 +105,10 @@ EXIT_TRANSFER_IO = 164
 EXIT_TRANSFER_INTEGRITY = 165
 EXIT_MODE_UNSUPPORTED = 166
 EXIT_TRANSFER_TOOL_MISSING = 167
+# GAP-003: the transfer refused to clobber an existing destination. It is its
+# own number (not `already_exists` = 5) because 5 is a *bucket* code shared by
+# every script, while this one is the transfer family's "say --overwrite".
+EXIT_REMOTE_PATH_EXISTS = 168
 
 # --- config_manager extras (180s) -------------------------------------------
 EXIT_WILDCARD_REFUSED = 180
@@ -181,6 +186,9 @@ EXIT_CODES: dict[str, int] = {
     "local_path_is_directory": EXIT_LOCAL_PATH_IS_DIRECTORY,
     "remote_path_missing": EXIT_REMOTE_PATH_MISSING,
     "remote_path_invalid": EXIT_REMOTE_PATH_INVALID,
+    # GAP-003: `ssh_upload` refuses to overwrite an existing remote file
+    # unless --overwrite/--resume/--delete was given.
+    "remote_path_exists": EXIT_REMOTE_PATH_EXISTS,
     "dst_path_invalid": EXIT_REMOTE_PATH_INVALID,
     "src_path_missing": EXIT_REMOTE_PATH_MISSING,
     "src_is_directory": EXIT_REMOTE_PATH_MISSING,

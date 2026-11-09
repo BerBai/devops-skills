@@ -27,29 +27,164 @@ SSH_PASSWORD='...' python scripts/ssh_execute.py <alias> "uptime" --auth passwor
 ```
 
 This works on Windows too: the password is answered through the `SSH_ASKPASS`
-helper over a `ssh -tt` pipe (no pty needed). `data.transport` says `pipe`
-there and `pty` on POSIX.
+helper over a normal **exec** channel (no pty, no `-tt` needed). `data.transport`
+says `pipe` there and `pty` on POSIX; either way stdout and stderr stay separate
+and `exit 3` really is 3.
 
 For an interactive CLI (switch/router/firewall) use `ssh_session.py`
 instead — one exec command cannot disable paging or answer `[Y/N]`.
 `ssh_config_manager.py create ... --auth password --device-type network`
 makes `--auth auto` route there automatically for that alias.
 
-## "no matching key exchange method found" / "no matching host key type found"
+## "user_required" (exit 115) — the username, not the password
 
-OpenSSH 8.8+ dropped `ssh-rsa` and `diffie-hellman-group-exchange-sha1`.
-`failure_class` is `kex` (or `host_key` for the host-key variant). Add the
-legacy algorithms per call — do not edit the global `~/.ssh/config` for a
-one-off:
+Password auth needs a login name. If the target is a bare IP, the target has
+no `user@`, and the matched `~/.ssh/config` block has no `User`, then ssh
+falls back to your **local** account name (on Windows, `PCFM-084`, not
+`root`) and the failure reads `Permission denied` — blaming the password for a
+missing username.
 
-```bash
-python scripts/ssh_execute.py old-switch "display version" \
-    -o KexAlgorithms=+diffie-hellman-group-exchange-sha1 \
-    -o HostKeyAlgorithms=+ssh-rsa
+ssh-core now refuses up front instead:
+
+```
+failure_class: "user_required"   exit 115
 ```
 
-`ssh_tunnel.py` and `ssh_cluster.py` accept the same `-o` flags.
+Three fixes, any one of them:
+
+```bash
+python scripts/ssh_execute.py --user root 192.168.30.54 "id" --auth password
+python scripts/ssh_execute.py root@192.168.30.54 "id" --auth password
+python scripts/ssh_config_manager.py update --alias lab-54 --user root
+```
+
+`ssh_cluster.py` forwards `--user` to every worker, so a fleet of bare IPs is
+one flag away. The envelope also says *where* the user came from
+(`data.user_source`: `flag` / `target` / `config`), which is the quickest way
+to spot a config block that never matched.
+
+## "askpass_unavailable" (exit 114) — no writable scratch directory
+
+Password auth stages two files in a private directory: a 0600 `secret` and a
+small `askpass` helper (a `.cmd` on Windows). Both are deleted afterwards. If
+**none** of these directories can be created and written to, ssh-core cannot
+answer the prompt at all and says so instead of raising a traceback:
+
+1. `$SSH_CORE_ASKPASS_DIR` — used exactly as given;
+2. `$SSH_CORE_ASKPASS_HOME/ssh-core-askpass`;
+3. `$TMPDIR/ssh-core-askpass` (`%TEMP%` on Windows);
+4. `~/.cache/ssh-core-askpass`;
+5. `$DSH_HOME/tmp/ssh-core-askpass`;
+6. `./.ssh-core-askpass`.
+
+```bash
+# pick a directory that really is writable for this user and pin it
+export SSH_CORE_ASKPASS_DIR="$HOME/.ssh-core-askpass"     # POSIX
+$env:SSH_CORE_ASKPASS_DIR = "$env:USERPROFILE\.ssh-core-askpass"   # PowerShell
+python scripts/doctor.py          # the `askpass` row proves it works
+```
+
+The envelope lists every path it tried in `data.askpass_tried`. On Windows the
+directory is created normally and tightened with `icacls` — `mkdir(mode=0o700)`
+produces a protected DACL that can omit the creating user, which is exactly how
+an earlier version locked itself out of its own scratch directory.
+
+## "no matching key exchange method found" / "no matching host key type found" / "no matching cipher found" / "no matching MAC found"
+
+A 2013-era switch offers one short list per algorithm family, and OpenSSH 8.8+
+plus the RHEL/Kylin system crypto policy no longer enable most of it. ssh
+negotiates kex, host key, cipher and MAC in that order and reports **one**
+missing family at a time, so each rerun gets exactly one step further:
+
+| Symptom | Cause | Action |
+|---|---|---|
+| `no matching key exchange method found` | the device only offers `diffie-hellman-group-exchange-sha1` / `group1-sha1` | add `-o KexAlgorithms=+diffie-hellman-group-exchange-sha1` |
+| `no matching host key type found` | the device only offers `ssh-rsa` | add `-o HostKeyAlgorithms=+ssh-rsa` |
+| `no matching cipher found` | the device only offers the CBC family (`aes256-cbc,aes128-cbc,3des-cbc,des-cbc`) | add `-o Ciphers=+aes256-cbc,aes128-cbc` |
+| `no matching MAC found` | the device only offers `hmac-sha1` | add `-o MACs=+hmac-sha1` |
+
+The troubleshooting order is **kex → host key → cipher → MAC**: add one group
+per round trip and rerun, and do not edit the global `~/.ssh/config` for a
+one-off. `failure_class` is `host_key` (exit 101) for the host-key row and `kex`
+(exit 103) for the other three.
+
+The complete set, copy-pasteable:
+
+```bash
+python scripts/ssh_execute.py old-switch "display clock" \
+    -o KexAlgorithms=+diffie-hellman-group-exchange-sha1 \
+    -o HostKeyAlgorithms=+ssh-rsa \
+    -o Ciphers=+aes256-cbc,aes128-cbc \
+    -o MACs=+hmac-sha1
+```
+
+A device that also wants a password adds `SSH_PASSWORD='...' --auth password`
+(and `--user` when the alias has no `User`).
+
+`ssh_session.py`, `ssh_cluster.py`, `ssh_tunnel.py start` and
+`ssh_daemon.py start` accept the same `-o KEY=VALUE` flags.
 `ProxyCommand` / `LocalCommand` / `Match` are refused on purpose.
+
+## Commands echoed, but `failure_class: auth` — a disconnect is not an auth failure
+
+| Symptom | Cause | Action |
+|---|---|---|
+| the device printed its output (banner, prompt, command result) and the envelope still says `failure_class: "auth"` / exit 100 with `stdout: ""` | VRP / Comware / IOS close the SSH session once the command is done, and OpenSSH reports that close as `Received disconnect from <host> port 22:2: The connection is closed by SSH server` + `Disconnected from <host> port 22` | the command already ran, so do not chase the password: rerun it with `ssh_session.py`, or read the transcript out of `stderr` / `data.raw_stdout`. A build that recognises the graceful close returns `success: true` / `exit_code: 0` for this pattern |
+| `stdout` sometimes starts with the login greeting, sometimes not | the greeting/answer boundary on a merged (`-tt`) stream is a race: on a fast device both arrive in the same read | look at `data.ssh_banner_applied` / `data.ssh_banner_unusable_reason` and `data.verdict_basis`; the greeting is only cut on evidence (see below), and never at the price of the command's result |
+| `success: true` but the answer is missing from `stdout` | `data.ssh_banner_applied: false` with the greeting still present, or `data.ssh_farewell_lines_removed > 0` having removed ssh's trailer | read `data.raw_stdout` for the untouched bytes; report it as a bug if `verdict_basis.device_lines` is 0 while the device clearly answered |
+
+A device does not hold an exec channel open the way sshd on a Linux host does:
+the command runs, the CLI prints its result, and the session is torn down. ssh
+then exits 255 — or 0, depending on whether it managed to read the channel close
+before the device dropped TCP. The verdict therefore comes from the transcript,
+never from the exit status:
+
+- prompt and output, then `Received disconnect ... The connection is closed by
+  SSH server` / `Disconnected from ... port 22` — the command ran.
+  `ssh_execute.py` decides that from the transcript (output **and** a prompt
+  line), not from ssh's exit status: `success: true`, `exit_code: 0`, transcript
+  in `stdout`, and `data.device_closed_after_output: true` when ssh still
+  reported 255. `ssh_session.py` uses the same helper, so both entry points
+  return the same verdict for the same device and command.
+- the same `Received disconnect` with **no device output** before it — a real
+  rejection: wrong password, no free VTY, or an ACL. That stays
+  `failure_class: "auth"` / exit 100. ssh's own closure lines are stripped
+  before "is there output?" is asked, so a transcript that is nothing but the
+  goodbye cannot be mistaken for a completed command, and a real auth rejection
+  never echoes a prompt first.
+- a device CLI that rejects the password on its own login prompt (`Error: Local
+  authentication is rejected.`, `Bad login name or password`) is also `auth` /
+  exit 100, even though the device re-prints its banner and prompt afterwards.
+  The prompt shortcut vetoes itself when a credential rejection is present.
+- the same device can report the close as `client_loop: send disconnect:
+  Connection reset` when it drops TCP instead of closing the channel. That is
+  the *client* noticing a dead socket, so it carries no verdict: the trailer is
+  stripped (whole line, or glued to the command's last line when the device's
+  answer had no trailing newline) and the verdict is taken from what is left.
+  `data.ssh_farewell_lines_removed` counts what went.
+
+`data.raw_stdout` still carries the untouched transcript.
+
+### When `stdout` looks different from run to run
+
+`ssh_execute.py` never guesses the greeting/answer boundary from shape alone.
+Two fields say what it did, and they are the first thing to look at when one run
+keeps the login greeting and the next does not:
+
+| Field | Meaning |
+|---|---|
+| `data.ssh_banner_lines` | the greeting was cut; its lines are listed here |
+| `data.ssh_banner_applied: false` + `data.ssh_banner_unusable_reason` | a greeting was seen but **not** cut, because cutting it would have deleted the command's result (or the boundary was unknowable). The greeting then stays in `stdout` |
+| `data.verdict_basis` | the four inputs to the verdict (`rc`, `prompt_returned`, `device_closed`, `credentials_rejected`) plus whether the banner was applied and how many device lines were left |
+
+A greeting left in `stdout` is deliberate: the alternative is deleting the
+command's answer, which is what DEVOPS-BUG-008b was. Use `data.raw_stdout` when
+the exact bytes matter, and `ssh_session.py` when the device CLI is the thing
+being driven.
+
+When the two entry points disagree about a device, `ssh_session.py` is the one
+that sees the device CLI; `ssh_execute.py` is a one-command convenience. The
+entry-point table in `SKILL.md` says which one a task should use.
 
 ## "password_required" (exit 105)
 

@@ -67,7 +67,7 @@ from lib import (  # noqa: E402
     emit,
     json_result,
 )
-from lib.cli import SSHArgumentParser, handle_version  # noqa: E402
+from lib.cli import SSHArgumentParser, guarded_main, handle_version  # noqa: E402
 from lib.exit_codes import (  # noqa: E402
     EXIT_AUDIT_BAD_SINCE,
     EXIT_AUDIT_NO_RECORDS,
@@ -722,4 +722,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main("audit.py", main))

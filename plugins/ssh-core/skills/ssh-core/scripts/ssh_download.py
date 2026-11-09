@@ -23,6 +23,13 @@ v1.2 surface::
 with scp alone cannot preserve a tree, so the fallback for ``--recursive`` is
 the tar stream; for a single file it is ``scp -O``.
 
+Recursive layout is the same on every backend: the *contents* of the remote
+directory land directly under the local destination (``out/a.txt``,
+``out/sub/b.txt`` — never ``out/<remote-basename>/a.txt``). The tar fallback
+gets there with ``--strip-components=1``, which drops the ``<leaf>/`` prefix
+that ``tar -C <parent> -cf - <leaf>`` puts on every entry; bsdtar (Windows
+``tar.exe``) and GNU tar both accept the flag.
+
 Integrity: the sha256 of the local file is compared with the remote
 ``sha256sum``/``shasum`` after the copy (both transports), so a silent
 truncation is caught rather than reported as success.
@@ -60,7 +67,7 @@ from lib.auth import AUTH_CHOICES, DEFAULT_PASSWORD_ENV  # noqa: E402
 from lib.auth import auth_options  # noqa: E402
 from lib.auth import resolve as resolve_auth  # noqa: E402
 from lib.askpass import askpass_env  # noqa: E402
-from lib.cli import SSHArgumentParser, handle_version  # noqa: E402
+from lib.cli import SSHArgumentParser, guarded_main, handle_version  # noqa: E402
 from lib.exit_codes import (  # noqa: E402
     EXIT_AUTH,
     EXIT_DEPENDENCY_MISSING,
@@ -73,6 +80,7 @@ from lib.exit_codes import (  # noqa: E402
     EXIT_PERMISSION,
     EXIT_REMOTE_PATH_INVALID,
     EXIT_REMOTE_PATH_MISSING,
+    EXIT_TIMEOUT,
     EXIT_TRANSFER_IO,
     EXIT_VERIFY_FAILED,
     exit_code_for,
@@ -91,7 +99,14 @@ from lib.sftp_transport import (  # noqa: E402
     download_tree,
 )
 from lib.transfer import (  # noqa: E402
+    REMOTE_PATH_DIR,
+    REMOTE_PATH_UNKNOWN,
+    StreamDrain,
+    StreamTimeout,
+    TarEntryCounter,
     paramiko_available,
+    probe_remote_path,
+    pump_stream,
     remote_sha256,
     run_scp,
     sha256_file,
@@ -423,7 +438,25 @@ def _run_scp_file(args: argparse.Namespace, password: str | None = None) -> dict
 def _run_tar_tree(
     args: argparse.Namespace, password: str | None = None
 ) -> dict[str, Any]:
-    """Recursive download without paramiko: remote ``tar`` piped into local tar."""
+    """Recursive download without paramiko: remote ``tar`` piped into local tar.
+
+    Layout (BUG-006): ``tar -C <parent> -cf - <leaf>`` prefixes every entry with
+    ``<leaf>/``, so extracting verbatim recreated that level and a download of
+    ``/tmp/dl2`` produced ``out/dl2/a.txt``. ``--strip-components=1`` drops the
+    prefix, which is what the SFTP backend and ``scp -r`` do: the *contents* of
+    the source land directly under the local destination.
+
+    The strip is applied only when the source is a directory. A recursive
+    download of a single file keeps its name (stripping the only component
+    would silently extract nothing), so the kind is probed once up front — the
+    same single ``ssh 'test -d'`` the upload path uses, not a per-file storm.
+
+    Counts (BUG-006): every relayed chunk feeds a :class:`TarEntryCounter`, so
+    ``bytes_transferred`` is the payload the archive actually carried and
+    ``files_transferred`` the number of regular files it contained. Both are
+    measured, not guessed; ``sha256_verified`` stays ``false`` because this
+    path performs no hash comparison.
+    """
     started = time.monotonic()
     local = Path(args.local_path).expanduser()
     # FA-03d: `mkdir(parents=True)` raises FileExistsError when the target is an
@@ -458,36 +491,117 @@ def _run_tar_tree(
         ssh_base += ["-p", str(args.port)]
     if args.identity:
         ssh_base += ["-i", str(Path(args.identity).expanduser())]
-    quoted = "'" + args.remote_path.replace("'", "'\\''") + "'"
     # -C <parent> + the bare leaf name: extracting "/etc/ssh" verbatim would
     # recreate the whole absolute path under local_path.
     trimmed = args.remote_path.rstrip("/")
     parent, _, leaf = trimmed.rpartition("/")
+    leaf = leaf or trimmed
+    # One probe decides the layout, never a per-file walk. `test -d` follows
+    # symlinks, so a link to a directory already answers "dir"; a dangling link
+    # answers "link" and is copied as a single entry, like a file.
+    source_kind = probe_remote_path(
+        args.alias,
+        args.remote_path,
+        password=password,
+        ssh_config=args.ssh_config,
+        accept_new_hostkey=args.accept_new_hostkey,
+        port=args.port,
+        identity=args.identity,
+    )
+    strip = source_kind == REMOTE_PATH_DIR
+    if source_kind == REMOTE_PATH_UNKNOWN:
+        # Cannot tell, but `--recursive` means "a tree" everywhere else in this
+        # script, so a directory is the only sane assumption; if it were wrong,
+        # tar's own exit code and stderr describe the miss.
+        strip = True
+    return _run_tar_stream(
+        args,
+        password,
+        ssh_base=ssh_base,
+        remote=trimmed,
+        parent=parent,
+        leaf=leaf,
+        strip=strip,
+        started=started,
+    )
+
+
+def _tar_extract_argv(local: Path, *, strip: bool) -> list[str]:
+    """The local ``tar`` argv for one download.
+
+    ``strip`` adds ``--strip-components=1``, which is what makes a recursive
+    download land the source *contents* under ``local`` instead of recreating
+    the ``<leaf>/`` level the producer put on every entry (BUG-006). Both
+    GNU tar (1.32, lab-240) and Windows' bsdtar (3.7.2/libarchive) accept the
+    flag in this position; the single-file layout omits it.
+    """
+    argv = ["tar", "-xf", "-", "-C", str(local)]
+    if strip:
+        argv.append("--strip-components=1")
+    return argv
+
+
+def _run_tar_stream(  # noqa: PLR0913 — one shared implementation, two layouts
+    args: argparse.Namespace,
+    password: str | None,
+    *,
+    ssh_base: list[str],
+    remote: str,
+    parent: str,
+    leaf: str,
+    strip: bool,
+    started: float,
+) -> dict[str, Any]:
+    """Run the tar producer/consumer pair and build the envelope.
+
+    ``strip=True`` extracts with ``--strip-components=1``, which drops the
+    ``<leaf>/`` prefix that ``tar -C <parent> -cf - <leaf>`` puts on every
+    entry, so the *contents* of a directory land directly under the local
+    destination (BUG-006). ``strip=False`` is the single-file layout, which must
+    stay byte-identical to the non-recursive download: ``out/<name>``.
+
+    The local tar's own rejection of the flag is reported explicitly rather than
+    as a generic tar failure, because "your bsdtar is too old" and "the remote
+    path vanished" need different fixes.
+    """
     producer = [
         *ssh_base, "--", args.alias,
-        f"tar -C '{parent or '/'}' -cf - '{leaf or trimmed}'",
+        f"tar -C '{parent or '/'}' -cf - '{leaf}'",
     ]
-    consumer = ["tar", "-xf", "-", "-C", str(local)]
+    consumer = _tar_extract_argv(Path(args.local_path).expanduser(), strip=strip)
     env = msys_safe_env()
     ctx = None
     if password:
         ctx = askpass_env(password)
         env = ctx.__enter__()
+    counter = TarEntryCounter()
+    src_err = StreamDrain(None)
+    dst_err = StreamDrain(None)
     try:
         src = subprocess.Popen(
-            producer, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=env,
+            producer, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
         )
         dst = subprocess.Popen(
-            consumer, stdin=src.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=msys_safe_env(),
+            consumer, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, env=msys_safe_env(),
         )
-        if src.stdout is not None:
-            src.stdout.close()
-        assert dst.stderr is not None
-        dst_err = dst.stderr.read().decode("utf-8", "replace")
-        assert src.stderr is not None
-        src_err = src.stderr.read().decode("utf-8", "replace")
+        src_err = StreamDrain(src.stderr)
+        dst_err = StreamDrain(dst.stderr)
+        try:
+            pump_stream(
+                src.stdout, dst.stdin,
+                counter=counter, started=started, timeout=args.timeout,
+            )
+        except StreamTimeout:
+            src.kill()
+            dst.kill()
+            return _failure(
+                args, failure_class="timeout",
+                stderr=f"tar stream exceeded {args.timeout}s", transport="tar",
+                exit_code=EXIT_TIMEOUT,
+            )
+        src_err.join()
+        dst_err.join()
         dst_rc = dst.wait(timeout=args.timeout)
         src_rc = src.wait(timeout=args.timeout)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -500,14 +614,39 @@ def _run_tar_tree(
         if ctx is not None:
             ctx.__exit__(None, None, None)
     elapsed = round(time.monotonic() - started, 3)
-    stderr = (src_err + dst_err).strip()
+    stderr = (src_err.text() + dst_err.text()).strip()
+    lowered = stderr.lower()
+    if strip and "strip-components" in lowered and "option" in lowered:
+        return _failure(
+            args, failure_class="transfer_io",
+            stderr=(
+                "the local tar does not understand --strip-components "
+                f"(needed to drop the '{leaf}' prefix): {stderr}"
+            ),
+            transport="tar",
+            exit_code=EXIT_TRANSFER_IO,
+        )
     if src_rc != 0 or dst_rc != 0:
+        missing = "No such file" in stderr or "Cannot stat" in stderr
         return _failure(
             args,
-            failure_class="remote_path_missing" if "No such file" in stderr else "transfer_io",
+            failure_class="remote_path_missing" if missing else "transfer_io",
             stderr=stderr or f"tar stream failed (src={src_rc}, dst={dst_rc})",
             transport="tar",
-            exit_code=EXIT_REMOTE_PATH_MISSING if "No such file" in stderr else EXIT_TRANSFER_IO,
+            exit_code=EXIT_REMOTE_PATH_MISSING if missing else EXIT_TRANSFER_IO,
+        )
+    if strip:
+        note = (
+            "tar-over-ssh fallback: paramiko is not installed. The contents "
+            f"of '{remote}' land directly under '{args.local_path}' (the "
+            f"'{leaf}' level is stripped), matching SFTP and `scp -r`. "
+            "Per-file sha256 verification is not available in this mode."
+        )
+    else:
+        note = (
+            "tar-over-ssh fallback for a single remote entry: it is placed "
+            f"under '{args.local_path}' without stripping its name. Per-file "
+            "sha256 verification is not available in this mode."
         )
     return json_result(
         success=True,
@@ -521,14 +660,18 @@ def _run_tar_tree(
             "local_path": args.local_path,
             "recursive": True,
             "resume": False,
-            "bytes_transferred": 0,
+            # BUG-006: measured on the relayed bytes, not stubbed. The byte
+            # count is the files' payload (what `stream` mode counts too), and
+            # both numbers come from the same tar headers the consumer parsed.
+            "bytes_transferred": counter.bytes,
+            "files_transferred": counter.files,
             "elapsed_s": elapsed,
+            # No hash comparison happens on this path, so this stays false on
+            # purpose: it reports a verification that ran, never one that could.
             "sha256_verified": False,
             "failure_class": None,
-            "transport_note": (
-                "tar-over-ssh fallback: paramiko is not installed. Per-file "
-                "verification is not available in this mode."
-            ),
+            "layout": "contents" if strip else "single-entry",
+            "transport_note": note,
         },
     )
 
@@ -686,4 +829,4 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main("ssh_download.py", main))

@@ -51,8 +51,11 @@ else. A host with a dead nginx behind a healthy sshd looked fine.
   service is up" and vice versa. Probe records land in
   ``data.results[alias].probe``.
 * Both run before the broadcast, in parallel, and a host that fails either one
-  is reported with ``failure_class: "health_check_failed"`` and
-  ``skipped: true``.
+  is reported with ``skipped: true`` plus
+  ``skipped_reason: "health_check_failed"``. A skipped host is **not** a failed
+  host: it does not fail the batch (DEVOPS-BUG-010). ``failure_class`` is left
+  on the envelope only for consumers written before ``skipped_reason`` existed;
+  when ``skipped`` is true the skip reason is authoritative.
 
 Retry (DV-17)
 -------------
@@ -75,6 +78,9 @@ contract used by fleet tooling::
     data.hosts                 resolved aliases, in declaration order
     data.summary               {total, ok, fail, skipped, elapsed_ms}
     data.results               dict[alias, per_host_envelope]
+    data.ok_hosts              aliases whose business command succeeded
+    data.failed_hosts          aliases that really failed (skips excluded)
+    data.skipped_hosts         aliases the health check deliberately skipped
     data.failure_class         null | target_resolution_failed
                                     | ssh_execute_missing
                                     | partial_failure | all_hosts_failed
@@ -83,12 +89,14 @@ contract used by fleet tooling::
     data.health_check_command  echoed command (default "true")
     data.probes                echoed --probe list
 
-Top-level ``success`` is True iff every host envelope says success.
-Otherwise the failure_class differentiates partial vs total.
+Top-level ``success`` is True iff every host either succeeded or was
+deliberately skipped by the health check (DEVOPS-BUG-010). A skip is not a
+failure: ``summary.fail == 0`` always agrees with ``failed_hosts``. Otherwise
+the failure_class differentiates partial vs total.
 
 Exit codes follow ``error-handling.md``::
 
-    0    every host succeeded
+    0    every host succeeded or was skipped
     1    one or more host failed
     2    argv error
     124  worker subprocess timed out (per-host only; top-level just
@@ -127,7 +135,7 @@ from lib import (  # noqa: E402, I001
     json_result,
     validate_ssh_option,
 )
-from lib.cli import SSHArgumentParser, handle_version  # noqa: E402
+from lib.cli import SSHArgumentParser, guarded_main, handle_version  # noqa: E402
 from lib.exit_codes import (  # noqa: E402
     EXIT_DEPENDENCY_MISSING,
     EXIT_INVALID_ARGUMENTS,
@@ -190,14 +198,22 @@ def _per_host_env(
     stderr: str = "",
     failure_class: str | None = None,
     skipped: bool = False,
+    skipped_reason: str | None = None,
 ) -> dict[str, Any]:
     """Build the per-host result envelope with the documented field schema.
 
     ``probe`` / ``health_check`` are added by the callers that fill them, so a
     plain broadcast keeps exactly the original eight fields (and any consumer
     that validates the shape keeps working).
+
+    ``skipped_reason`` (DEVOPS-OPT-003) is the skip-only counterpart of
+    ``failure_class``. When ``skipped`` is true it is authoritative and
+    ``failure_class`` only exists for older consumers; a host that really
+    failed keeps ``failure_class`` and has no ``skipped_reason``. The key is
+    omitted entirely when there is nothing to report, so a plain broadcast
+    keeps exactly the original eight fields.
     """
-    return {
+    env: dict[str, Any] = {
         "alias": alias,
         "success": success,
         "exit_code": exit_code,
@@ -207,6 +223,9 @@ def _per_host_env(
         "failure_class": failure_class,
         "skipped": skipped,
     }
+    if skipped_reason is not None:
+        env["skipped_reason"] = skipped_reason
+    return env
 
 
 # --- target resolution -------------------------------------------------------
@@ -285,9 +304,20 @@ class AuthOptions:
     auth: str = "auto"
     password_env: str = "SSH_PASSWORD"
     accept_new_hostkey: bool = False
+    user: str | None = None
+    allow_exit: str | None = None
 
     def as_args(self) -> tuple[str, str, bool]:
         return (self.auth, self.password_env, self.accept_new_hostkey)
+
+    def extra_args(self) -> list[str]:
+        """1.5 passthroughs forwarded verbatim to every worker (reviews B1/C1)."""
+        args: list[str] = []
+        if self.user:
+            args += ["--user", self.user]
+        if self.allow_exit:
+            args += ["--allow-exit", str(self.allow_exit)]
+        return args
 
 
 
@@ -305,6 +335,7 @@ def _run_one(
     ssh_config: str | None = None,
     retry: "RetryPolicy | None" = None,
     stdin_file: str | None = None,
+    extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run `command` on `alias` by shelling out to ssh_execute.py.
 
@@ -316,6 +347,7 @@ def _run_one(
     one alias at a time. ``ssh_config`` is forwarded too (SSHCORE-018): it
     selects the target *and* configures the connection, so the two cannot
     disagree. ``stdin_file`` gives every worker its own stdin (SSHCORE-024).
+    ``extra_args`` carries the 1.5 passthroughs (`--user`, `--allow-exit`).
 
     ``retry`` (DV-17) re-runs *this host* when the failure is transient, so a
     single flaky node does not force a whole second sweep. ``attempts`` is
@@ -327,7 +359,7 @@ def _run_one(
         return _run_one_attempt(
             ssh_exec, alias, command, timeout, connect_timeout,
             ssh_options, auth, password_env, accept_new_hostkey, ssh_config,
-            stdin_file,
+            stdin_file, extra_args,
         )
 
     env = retrying(_attempt, policy) if policy.enabled else _attempt(1)
@@ -352,6 +384,7 @@ def _run_one_attempt(
     accept_new_hostkey: bool = False,
     ssh_config: str | None = None,
     stdin_file: str | None = None,
+    extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
     argv = [
         sys.executable,
@@ -368,6 +401,7 @@ def _run_one_attempt(
         "--password-env",
         password_env,
     ]
+    argv += list(extra_args or [])
     if accept_new_hostkey:
         argv.append("--accept-new-hostkey")
     if ssh_config:
@@ -441,6 +475,15 @@ def _run_one_attempt(
         )
 
     inner_data = env.get("data") or {}
+    inner_class = inner_data.get("failure_class")
+    # A worker may declare a skip of its own (ssh_execute's local route cannot
+    # serve a POSIX path on Windows, for example). It is the same "not
+    # attempted, not failed" rule as a health-check skip, so it must not turn
+    # the batch red either (DEVOPS-BUG-010 / OPT-003). A worker that claims
+    # both a skip and a failure_class is contradictory: the failure wins, so a
+    # skip can never mask a real failure. Absent for a plain broadcast, so the
+    # eight-field shape is unchanged there.
+    worker_skipped = bool(inner_data.get("skipped")) and inner_class is None
     return _per_host_env(
         bool(env.get("success", False)),
         int(env.get("exit_code", EXIT_FAIL)),
@@ -448,7 +491,9 @@ def _run_one_attempt(
         elapsed_ms=elapsed_ms,
         stdout=env.get("stdout", "") or "",
         stderr=env.get("stderr", "") or "",
-        failure_class=inner_data.get("failure_class"),
+        failure_class=inner_class,
+        skipped=worker_skipped,
+        skipped_reason=inner_data.get("skipped_reason") if worker_skipped else None,
     )
 
 
@@ -507,8 +552,12 @@ def _health_check(
                 if extra:
                     healthy_extra[alias] = extra
             else:
+                # DEVOPS-OPT-003: the skip gets its own field. ``failure_class``
+                # stays for consumers written before ``skipped_reason`` existed;
+                # when ``skipped`` is true, ``skipped_reason`` wins.
                 env["failure_class"] = "health_check_failed"
                 env["skipped"] = True
+                env["skipped_reason"] = "health_check_failed"
                 dead[alias] = env
     return alive, dead, healthy_extra
 
@@ -543,6 +592,7 @@ def _probe_host(
         HEALTH_CHECK_TIMEOUT, connect_timeout, ssh_options,
         *auth.as_args(),
         ssh_config=ssh_config,
+        extra_args=auth.extra_args(),
     )
     if probe_summary is not None:
         env["probe"] = probe_summary
@@ -586,6 +636,7 @@ def _broadcast_serial(
             ssh_exec, alias, command, timeout, connect_timeout, ssh_options,
             *(auth or AuthOptions()).as_args(),
             ssh_config=ssh_config,
+            extra_args=(auth or AuthOptions()).extra_args(),
             retry=retry,
             stdin_file=stdin_file,
         )
@@ -597,6 +648,7 @@ def _broadcast_serial(
                     elapsed_ms=0,
                     failure_class="skipped_fail_fast",
                     skipped=True,
+                    skipped_reason="skipped_fail_fast",
                 )
             break
     return results
@@ -629,6 +681,7 @@ def _broadcast_parallel(
                 _run_one, ssh_exec, alias, command, timeout, connect_timeout,
                 ssh_options, *(auth or AuthOptions()).as_args(),
                 ssh_config=ssh_config,
+                extra_args=(auth or AuthOptions()).extra_args(),
                 retry=retry,
                 stdin_file=stdin_file,
             )
@@ -660,6 +713,7 @@ def _broadcast_parallel(
                         elapsed_ms=0,
                         failure_class="skipped_fail_fast",
                         skipped=True,
+                        skipped_reason="skipped_fail_fast",
                     )
                 else:
                     # Already running -- wait it out
@@ -702,16 +756,58 @@ def _broadcast(
 # --- aggregation -------------------------------------------------------------
 
 
+def _bucket_hosts(
+    results: dict[str, dict[str, Any]],
+) -> tuple[list[str], list[str], list[str]]:
+    """Split aliases into ``(ok_hosts, failed_hosts, skipped_hosts)``.
+
+    One source of truth for the verdict *and* the summary, so the two can never
+    disagree again (DEVOPS-BUG-010: ``_classify`` counted a skip as "not ok"
+    while ``_summarize`` had already excluded it from ``fail``, so a batch with
+    ``fail=0`` still reported ``partial_failure``).
+
+    The buckets are disjoint and ordered like ``results``:
+
+    * **ok** - the business command succeeded;
+    * **skipped** - the health check (or ``--fail-fast``) deliberately did not
+      run the command on it. A skip is not a failure;
+    * **failed** - everything else, i.e. a real failure.
+
+    A host that is both ``success`` and ``skipped`` (never produced by this
+    script) counts as ok, so ``ok + skipped + failed == total`` always holds and
+    ``failed = total - ok - skipped`` can never go negative.
+    """
+    ok_hosts: list[str] = []
+    failed_hosts: list[str] = []
+    skipped_hosts: list[str] = []
+    for alias, env in results.items():
+        if env.get("success"):
+            ok_hosts.append(alias)
+        elif env.get("skipped"):
+            skipped_hosts.append(alias)
+        else:
+            failed_hosts.append(alias)
+    return ok_hosts, failed_hosts, skipped_hosts
+
+
 def _classify_top(
     results: dict[str, dict[str, Any]],
 ) -> tuple[bool, str | None]:
+    """Overall verdict: ``(success, failure_class)``.
+
+    All hosts either ok or deliberately skipped is a **success**: the broadcast
+    reached every host it was supposed to reach and the skipped ones are
+    reported truthfully in ``data.skipped_hosts`` / ``summary.skipped``, not
+    hidden inside a failed batch (DEVOPS-BUG-010).
+    """
     total = len(results)
     if total == 0:
         return False, "target_resolution_failed"
-    ok = sum(1 for env in results.values() if env["success"])
-    if ok == total:
+    ok_hosts, failed_hosts, skipped_hosts = _bucket_hosts(results)
+    if not failed_hosts:
         return True, None
-    if ok == 0:
+    if not ok_hosts and not skipped_hosts:
+        # Nothing succeeded and nothing was skipped: every host failed.
         return False, "all_hosts_failed"
     return False, "partial_failure"
 
@@ -720,15 +816,12 @@ def _summarize(
     results: dict[str, dict[str, Any]],
     started_at: float,
 ) -> dict[str, Any]:
-    total = len(results)
-    ok = sum(1 for env in results.values() if env["success"])
-    skipped = sum(1 for env in results.values() if env.get("skipped"))
-    fail = total - ok - skipped
+    ok_hosts, failed_hosts, skipped_hosts = _bucket_hosts(results)
     return {
-        "total": total,
-        "ok": ok,
-        "fail": fail,
-        "skipped": skipped,
+        "total": len(results),
+        "ok": len(ok_hosts),
+        "fail": len(failed_hosts),
+        "skipped": len(skipped_hosts),
         "elapsed_ms": int((time.monotonic() - started_at) * 1000),
     }
 
@@ -738,6 +831,111 @@ def _summarize(
 
 _STDOUT_HEAD_CAP = 80
 _STDERR_HEAD_CAP = 200
+_GROUP_LABEL_WIDTH = 16
+
+
+def _probe_word(record: dict[str, Any]) -> str:
+    """One probe record as a short human verdict (``ok`` / ``refused`` …).
+
+    ``lib.probe`` reports the errno by name (``ECONNREFUSED``, ``ETIMEDOUT``,
+    ``WSAEWOULDBLOCK`` on Windows), so the match is deliberately loose: the
+    human line only has to separate the shapes an operator triages
+    differently — reachable, closed, timed out, unresolvable.
+    """
+    if record.get("ok"):
+        return "ok"
+    error = str(record.get("error") or "").lower()
+    if "refused" in error:
+        return "refused"
+    if "timedout" in error or "timed out" in error or "timeout" in error:
+        return "timeout"
+    if "unreachable" in error:
+        return "unreachable"
+    # ``getaddrinfo``/``gaierror``: the alias did not resolve to an address
+    # (``local`` has no config entry on a fresh box). That is a different
+    # problem from "the port is closed" and the operator acts differently.
+    if "gaierror" in error or "getaddrinfo" in error or "name or service" in error:
+        return "unresolved"
+    return "failed"
+
+
+def _probe_label(record: dict[str, Any]) -> str:
+    kind = record.get("kind") or "tcp"
+    port = record.get("port")
+    return f"{kind}:{port}" if port else str(kind)
+
+
+def _probe_human(env: dict[str, Any]) -> str:
+    """``tcp:22 ok, tcp:3306 refused`` for one host, or ``""``.
+
+    ``probe_records`` carries the per-target verdicts (kind/port/ok/error);
+    ``probe`` alone only knows the fold. Fall back to the fold so a hand-built
+    envelope still renders something truthful.
+    """
+    records = env.get("probe_records") or []
+    if records:
+        return ", ".join(
+            f"{_probe_label(rec)} {_probe_word(rec)}" for rec in records
+        )
+    summary = env.get("probe") or {}
+    if not summary:
+        return ""
+    if summary.get("ok"):
+        return f"{summary.get('probes', 0)} probes ok"
+    failed = summary.get("failed_targets") or []
+    return "failed: " + ", ".join(str(t) for t in failed)
+
+
+def _skip_detail(env: dict[str, Any]) -> str:
+    """Parenthetical after a skipped alias: what the probe saw, if anything.
+
+    ``db-2 (port 3306 closed)`` is the shape the issue asks for: the reason a
+    host was skipped is exactly the question a human has, and it used to
+    require opening the JSON and reading ``probe_records``.
+    """
+    summary = env.get("probe") or {}
+    records = env.get("probe_records") or []
+    if not records:
+        return ""
+    if summary.get("ok"):
+        return "probe ok"
+    words = {
+        "refused": "closed",
+        "timeout": "timeout",
+        "unreachable": "unreachable",
+        "unresolved": "unresolved",
+        "failed": "failed",
+    }
+    parts = []
+    for rec in records:
+        if rec.get("ok"):
+            continue
+        word = words.get(_probe_word(rec), "failed")
+        parts.append(f"port {rec.get('port')} {word}" if rec.get("port") else word)
+    return ", ".join(parts)
+
+
+def _host_groups(
+    results: dict[str, dict[str, Any]],
+) -> list[tuple[str, list[str]]]:
+    """Group aliases by reason: ``failure_class`` for failures, the
+    ``skipped_reason`` for skips (DEVOPS-OPT-003).
+
+    Order follows the first alias that carries each label, so the block is
+    stable across runs (``results`` keeps declaration order). A skip is
+    reported under its own label and never mixed into a failure class: that is
+    the human half of "``skipped`` does not mean failed".
+    """
+    groups: dict[str, list[str]] = {}
+    for alias, env in results.items():
+        if env.get("success"):
+            continue
+        if env.get("skipped"):
+            label = env.get("skipped_reason") or "skipped"
+        else:
+            label = env.get("failure_class") or "unknown"
+        groups.setdefault(label, []).append(alias)
+    return list(groups.items())
 
 
 def _format_human(data: dict[str, Any]) -> str:
@@ -745,24 +943,62 @@ def _format_human(data: dict[str, Any]) -> str:
     results = data.get("results") or {}
     lines = [
         f"command:  {data.get('command') or ''}",
-        f"hosts:    {len(results)}  "
-        f"(ok={summary.get('ok', 0)}  fail={summary.get('fail', 0)}  "
+        f"hosts:    {len(results)} "
+        f"(ok={summary.get('ok', 0)} fail={summary.get('fail', 0)} "
         f"skipped={summary.get('skipped', 0)})",
         f"elapsed:  {summary.get('elapsed_ms', 0)} ms",
-        "",
     ]
+    # Failures grouped by reason, then skips under their own reason. This is the
+    # first thing a human needs on a 12-host fan-out: how many of *what* failed.
+    groups = _host_groups(results)
+    if groups:
+        lines.append("")
+        # Width follows the longest label so a 24-char class such as
+        # `target_resolution_failed` does not push its count out of the column.
+        label_width = max(
+            [_GROUP_LABEL_WIDTH] + [len(label) for label, _ in groups]
+        )
+        for label, aliases in groups:
+            rendered = []
+            for alias in aliases:
+                detail = _skip_detail(results[alias])
+                rendered.append(f"{alias} ({detail})" if detail else alias)
+            lines.append(
+                f"  {label:<{label_width}s}  {len(aliases):>2}  "
+                + ", ".join(rendered)
+            )
+    lines.append("")
     for alias, env in results.items():
-        tag = "ok  " if env.get("success") else "FAIL"
+        if env.get("success"):
+            tag = "ok  "
+        elif env.get("skipped"):
+            tag = "SKIP"
+        else:
+            tag = "FAIL"
         head = (env.get("stdout") or "").splitlines()[0] if env.get("stdout") else ""
         if len(head) > _STDOUT_HEAD_CAP:
             head = head[:_STDOUT_HEAD_CAP] + "..."
-        fc = env.get("failure_class") or "-"
-        lines.append(
+        # A skipped host shows its skip reason where a failure shows its
+        # failure_class: the two are different questions, and printing the
+        # legacy failure_class too would report the same fact twice
+        # (DEVOPS-OPT-003 precedence rule).
+        reason = env.get("skipped_reason")
+        if reason:
+            label = f"skip={reason}"
+        else:
+            label = f"fc={env.get('failure_class') or '-'}"
+        line = (
             f"  [{tag}] {alias:<24s} "
             f"exit={env.get('exit_code', '?'):<3}  "
             f"elapsed={env.get('elapsed_ms', 0):>5}ms  "
-            f"fc={fc:<22s} {head}"
+            f"{label:<34s}"
         )
+        if head:
+            line += f" {head}"
+        lines.append(line.rstrip())
+        probe_line = _probe_human(env)
+        if probe_line:
+            lines.append(f"          probe: {probe_line}")
         # Surface sub-host stderr on failure so users don't have to re-run with
         # --json just to read the reason. Only the first line, capped, for FAIL.
         if not env.get("success"):
@@ -833,8 +1069,37 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "key", "password"),
         default="auto",
         help=(
-            "Auth routing forwarded to every host: 'auto' reads # auth: "
-            "metadata, 'password' uses $SSH_PASSWORD via the pty session"
+            "Auth routing forwarded to every host: 'auto' reads the "
+            "`# auth:` metadata written by ssh_config_manager. 'password' "
+            "answers OpenSSH's prompt with a temporary SSH_ASKPASS helper and "
+            "reads the secret from --password-env; the command channel stays a "
+            "normal exec channel (no pty, no `-tt`), so stdout/stderr stay "
+            "separate and the remote exit code is real. On POSIX the same "
+            "askpass route is used whether or not a pty exists (review B2: the "
+            "old help text said 'via the pty session', which was wrong on "
+            "Windows and only half-true on Linux)"
+        ),
+    )
+    p.add_argument(
+        "--user", "-l",
+        default=None,
+        metavar="USER",
+        help=(
+            "Forward `--user USER` to every worker: password auth against a "
+            "bare IP whose config block has no `User` is refused with "
+            "user_required (exit 115) instead of trying the local account name "
+            "(review B1)"
+        ),
+    )
+    p.add_argument(
+        "--allow-exit", "--expect-exit",
+        dest="allow_exit",
+        default=None,
+        metavar="CODES",
+        help=(
+            "Comma-separated exit codes that count as success on every host, "
+            "e.g. `0,1` for grep/diff (review C1). Forwarded to each worker and "
+            "applied to the aggregated verdict"
         ),
     )
     p.add_argument(
@@ -845,7 +1110,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--accept-new-hostkey",
         action="store_true",
-        help="Forward --accept-new-hostkey to every worker (password route)",
+        help=(
+            "Forward --accept-new-hostkey to every worker: an unknown host key "
+            "is added to known_hosts instead of aborting. The key is "
+            "*persisted*, so later calls trust it without the flag; a changed "
+            "key still fails with host_key (review B3)"
+        ),
     )
     p.add_argument(
         "-o",
@@ -944,6 +1214,9 @@ def _emit_top_fail(
         "hosts": [],
         "summary": {"total": 0, "ok": 0, "fail": 0, "skipped": 0, "elapsed_ms": 0},
         "results": {},
+        "ok_hosts": [],
+        "failed_hosts": [],
+        "skipped_hosts": [],
         "failure_class": failure_class,
         "fail_fast": args.fail_fast,
         "health_check": args.health_check,
@@ -973,10 +1246,40 @@ def _audit(args: argparse.Namespace, data: dict[str, Any], code: int) -> None:
                 "success": env.get("success"),
                 "exit_code": env.get("exit_code"),
                 "failure_class": env.get("failure_class"),
+                # DEVOPS-OPT-003: the trail can tell a skip from a failure.
+                # `audit.py summarize` counts every success=false record as a
+                # failure, so without these two fields a health-check skip
+                # would inflate a host's failure rate.
+                "skipped": bool(env.get("skipped")),
+                "skipped_reason": env.get("skipped_reason"),
                 "elapsed_ms": env.get("elapsed_ms"),
                 "batch_exit_code": code,
             },
         )
+
+
+def _parse_allow_exit(value: str) -> tuple[set[int], str | None]:
+    """Validate ``--allow-exit`` without importing the worker (review C1).
+
+    ``ssh_cluster`` deliberately never imports ``ssh_execute`` (design S 7), so
+    the parser is duplicated here — a three-line loop, and the worker applies
+    the semantics anyway. Keeping the duplication means a launch-time typo is
+    reported once, with the fleet untouched, instead of N times inside the
+    per-host envelopes.
+    """
+    codes: set[int] = set()
+    for raw in str(value).replace(";", ",").split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        try:
+            code = int(token, 10)
+        except ValueError:
+            return set(), f"--allow-exit expects integers, got {token!r}"
+        if code < 0 or code > 255:
+            return set(), f"--allow-exit code {code} is outside 0-255"
+        codes.add(code)
+    return codes, None
 
 
 def _stdin_file_problem(path: str) -> str | None:
@@ -1028,6 +1331,18 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
         auth=args.auth,
         password_env=args.password_env,
         accept_new_hostkey=args.accept_new_hostkey,
+        user=args.user,
+        allow_exit=args.allow_exit,
+    )
+
+    # Review B1/C1: the same argument checks ssh_execute applies, so a typo is
+    # reported once for the whole fleet instead of once per host.
+    if args.allow_exit:
+        codes, allow_error = _parse_allow_exit(args.allow_exit)
+        if allow_error is not None:
+            return _emit_top_fail(
+                args, "invalid_arguments", f"ssh_cluster: {allow_error}",
+                exit_code=EXIT_ARGS,
     )
 
     probes: list[ProbeSpec] = []
@@ -1096,12 +1411,19 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
 
     success, fc = _classify_top(results)
     summary = _summarize(results, started_at)
+    ok_hosts, failed_hosts, skipped_hosts = _bucket_hosts(results)
 
     data = {
         "command": args.command,
         "hosts": list(results.keys()),
         "summary": summary,
         "results": results,
+        # DEVOPS-OPT-003: who is in which bucket, without walking `results`.
+        # `failed_hosts` excludes deliberate skips, so it agrees with
+        # summary.fail and with the top-level verdict by construction.
+        "ok_hosts": ok_hosts,
+        "failed_hosts": failed_hosts,
+        "skipped_hosts": skipped_hosts,
         "failure_class": fc,
         "fail_fast": args.fail_fast,
         "health_check": args.health_check,
@@ -1126,4 +1448,4 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main("ssh_cluster.py", main))

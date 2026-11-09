@@ -14,6 +14,7 @@ Public surface::
         [--sudo] [--sudo-user USER] [--sudo-password-env VAR] \
         [--follow] [--tail N] \
         [--retry N] [--retry-delay S] [--retry-backoff F] \
+        [--shell none|cmd|powershell|sh] \
         [--redact|--no-redact] [--json]
 
 Privilege escalation (DV-14)
@@ -59,7 +60,14 @@ escape / line-continuation) and ``%VAR%`` (cmd.exe delayed expansion):
 
 The documented escape hatch is unchanged: start the command with a shell
 wrapper (``bash -c '...'``, ``sh``/``zsh``/``dash``/``ksh``, absolute paths and
-``.exe`` suffixes allowed) and the check is skipped.
+``.exe`` suffixes allowed) and the check is skipped. On Windows the two escape
+hatches that always existed — ``cmd /c <command>`` and
+``powershell -Command <command>`` — are recognised explicitly (they are named in
+``data.shell``, and a command they cannot handle stays refused), and the
+platform-neutral spelling is ``--shell cmd|powershell|sh``, which declares the
+shell instead of guessing it (GAP-008). A local command whose binary does not
+exist reports the binary's name plus, on Windows, whether it is a cmd.exe
+builtin and what to type instead (``cmd /c echo hello``).
 
 Remote route
 ------------
@@ -111,6 +119,7 @@ import io
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -132,8 +141,10 @@ from lib import (  # noqa: E402, I001
     audit_cli_flags,
     audit_enabled,
     classify_failure,
+    credentials_rejected,
     emit,
     filter_ssh_noise,
+    greeting_prefix,
     is_windows,
     json_result,
     merged_ssh_config,
@@ -143,6 +154,7 @@ from lib import (  # noqa: E402, I001
     split_command,
     split_login_banner,
     ssh_config_path_problem,
+    strip_ssh_farewell,
     validate_ssh_option,
 )
 from lib.askpass import AskpassUnavailable, askpass_env  # noqa: E402
@@ -169,7 +181,13 @@ from lib.exit_codes import (  # noqa: E402
 from lib.redact import redactor_for  # noqa: E402
 from lib.retry import cli_flags as retry_cli_flags  # noqa: E402
 from lib.retry import policy_from_args, retrying  # noqa: E402
-from lib.session import closed_by_device, make_session  # noqa: E402
+from lib.session import (  # noqa: E402
+    closed_by_device,
+    device_output_text,
+    make_session,
+    prompt_line_present,
+    prompt_returned,
+)
 from lib.sudo import SudoSpec, classify as classify_sudo  # noqa: E402
 from lib.sudo import parse_sudo, probe_command, remediation, wrap as sudo_wrap  # noqa: E402
 
@@ -193,6 +211,41 @@ CMD_BANG_RE = r"![A-Za-z_][A-Za-z0-9_]*!"
 SHELL_WRAPPERS: frozenset[str] = frozenset(
     {"bash", "sh", "zsh", "dash", "ksh", "fish", "busybox"}
 )
+# Windows escape hatches (GAP-008). `cmd /c echo hello` and
+# `powershell -Command ...` always worked — they are real process invocations
+# with no implicit shell — but they were neither recognised nor documented, so
+# the refusal message only ever mentioned `bash`, which a stock Windows box does
+# not have. Recognising them is what lets the envelope report
+# `data.shell: "cmd"` and lets the missing-binary hint point at a command that
+# is guaranteed to exist on Windows.
+#
+# ``--shell`` values, exactly the four the issue proposes. `none` keeps the
+# historic no-shell behaviour; the other three are an *explicit* opt-in, exactly
+# like `bash -c '...'` (GAP-008 option 4). They do not loosen the metacharacter
+# refusal for anything else: that refusal exists to stop an *implicit* shell
+# from interpreting `&`/`|`/`>`, and a caller who typed `--shell cmd` has
+# declared that a shell is wanted and which one.
+LOCAL_SHELL_CHOICES: tuple[str, ...] = ("none", "cmd", "powershell", "sh")
+LOCAL_SHELL_DEFAULT = "none"
+#: Shells that only exist on Windows; naming one on POSIX is an argv error
+#: rather than a confusing `cannot execute 'cmd'`.
+WINDOWS_ONLY_SHELLS: frozenset[str] = frozenset({"cmd", "powershell"})
+#: cmd.exe commands that are *builtins*: no `echo.exe` exists, so `exec`-ing
+#: them fails with WinError 2. Used only to make the error message actionable
+#: (GAP-008); the list is deliberately limited to commands a user plausibly
+#: tries to run on the local route.
+CMD_BUILTINS: frozenset[str] = frozenset(
+    {
+        "assoc", "break", "call", "cd", "chdir", "cls", "color", "copy",
+        "date", "del", "dir", "dpath", "echo", "endlocal", "erase", "exit",
+        "for", "ftype", "goto", "if", "md", "mkdir", "mklink", "move", "path",
+        "pause", "popd", "prompt", "pushd", "rd", "rem", "ren", "rename",
+        "rmdir", "set", "setlocal", "shift", "start", "time", "title", "type",
+        "ver", "verify", "vol",
+    }
+)
+#: `Get-Process` / `Write-Output` / ... — a PowerShell cmdlet, not an .exe.
+POWERSHELL_CMDLET_RE = re.compile(r"^[A-Z][a-z]+-[A-Za-z][A-Za-z0-9]*$")
 CONTROL_MASTER_DEFAULT = "off"
 CONTROL_PERSIST_DEFAULT = 600
 CONTROL_PATH_DIR_NAME = "ssh_controlmaster"
@@ -295,7 +348,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "File whose bytes are piped to the remote command's stdin; unlike "
             "--stdin-text the content never enters argv (or the audit log). "
-            "ssh_cluster forwards this per worker (SSHCORE-024). "
+            "ssh_cluster forwards this per worker (SSHCORE-024)"
             "Bytes are passed through verbatim; add --normalize-lf for a file "
             "produced by PowerShell (BOM + CRLF) (review D4)"
         ),
@@ -476,6 +529,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     audit_cli_flags(p)
     retry_cli_flags(p)
+    p.add_argument(
+        "--shell", choices=LOCAL_SHELL_CHOICES, default=LOCAL_SHELL_DEFAULT,
+        help=(
+            "Local route only: run the command through this shell instead of "
+            "executing it directly. 'none' (default) keeps the no-shell rule "
+            "and the metacharacter refusal. 'cmd' / 'powershell' (Windows) and "
+            "'sh' (POSIX) are the declared form of the escape hatch, e.g. "
+            "`local --shell cmd \"echo hello\"`; the inline forms "
+            "`cmd /c ...` and `powershell -Command ...` keep working and stay "
+            "subject to the metacharacter refusal (GAP-008)"
+        ),
+    )
     p.add_argument(
         "--json", action="store_true",
         help="Emit the shared JSON output contract on stdout",
@@ -834,7 +899,9 @@ def normalize_script_bytes(data: bytes) -> tuple[bytes, dict[str, Any]]:
             text = out.decode("utf-16")
             notes["bom_stripped"] = True
             notes["decoded_from"] = "utf-16"
-            out = text.encode("utf-8")
+            # PowerShell's utf-16 writers can leave a second, literal U+FEFF in
+            # the payload; strip it or bash sees it as part of the first word.
+            out = text.lstrip("\ufeff").encode("utf-8")
     crlf = out.count(b"\r\n")
     if crlf:
         out = out.replace(b"\r\n", b"\n")
@@ -847,6 +914,27 @@ def normalize_script_bytes(data: bytes) -> tuple[bytes, dict[str, Any]]:
     notes["bytes_after"] = len(out)
     notes["normalized"] = bool(notes["bom_stripped"] or crlf or lone_cr)
     return out, notes
+
+
+def _script_wants_bash(path: str) -> bool:
+    """True when the script starts with a bash-only construct we can detect.
+
+    ``bash -s`` is not universally available (BusyBox, a minimal container, an
+    old router) while ``sh -s`` always is. The heuristic is deliberately tiny:
+    a ``#!/bin/bash`` style shebang, or a ``[[`` / ``declare`` / ``local``
+    token. Everything else goes to ``sh``, which is what the caller would get
+    from a plain shell anyway.
+    """
+    try:
+        head = Path(path).expanduser().read_text(
+            encoding="utf-8-sig", errors="replace"
+        )[:4096]
+    except OSError:
+        return False
+    first = head.splitlines()[0] if head.splitlines() else ""
+    if first.startswith("#!") and "bash" in first:
+        return True
+    return any(token in head for token in ("[[ ", "declare ", "function ", "shopt "))
 
 
 def _capture_process(
@@ -869,8 +957,8 @@ def _capture_process(
 
     The pipes are **binary** (SSHCORE-015/019): no locale decoding can abort a
     reader thread (which used to empty ``stdout`` while still reporting
-    success), and no universal-newline translation quietly rewrites ``\\r\\n`` /
-    ``\\r`` into ``\\n``. Decoding happens once, in :meth:`BoundedCapture.text`.
+    success), and no universal-newline translation quietly rewrites ``\r\n`` /
+    ``\r`` into ``\n``. Decoding happens once, in :meth:`BoundedCapture.text`.
 
     ``tee_stdout`` / ``tee_stderr`` (binary or text streams) receive the bytes
     as they arrive, which is what makes human mode live (SSHCORE-025).
@@ -1019,6 +1107,153 @@ def _is_shell_wrapper(argv: list[str]) -> bool:
     return _shell_name(argv[0]) in SHELL_WRAPPERS and argv[1] == "-c"
 
 
+def _shell_invocation(argv: list[str]) -> str | None:
+    """Name the shell ``argv`` explicitly invokes, or ``None``.
+
+    Recognises the two Windows escape hatches in addition to the POSIX
+    ``<shell> -c`` form (GAP-008):
+
+    * ``cmd /c <command>`` (also ``CMD.EXE /c``);
+    * ``powershell -Command <command>`` (also ``pwsh -Command``).
+
+    This is a *reporting* helper, not a bypass: the metacharacter refusal in
+    :func:`_run_local` keeps keying on :func:`_is_shell_wrapper`, because
+    ``cmd /c echo a & del b`` must stay refused (SSH-01: it used to run two
+    commands while claiming nothing was interpreted). Recognising the form is
+    what lets the envelope say ``data.shell`` and lets the refusal message name
+    a wrapper that actually exists on the caller's platform.
+    """
+    if not argv:
+        return None
+    name = _shell_name(argv[0])
+    if name in SHELL_WRAPPERS and len(argv) >= 3 and argv[1] == "-c":
+        return name
+    if name == "cmd" and len(argv) >= 3 and argv[1].lower() == "/c":
+        return "cmd"
+    if name in ("powershell", "pwsh") and len(argv) >= 3 and argv[1].lower() in (
+        "-command",
+        "-c",
+    ):
+        return name
+    return None
+
+
+#: ``--shell NAME`` -> the argv flag that makes NAME run one command string.
+SHELL_FLAGS: dict[str, str] = {
+    "cmd": "/c",
+    "powershell": "-Command",
+    "sh": "-c",
+}
+
+
+def _local_shell_argv(command: str, shell: str) -> list[str]:
+    """argv for an explicitly requested ``--shell NAME`` (GAP-008 option 4).
+
+    This is the *declared* form of the escape hatch: the caller says a shell is
+    wanted, so the metacharacter refusal is skipped for exactly this invocation
+    and nothing else. ``bash -c '...'`` stays the POSIX spelling; on Windows
+    ``cmd /c`` / ``powershell -Command`` name a binary that always exists.
+    """
+    if shell == "powershell":
+        # `powershell` is the Windows PowerShell 5.1 host that ships with every
+        # Windows; `pwsh` is PowerShell 7+. Prefer whichever exists, and fall
+        # back to the platform default so the error names a real command.
+        binary = "powershell" if is_windows() else "pwsh"
+        other = "pwsh" if binary == "powershell" else "powershell"
+        if shutil.which(binary) is None and shutil.which(other) is not None:
+            binary = other
+        return [binary, "-Command", command]
+    return [shell, SHELL_FLAGS[shell], command]
+
+
+def _join_command_hint(argv: list[str]) -> str:
+    """Re-join argv for a copy-pasteable suggestion (quotes only where needed).
+
+    A token that already contains a double quote is wrapped in single quotes so
+    the suggested command line stays balanced instead of nesting ``"`` inside
+    ``"`` (``cmd /c "sh -c "echo hi""`` is not copy-pasteable).
+    """
+    parts: list[str] = []
+    for token in argv:
+        if '"' in token and "'" not in token:
+            parts.append(f"'{token}'")
+        elif " " in token or not token:
+            parts.append(f'"{token}"')
+        else:
+            parts.append(token)
+    return " ".join(parts)
+
+
+def _missing_binary_hint(
+    argv: list[str],
+    exc: BaseException,
+    *,
+    windows: bool | None = None,
+    declared_shell: str = LOCAL_SHELL_DEFAULT,
+) -> str:
+    """Turn a local spawn failure into something an operator can act on (GAP-008).
+
+    ``str(FileNotFoundError)`` on Windows is ``[WinError 2] 系统找不到指定的文件。``
+    — it names no binary and reads like a permissions problem, and the old text
+    told the caller to use ``bash -c '...'``, which a stock Windows box does not
+    have. The same idea as log-aggregator's ``_missing_binary_hint``: put the
+    command first, then the platform-specific way to actually run it.
+
+    ``declared_shell`` is the ``--shell`` value in force. When the missing
+    binary *is* that shell, the hint says so instead of suggesting the caller
+    wrap the shell in another shell.
+    """
+    binary = argv[0] if argv else "<unknown>"
+    name = _shell_name(binary)
+    is_win = is_windows() if windows is None else windows
+    headline = (
+        f"cannot execute {binary!r} on this host (argv={argv!r}): {exc}"
+    )
+    if declared_shell != LOCAL_SHELL_DEFAULT and name == declared_shell:
+        return (
+            f"{headline}\n"
+            f"  --shell {declared_shell} was requested but {binary!r} is not on "
+            "PATH here. Use the shell this platform ships, or drop --shell."
+            + (
+                "  On Windows that is `--shell cmd` or `--shell powershell`."
+                if is_win
+                else "  On POSIX that is `--shell sh`."
+            )
+        )
+    if not is_win:
+        return (
+            f"{headline}\n"
+            f"  {binary!r} is not on PATH; install it, use an absolute path, "
+            "or run it through `sh -c '...'`."
+        )
+    if name in CMD_BUILTINS:
+        return (
+            f"{headline}\n"
+            f"  {binary!r} is a cmd.exe builtin, not a program, so there is no "
+            f"{name}.exe to execute.\n"
+            "  Use the explicit shell form instead:\n"
+            f'    ssh_execute.py local "cmd /c {_join_command_hint(argv)}"\n'
+            f"  (or declare it once with `--shell cmd`)."
+        )
+    if POWERSHELL_CMDLET_RE.match(binary):
+        return (
+            f"{headline}\n"
+            f"  {binary!r} is a PowerShell cmdlet, not a program.\n"
+            "  Use the explicit shell form instead:\n"
+            f'    ssh_execute.py local "powershell -Command '
+            f'{_join_command_hint(argv)}"'
+        )
+    return (
+        f"{headline}\n"
+        "  On Windows only an .exe/.cmd/.bat on PATH can be started directly. "
+        "Shell builtins (dir, copy, echo, set, ...) and PowerShell cmdlets need "
+        "an explicit shell:\n"
+        f'    ssh_execute.py local "cmd /c {_join_command_hint(argv)}"\n'
+        f'    ssh_execute.py local "powershell -Command '
+        f'{_join_command_hint(argv)}"'
+    )
+
+
 def _refused_metachar(command: str) -> str | None:
     """Return the first metacharacter that would need a shell, if any."""
     import re
@@ -1033,6 +1268,43 @@ def _refused_metachar(command: str) -> str | None:
     return None
 
 
+def _metachar_refusal(command: str, meta: str) -> dict:
+    """The refusal envelope for a metacharacter with no declared shell.
+
+    The wording is platform-aware (GAP-008): on Windows the old message only
+    offered ``bash -c '...'``, which a stock Windows box does not have. Both
+    halves are actionable there: a *builtin* can be run through ``cmd /c`` and
+    a command that genuinely needs ``&&`` / ``|`` can be declared with
+    ``--shell cmd``.
+    """
+    if is_windows():
+        how_to = (
+            "Prefix with `cmd /c ...` (for a shell builtin) or pass "
+            "`--shell cmd` / `--shell powershell` to declare that a shell is "
+            "wanted - for example:\n"
+            '    ssh_execute.py local "cmd /c echo hello"\n'
+            "    ssh_execute.py local --shell cmd \"echo one && echo two\"\n"
+        )
+    else:
+        how_to = (
+            "Prefix with `bash -c '...'` (quoted) to opt into a shell - for "
+            "example:\n    bash -c 'cd /tmp && grep foo *'\n"
+        )
+    return json_result(
+        success=False,
+        exit_code=EXIT_INVALID_ARGUMENTS,
+        stderr=(
+            f"local route runs without a shell; metacharacter '{meta}' "
+            "would be interpreted by an implicit shell. " + how_to
+        ),
+        data={
+            "route": "local",
+            "refused_metachar": meta,
+            "failure_class": "invalid_arguments",
+        },
+    )
+
+
 def _run_local(
     command: str,
     timeout: int,
@@ -1040,11 +1312,21 @@ def _run_local(
     stdin_text: str | None = None,
     live: bool = False,
     redactor: Any = None,
+    shell: str = LOCAL_SHELL_DEFAULT,
 ) -> dict:
     """Local route: no shell unless a wrapper is used explicitly.
 
     ``live`` streams the child's output to the terminal as it is produced
     (SSHCORE-025), exactly like the remote route in human mode.
+
+    ``shell`` (GAP-008 option 4) is the *declared* form of the escape hatch:
+    ``--shell cmd|powershell|sh`` wraps the whole command string in that
+    shell's one-shot form, exactly as if the caller had typed
+    ``cmd /c ...`` / ``bash -c '...'``. It is a deliberate opt-in, not a guess:
+    the default ``none`` keeps the metacharacter refusal untouched, so nothing
+    becomes an implicit shell. On Windows the historic failure mode was
+    ``local "echo hello"`` → ``FileNotFoundError`` (``echo`` is a cmd.exe
+    builtin, there is no ``echo.exe``) reported as an anonymous WinError.
     """
     try:
         argv = split_command(command)
@@ -1054,30 +1336,44 @@ def _run_local(
             stderr=f"shlex parse error: {e}", data={"route": "local"},
         )
 
+    if shell and shell != LOCAL_SHELL_DEFAULT:
+        if shell in WINDOWS_ONLY_SHELLS and not is_windows():
+            return json_result(
+                success=False,
+                exit_code=EXIT_INVALID_ARGUMENTS,
+                stderr=(
+                    f"ssh_execute: --shell {shell} is Windows-only; this host "
+                    "has no such shell. Use --shell sh, or drop the flag.\n"
+                ),
+                data={
+                    "route": "local",
+                    "failure_class": "invalid_arguments",
+                    "invalid_option": "--shell",
+                    "value": shell,
+                },
+            )
+        # `--shell` declared the shell explicitly, so the implicit-shell guard
+        # no longer applies (it exists to stop argv from being *silently*
+        # re-parsed). The command is re-tokenised from the ORIGINAL string by
+        # the shell itself, exactly like `bash -c '...'`.
+        argv = _local_shell_argv(command, shell)
+
     if not argv:
         return json_result(
             success=False, exit_code=EXIT_FAIL,
             stderr="empty command after shlex split", data={"route": "local"},
         )
 
-    if not _is_shell_wrapper(argv):
+    if shell == LOCAL_SHELL_DEFAULT and not _is_shell_wrapper(argv):
+        # `cmd /c ...` / `powershell -Command ...` run *today* and are the
+        # documented Windows escape hatch, but they are still refused when the
+        # command carries a metacharacter: cmd.exe re-parses its own argv, so
+        # `cmd /c echo a & del b` really is two commands (SSH-01). Only
+        # `--shell` — an explicit flag, not a substring in the command — opts
+        # out of the guard.
         meta = _refused_metachar(command)
         if meta is not None:
-            return json_result(
-                success=False,
-                exit_code=EXIT_INVALID_ARGUMENTS,
-                stderr=(
-                    f"local route runs without a shell; metacharacter '{meta}' "
-                    "would be interpreted by an implicit shell. Prefix with "
-                    "`bash -c '...'` (quoted) to opt into a shell - for "
-                    "example:\n    bash -c 'cd /tmp && grep foo *'\n"
-                ),
-                data={
-                    "route": "local",
-                    "refused_metachar": meta,
-                    "failure_class": "invalid_arguments",
-                },
-            )
+            return _metachar_refusal(command, meta)
 
     tee_out, tee_err, streamed = _relay_targets(live, redactor)
     try:
@@ -1086,18 +1382,27 @@ def _run_local(
             tee_stdout=tee_out, tee_stderr=tee_err, redactor=redactor,
         )
     except FileNotFoundError as e:
+        # GAP-008: name the binary and, on Windows, say whether it is a cmd
+        # builtin / PowerShell cmdlet and what to type instead. The old text
+        # was `command not found: [WinError 2] ...` — no binary, no way out.
         return json_result(
             success=False, exit_code=EXIT_NO_COMMAND,
-            stderr=f"command not found: {e}",
+            stderr=_missing_binary_hint(argv, e, declared_shell=shell) + "\n",
             data={
-                "route": "local", "shlex_argv": argv,
+                "route": "local",
+                "shlex_argv": argv,
+                "missing_binary": argv[0] if argv else "",
+                "platform": "windows" if is_windows() else "posix",
                 "failure_class": "remote_error",
             },
         )
     except OSError as e:
         return json_result(
             success=False, exit_code=EXIT_FAIL,
-            stderr=f"failed to spawn: {e}",
+            stderr=(
+                f"failed to spawn {argv[0] if argv else '<unknown>'!r} "
+                f"(argv={argv!r}): {e}\n"
+            ),
             data={
                 "route": "local", "shlex_argv": argv,
                 "failure_class": "remote_error",
@@ -1110,6 +1415,14 @@ def _run_local(
         "elapsed_s": elapsed,
         **({"streamed": True} if streamed else {}),
     }
+    # Say which shell ran the command, if any: a `--shell` declaration or an
+    # inline `cmd /c` / `powershell -Command` / `bash -c` wrapper. A caller (and
+    # a test) can then tell "ran directly" from "ran through a shell" (GAP-008).
+    declared_shell = (
+        None if shell == LOCAL_SHELL_DEFAULT else shell
+    ) or _shell_invocation(argv)
+    if declared_shell:
+        data["shell"] = declared_shell
     exit_code, signal_number = normalized_exit_code(returncode)
     if signal_number is not None:
         data["terminated_by_signal"] = signal_number
@@ -1351,6 +1664,22 @@ def _is_network_device(host: str, ssh_config: str | None) -> bool:
     return meta.get("device-type", "").lower() == "network"
 
 
+def _failure_exit_code(fclass: str | None, raw: int | None) -> int:
+    """``failure_class`` -> exit code, with a fallback for unexpected values.
+
+    Used by the interactive password route, whose session driver raises
+    ``SessionError("auth", 255)``: 255 is OpenSSH's "the client failed", not a
+    number the contract exposes for a credential rejection, so a *classified*
+    failure prefers the table (auth -> 100, host_key -> 101, ...) and only an
+    unclassified one falls back to the masked raw code (BUG-008/BUG-009).
+    """
+    if fclass in _CLASS_CODES:
+        return _CLASS_CODES[fclass]
+    if raw is None:
+        return EXIT_FAIL
+    return normalized_exit_code(raw)[0]
+
+
 def _run_password_session(
     host: str,
     command: str,
@@ -1439,9 +1768,13 @@ def _run_password_session(
                 "failure_class": fclass,
             })
             _attach_capture_meta(login_data, failed_capture, BoundedCapture())
+            # BUG-008 acceptance criterion: a rejected credential must be
+            # `failure_class: auth` / exit 100, not ssh's raw 255. The session
+            # driver raises SessionError("auth", 255), which used to leak 255
+            # into the envelope and broke the documented 100/`auth` pairing.
             return json_result(
                 success=False,
-                exit_code=getattr(e, "exit_code", _CLASS_CODES.get(fclass, EXIT_FAIL)),
+                exit_code=_failure_exit_code(fclass, getattr(e, "exit_code", None)),
                 stderr=_scrubbed(str(e), password) + "\n",
                 data=login_data,
             )
@@ -1461,16 +1794,49 @@ def _run_password_session(
     finally:
         rc = session.close() if session is not None else 1
 
+    # Same 0-255 contract as ssh_session (BUG-009): Windows reports a killed
+    # child as the unsigned DWORD 4294967295 and a POSIX signal as -N. Neither
+    # may reach `data`/`exit_code`, and neither may decide the success verdict.
+    if rc is not None:
+        rc, signal_number = normalized_exit_code(rc)
+    else:
+        signal_number = None
+
     elapsed = round(time.monotonic() - started, 3)
     # `-tt` merges the child's streams, so the login banner arrives right where
     # the command's output does (SSHCORE-017). The login driver recorded
     # exactly what had arrived before authentication finished, which is the
     # only reliable boundary on a merged stream.
-    clean_output, banner = _strip_recorded_banner(
-        output, getattr(session, "login_banner", "")
+    #
+    # BUG-008b: on a fast device the whole exchange can be in the buffer when
+    # the login driver polls, so its "banner" may run past the greeting and into
+    # the command's own result and prompt. Stripping that prefix deleted the
+    # answer and the prompt with it, and the leftover transcript (nothing but
+    # ssh's farewell) was then classified as `auth` / exit 100 for a command
+    # that had plainly worked. The driver now refuses to record such a banner;
+    # when it does, say so instead of leaving the caller to wonder why the
+    # greeting is still in stdout.
+    recorded_banner = str(getattr(session, "login_banner", "") or "")
+    banner_unusable = bool(getattr(session, "login_banner_unusable", False))
+    if recorded_banner and not banner_is_usable(recorded_banner):
+        # Belt and braces: the driver refuses to record such a boundary, but a
+        # transcript is data. A banner that holds a prompt or the device's
+        # goodbye has demonstrably run past the greeting, so it is never cut.
+        banner_unusable = True
+        recorded_banner = ""
+    clean_output, banner, banner_applied = _strip_recorded_banner(
+        output, recorded_banner, command_hint=command,
+        trust_transcript=banner_unusable,
     )
+    if recorded_banner and not banner_applied:
+        banner_unusable = True
+    # ssh's own closure chatter is transport, not command output: drop it once,
+    # here, so stdout, the device text and the classifier all read the same
+    # bytes (BUG-008: they used to disagree and a finished command came back as
+    # exit 100 / auth).
+    command_output, farewell_lines = strip_ssh_farewell(clean_output)
     capture = BoundedCapture()
-    capture.feed(clean_output.encode("utf-8", "replace"))
+    capture.feed(command_output.encode("utf-8", "replace"))
     # The session buffer keeps the *tail* and counts what it dropped; report
     # that through the same fields the exec path uses (SSHCORE-022).
     capture.note_elided(int(getattr(session, "_buf", None).bytes_elided)
@@ -1487,6 +1853,20 @@ def _run_password_session(
     _attach_capture_meta(data, capture, BoundedCapture())
     if banner:
         data["ssh_banner_lines"] = banner
+        data["ssh_banner_applied"] = True
+    elif banner_unusable:
+        # A greeting was recorded but could not be cut: either it already held
+        # a prompt / the device's goodbye (the pre-auth boundary was
+        # unknowable) or removing it would have deleted the only proof that the
+        # command ran. Nothing is removed, and the reason is in the envelope
+        # instead of a silently missing banner.
+        data["ssh_banner_applied"] = False
+        data["ssh_banner_unusable_reason"] = (
+            "banner_would_remove_command_output"
+            if recorded_banner else "prompt_or_farewell_before_login_completed"
+        )
+    if farewell_lines:
+        data["ssh_farewell_lines_removed"] = farewell_lines
     if timed_out:
         data.update({
             "failure_class": "timeout",
@@ -1497,35 +1877,98 @@ def _run_password_session(
         })
         return json_result(
             success=False, exit_code=EXIT_TIMEOUT,
-            stdout=_strip_farewell(clean_output), stderr=f"timed out after {timeout}s",
+            stdout=command_output, stderr=f"timed out after {timeout}s",
             data=data,
         )
-    # A clean logout over a forced tty ends with "Connection to <host> closed."
-    # and ssh's exit status 255 because the channel had no exit-status. With
-    # output present that is a success, not a client failure.
-    device_closed = bool(output.strip()) and closed_by_device(output)
-    if rc in (0, None) or (rc == 255 and device_closed):
+    # BUG-008: decide "did the device complete the command?" from the
+    # *transcript*, not from ``rc``, and decide it before anything is
+    # classified. A VRP box prints its result, re-prints its prompt and hangs
+    # up; ssh reports that as 255 when it did not manage to read the channel
+    # close first and as 0 when it did, so keying on `rc == 255 and
+    # closed_by_device()` made the same call answer success/a-bogus-auth on
+    # alternating runs (and classified the transcript as `auth`, exit 100,
+    # with the whole result moved into stderr).
+    #
+    # BUG-008b: the success test and the classifier now read the SAME text, and
+    # that text no longer contains ssh's farewell in either of its shapes
+    # (whole line, or glued to the command's last line). Before, the verdict was
+    # taken from ``clean_output`` while the class came from the raw transcript:
+    # whenever the banner boundary or the glued ``client_loop:`` line pushed
+    # those two apart, a finished command was reported as exit 100 / auth.
+    device_text = device_output_text(command_output)
+    # A credential rejection vetoes every success shortcut, exactly like
+    # `prompt_returned`'s own veto (BUG-008 acceptance criterion: a wrong
+    # password stays auth / 100 whatever rc says).
+    rejected = credentials_rejected(command_output)
+    # "Did the device end the session?" is a question about the *transcript*,
+    # farewell included — `command_output` has had ssh's goodbye removed, so
+    # asking it there always answers False. That mistake alone turned every
+    # command whose output the device did not re-prompt before hanging up
+    # (`display vlan`, `display ip interface brief`, `... | include sysname`)
+    # into exit 104, while `display clock` kept working because it happens to
+    # re-print `<Switch-B>`.
+    device_closed = bool(device_text.strip()) and closed_by_device(clean_output)
+    prompt_done = prompt_returned(command_output)
+    data["verdict_basis"] = {
+        "rc": rc,
+        "prompt_returned": prompt_done,
+        "device_closed": device_closed,
+        "credentials_rejected": rejected,
+        "banner_applied": banner_applied,
+        "device_lines": len([ln for ln in device_text.splitlines() if ln.strip()]),
+    }
+    if not rejected and (
+        rc in (0, None) or prompt_done or (rc == 255 and device_closed)
+    ):
         data["failure_class"] = None
-        if rc == 255:
+        if rc not in (0, None):
             data["device_closed_after_output"] = True
+        if signal_number is not None:
+            data["terminated_by_signal"] = signal_number
         return json_result(
             success=True,
             exit_code=EXIT_OK,
-            stdout=_strip_farewell(clean_output),
+            stdout=command_output,
             data=data,
         )
-    fclass = classify_failure(int(rc), output) or "remote_error"
+    # Genuine client-side failure. The *classifier* must still see ssh's farewell
+    # wording: a transcript that is nothing but ``Received disconnect ...`` is a
+    # rejected credential (acceptance criterion), and stripping it first would
+    # turn that into a bare ``remote_error``. What keeps a *finished* command out
+    # of this branch is the verdict above (prompt / device close), plus
+    # ``command_output``: with device text present the ambiguous disconnect
+    # wording is classified as ``remote_error``, not ``auth`` (BUG-008).
+    fclass = classify_failure(
+        int(rc), clean_output, command_output=device_text
+    ) or "remote_error"
     data["failure_class"] = fclass
+    if signal_number is not None:
+        data["terminated_by_signal"] = signal_number
     return json_result(
         success=False,
         exit_code=EXIT_AUTH if fclass == "auth" else _CLASS_CODES.get(fclass, int(rc)),
-        stdout="" if fclass in ("auth", "host_key", "network") else _strip_farewell(clean_output),
+        stdout="" if fclass in ("auth", "host_key", "network") else command_output,
         stderr=clean_output if fclass in ("auth", "host_key", "network") else f"ssh exited {rc}\n",
         data=data,
     )
 
 
-def _strip_recorded_banner(output: str, banner: str) -> tuple[str, list[str]]:
+def banner_is_usable(banner: str) -> bool:
+    """True when ``banner`` can be cut from a merged transcript (BUG-008b).
+
+    A pre-auth greeting holds no prompt and no device goodbye: both of those
+    appear only *after* the command has run. A "banner" that contains either
+    has run past its own boundary, and cutting it would delete the command's
+    result (and the prompt that proves it completed).
+    """
+    if not banner or not banner.strip():
+        return False
+    return not (closed_by_device(banner) or prompt_line_present(banner))
+
+
+def _strip_recorded_banner(
+    output: str, banner: str, *, command_hint: str = "", trust_transcript: bool = False
+) -> tuple[str, list[str], bool]:
     """Remove the *known* pre-auth banner prefix from a merged transcript.
 
     The interactive routes (``-tt`` pipe, pty) merge stdout and stderr, so
@@ -1535,61 +1978,68 @@ def _strip_recorded_banner(output: str, banner: str) -> tuple[str, list[str]]:
     (``session.login_banner``) — that prefix, and only that prefix, is
     transport noise (SSHCORE-017).
 
+    Returns ``(text, banner_lines, applied)``.
+
     With no recorded banner the transcript is returned untouched. Guessing from
     shape ("a leading blank line plus one line") is *not* safe on a merged
     stream: the login driver may already have consumed the greeting, and the
     command's own first line is then the one that gets deleted. That is exactly
     what an early version of this fix did to `echo 隧道已建立` on OpenSSH 8.2.
+
+    BUG-008b: the recorded snapshot is a *race*, not a boundary. On a fast VRP
+    box the whole exchange is in the buffer at the first poll — greeting, the
+    answer, the prompt the device re-printed — so cutting "everything recorded"
+    deleted the result and the prompt with it, and the leftover transcript
+    (ssh's goodbye alone) classified as `auth` / exit 100. Three rules prevent
+    that, and the transcript is preferred over the snapshot whenever they
+    disagree:
+
+    1. cut only the leading run of recognised **greeting** lines
+       (:func:`lib.greeting_prefix`), never an arbitrary prefix;
+    2. refuse to cut at all if the cut would end mid-line, if the command's
+       echoed line sits inside the candidate, or if what remains would not
+       still show a device prompt;
+    3. ``trust_transcript`` lets the caller ask for rule 1 even when the login
+       driver recorded no usable snapshot. Without that, the same device would
+       return the greeting on some runs and not on others — which is exactly
+       what "unstable output" looks like from the caller's side. It is opt-in
+       because it must not weaken rule 2: the cut still has to stop at a line
+       break, skip the command's echo and leave a prompt behind.
+
+    Leaving a greeting line in ``stdout`` is a nuisance; deleting the answer is
+    a wrong answer.
     """
-    if not banner:
-        return output, []
-    marker = banner.strip()
     stripped = output.lstrip("\r\n \t")
-    if not marker or not stripped.startswith(marker):
-        return output, []
-    remainder = stripped[len(marker):]
-    # drop the newline that terminated the banner line, keep the rest verbatim
-    if remainder.startswith("\r\n"):
-        remainder = remainder[2:]
-    elif remainder.startswith("\n"):
-        remainder = remainder[1:]
-    return remainder, [line for line in banner.splitlines() if line.strip()]
+    if banner:
+        marker = banner.strip()
+        if not marker or not stripped.startswith(marker):
+            return output, [], False
+    elif not trust_transcript:
+        return output, [], False
+    # Rule 1: only greeting-shaped lines may go, and only from the front. A
+    # snapshot that ran into the answer stops at the answer's first line.
+    greeting = greeting_prefix(stripped)
+    if not greeting:
+        return output, [], False
+    # Rule 2a: a cut that ends mid-line would leave a fragment of the greeting
+    # stuck to the first character of the result; leave the text alone instead.
+    if not greeting.endswith(("\n", "\r")):
+        return output, [], False
+    tail = stripped[len(greeting):]
+    # Rule 2b: the command's own echo belongs to the result, not the greeting.
+    echo = (command_hint or "").strip()
+    if echo and echo in greeting:
+        return output, [], False
+    # Rule 2c: what is left has to prove the command ran.
+    if not prompt_line_present(device_output_text(tail)):
+        return output, [], False
+    return tail, [line for line in greeting.splitlines() if line.strip()], True
 
 
 def _scrubbed(text: str, secret: str) -> str:
     from lib.askpass import scrub_secret
 
     return scrub_secret(text, secret)
-
-
-def _strip_farewell(text: str) -> str:
-    """Drop ssh's own "Connection to <host> closed." trailer.
-
-    On a forced tty (``-tt``) ssh appends that line to the command's output.
-    It is transport noise, not command output, so it is removed from
-    ``stdout`` (the raw text stays available in ``data.raw_stdout``).
-
-    The trailer is only stripped when it stands on its own line. ssh appends it
-    *without* a preceding newline when the command's last line did not end in
-    one (``printf x`` → ``xConnection to h closed.``); trimming the suffix in
-    that case is safe because the phrase cannot be produced by the remote shell
-    without ssh adding it, and leaving it in would corrupt the byte count.
-    """
-    lines = text.splitlines()
-    while lines and re.match(
-        r"^(Connection to .* closed\.|Shared connection to .* closed\.)$",
-        lines[-1].strip(),
-    ):
-        lines.pop()
-    joined = "\n".join(lines)
-    joined = re.sub(
-        r"(Connection to \S+ closed\.|Shared connection to \S+ closed\.)$",
-        "",
-        joined.rstrip("\r\n"),
-    )
-    if not joined:
-        return ""
-    return joined + ("\n" if text.endswith(("\n", "\r")) or lines != text.splitlines() else "")
 
 
 def _run_remote(
@@ -2312,6 +2762,68 @@ def _validate_timeouts(args: argparse.Namespace) -> dict | None:
     return None
 
 
+def _host_id(host: str, redact: bool = True) -> str:
+    """A stable handle for the target that survives redaction (review C4).
+
+    ``--json`` redacts ``root@192.168.30.54`` to ``<alias>``, which is right for
+    a shared log but leaves a merged multi-host result set with no way to say
+    which entry belongs to which machine: the review had to key an outer dict
+    by hand, and that association is lost the moment results are written to
+    disk.
+
+    So every envelope carries ``data.host_id``:
+
+    * a **name alias** (``lab-240``) is not sensitive — it is the handle the
+      caller typed — and stays readable;
+    * an **address literal** becomes ``sha256:<first 12 hex>``, a stable value
+      that matches across runs and across hosts without disclosing the address;
+    * ``--no-redact-host`` always keeps the literal string.
+
+    The value is stable for the same input, so results can be joined by
+    ``host_id``. It is never the resolved ``HostName``: an alias that points at
+    an internal address stays as its alias.
+    """
+    from lib.redact import _is_address_literal
+
+    if not host:
+        return ""
+    target, _port = split_target(host)
+    bare = target.split("@", 1)[-1]
+    if redact and _is_address_literal(bare):
+        digest = hashlib.sha256(bare.encode("utf-8")).hexdigest()[:12]
+        return f"sha256:{digest}"
+    return host
+
+
+def _local_output_file(args: argparse.Namespace, result: dict) -> dict:
+    """Write a finished local-route envelope's stdout to ``--output-file``.
+
+    The local route captures into the same 10 MB buffer, so it needs the same
+    escape hatch as the remote one (review D1). It is a plain write here
+    because the output has already been captured; the remote route streams
+    instead, which is what keeps its memory flat.
+    """
+    target = Path(args.output_file).expanduser()
+    body = (result.get("stdout") or "").encode("utf-8")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(body)
+    except OSError as exc:
+        result["data"]["output_file_error"] = str(exc)
+        result["success"] = False
+        result["exit_code"] = EXIT_ARGS
+        result["data"]["failure_class"] = "invalid_arguments"
+        return result
+    data = result.setdefault("data", {})
+    data["output_file"] = {
+        "path": str(target),
+        "bytes": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+    }
+    result["stdout"] = f"<stdout written to {target} ({len(body)} bytes)>"
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912
     argv = list(sys.argv[1:] if argv is None else argv)
     early = handle_version("ssh_execute.py", argv)
@@ -2328,6 +2840,47 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912
     if command_failure is not None:
         emit(command_failure, as_json=as_json)
         return int(command_failure["exit_code"])
+
+    # Review D3/D4: `--script-file` turns the payload into the command source
+    # (`bash -s`) so the caller never has to thread a script through three
+    # levels of quoting; `--normalize-lf` fixes a PowerShell-authored file.
+    script_notes: dict | None = None
+    if args.script_file:
+        if args.command or commands:
+            result = json_result(
+                success=False,
+                exit_code=EXIT_ARGS,
+                stderr=(
+                    "ssh_execute: --script-file replaces the command; drop the "
+                    "positional command / --command / --commands-file\n"
+                ),
+                data={
+                    "failure_class": "invalid_arguments",
+                    "unsupported_option": "--script-file",
+                },
+            )
+            emit(result, as_json=as_json)
+            return EXIT_ARGS
+        if args.stdin_file or args.stdin_text is not None:
+            result = json_result(
+                success=False,
+                exit_code=EXIT_ARGS,
+                stderr=(
+                    "ssh_execute: --script-file carries the payload on stdin, so "
+                    "it cannot be combined with --stdin-file/--stdin-text\n"
+                ),
+                data={
+                    "failure_class": "invalid_arguments",
+                    "unsupported_option": "--script-file",
+                    "conflicts_with": "--stdin-file/--stdin-text",
+                },
+            )
+            emit(result, as_json=as_json)
+            return EXIT_ARGS
+        args.stdin_file = args.script_file
+        args.command = "bash -s" if _script_wants_bash(args.script_file) else "sh -s"
+        if not args.keep_crlf:
+            args.normalize_lf = True
     if args.command is None and not commands and args.stdin_text is None \
             and args.stdin_file is None:
         result = json_result(
@@ -2346,14 +2899,33 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912
         if stdin_failure is not None:
             emit(stdin_failure, as_json=as_json)
             return int(stdin_failure["exit_code"])
+        if args.normalize_lf and stdin_bytes is not None:
+            stdin_bytes, script_notes = normalize_script_bytes(stdin_bytes)
     elif args.stdin_text is not None:
         stdin_bytes = args.stdin_text.encode("utf-8")
     # One decoded copy for every route that still speaks text; handled in
     # `_run_remote_with_retry` via this attribute so the password/sudo paths
     # can keep their own stdin semantics.
     args._stdin_bytes = stdin_bytes
+    args._stdin_notes = script_notes
     # NB: the password is attached *after* auth resolution below (the value is
     # route-dependent, and the key route must never see it).
+
+    allowed_exit, allow_error = parse_allow_exit(args.allow_exit)
+    if allow_error is not None:
+        result = json_result(
+            success=False,
+            exit_code=EXIT_ARGS,
+            stderr=f"ssh_execute: {allow_error}\n",
+            data={
+                "failure_class": "invalid_arguments",
+                "invalid_option": "--allow-exit",
+                "value": args.allow_exit,
+            },
+        )
+        emit(result, as_json=as_json)
+        return EXIT_ARGS
+    args._allow_exit = allowed_exit
 
     refusal = _validate_ssh_options(args.ssh_option)
     if refusal is not None:
@@ -2413,6 +2985,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912
 
     host_arg, inline_port = split_target(args.host)
     port = args.port if args.port is not None else inline_port
+    login_user, user_source = resolve_login_user(
+        host_arg, getattr(args, "user", None), args.ssh_config
+    )
 
     if host_arg == "local":
         if commands:
@@ -2440,7 +3015,25 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912
             result = _run_local(
                 args.command or "", args.timeout, stdin_text=stdin_bytes,
                 live=not as_json,
+                shell=getattr(args, "shell", LOCAL_SHELL_DEFAULT),
             )
+            if args.output_file:
+                result = _local_output_file(args, result)
+    elif getattr(args, "shell", LOCAL_SHELL_DEFAULT) != LOCAL_SHELL_DEFAULT:
+        result = json_result(
+            success=False,
+            exit_code=EXIT_ARGS,
+            stderr=(
+                "ssh_execute: --shell only applies to the local route "
+                "(host 'local'); a remote command is already run by the remote "
+                "login shell. Drop the flag.\n"
+            ),
+            data={
+                "route": "remote",
+                "failure_class": "invalid_arguments",
+                "unsupported_option": "--shell",
+            },
+        )
     elif args.control_master == "auto" and is_windows():
         result = json_result(
             success=False,
@@ -2467,6 +3060,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912
         # askpass-backed child; it is attached here (after resolution, never for
         # the key route) and never enters argv.
         args._password = password_value
+        args._login_user = login_user
         if auth == "password" and not password_value:
             result = json_result(
                 success=False,
@@ -2483,6 +3077,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912
                     "failure_class": "password_required",
                 },
             )
+        elif auth == "password" and login_user is None:
+            # Review B1: no user anywhere means ssh tries the *local* account
+            # name and the failure reads "Permission denied" — pointing at the
+            # password instead of at the missing username.
+            result = user_required_result(host_arg, ssh_config=args.ssh_config)
+            result["data"]["user_source"] = user_source
         elif commands:
             result = _run_batch(
                 host_arg, commands, args.timeout, args.connect_timeout,
@@ -2492,6 +3092,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912
                 identity=args.identity,
                 accept_new_hostkey=args.accept_new_hostkey,
                 password=password_value,
+                user=login_user,
+                allow_exit=allowed_exit,
             )
         elif auth == "password" and _is_network_device(host_arg, args.ssh_config):
             # A device CLI genuinely needs the tty; the exec channel cannot hold
@@ -2506,11 +3108,25 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911, PLR0912
                 identity=args.identity,
                 password=password_value,
                 stdin_text=stdin_bytes,
+                user=login_user,
             )
         else:
             result = _run_remote_with_retry(
                 host_arg, args.command or "", args, port,
             )
+
+    data_block = result.setdefault("data", {})
+    if login_user is not None and host_arg != "local":
+        data_block["user_source"] = user_source
+    if script_notes is not None:
+        data_block["stdin_normalized"] = script_notes
+    if args.script_file:
+        data_block["script_file"] = str(Path(args.script_file).expanduser())
+    # Review C4: a stable, non-sensitive identifier so results merged on disk
+    # can still be attributed to the host that produced them.
+    data_block["host_id"] = _host_id(args.host, bool(args.redact_host))
+    if allowed_exit:
+        result = apply_allow_exit(result, allowed_exit)
 
     _audit(args, result)
     redactor = redactor_for(host_arg, args.ssh_config, enabled=args.redact)
@@ -2624,6 +3240,8 @@ def _run_remote_with_retry(
             live=not getattr(args, "json", False),
             redactor=redactor_for(host, args.ssh_config, enabled=getattr(args, "redact", True)),
             password=getattr(args, "_password", None),
+            user=getattr(args, "_login_user", None),
+            output_file=getattr(args, "output_file", None),
         )
 
     policy = policy_from_args(args)
@@ -2938,4 +3556,4 @@ def _run_follow(
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main("ssh_execute.py", main))
