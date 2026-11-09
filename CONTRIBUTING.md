@@ -85,6 +85,13 @@ uv sync --all-extras
 
 This creates `.venv/` with `pytest`, `ruff`, and `mypy` installed — the tools the test and lint sections below assume are on `PATH`.
 
+> **`uv.lock` is stale.** It still records the pre-1.0 metadata (`>=3.10`, no
+> extras) from before the tree moved to the 3.8 floor and split its runtime
+> dependencies into extras. Rebuilding it needs network access and a `uv` that
+> resolves all four matrix legs, so it is regenerated deliberately rather than
+> hand-edited: run `uv lock && uv sync --all-extras` and commit the result
+> together with `pyproject.toml`.
+
 ## Testing
 
 ```bash

@@ -79,6 +79,11 @@ uv sync --all-extras
 
 这会创建 `.venv/`，并装好 `pytest`、`ruff`、`mypy` —— 也就是下面测试和 lint 章节假定能直接在 `PATH` 里找到的工具。
 
+> **`uv.lock` 已过期。** 它仍是 1.0 之前的元数据（`>=3.10`、无 extras），
+> 而 `pyproject.toml` 已降到 3.8 floor 并把运行时依赖拆成 extras。
+> 重建它需要联网和能解析全部矩阵的 `uv`，所以按计划整体重建而不是手工改：
+> 执行 `uv lock && uv sync --all-extras`，把结果与 `pyproject.toml` 一起提交。
+
 ## 测试
 
 ```bash
