@@ -6,14 +6,14 @@ change the probe in selfcheck.py and regenerate, otherwise this table
 and reality drift apart (DV-26).
 -->
 
-Generated on `Windows-11-10.0.26100-SP0` with Python 3.12.14 for **ssh-core 1.5.0**.
+Generated on `macOS-26.6.1-arm64-arm-64bit` with Python 3.11.14 for **ssh-core 1.0.0**.
 
 ## This machine
 
 | Capability | Available | Needs |
 |---|---|---|
 | Command execution (`ssh_execute`) | yes | ssh |
-| Interactive device session over a pty | **no** | ssh + pty |
+| Interactive device session over a pty | yes | ssh + pty |
 | Interactive device session over pipes | yes | ssh |
 | Fleet broadcast (`ssh_cluster`) | yes | ssh + ssh_execute |
 | Port forwards `-L`/`-R`/`-D` (`ssh_tunnel`) | yes | ssh |
@@ -21,18 +21,18 @@ Generated on `Windows-11-10.0.26100-SP0` with Python 3.12.14 for **ssh-core 1.5.
 | `~/.ssh/config` CRUD + restore | yes | stdlib |
 | `deploy_pubkey` (key route) | yes | ssh |
 | `deploy_pubkey --password` | yes | ssh |
-| SFTP transfer (`--resume`, `--bwlimit`, `--chmod`, `--preserve`) | **no** | paramiko |
+| SFTP transfer (`--resume`, `--bwlimit`, `--chmod`, `--preserve`) | yes | paramiko |
 | scp transfer fallback | yes | scp |
 | tar stream transfer fallback | yes | tar |
-| `ssh_server_transfer --mode stream` | **no** | paramiko |
+| `ssh_server_transfer --mode stream` | yes | paramiko |
 | `ssh_server_transfer --mode direct` | yes | ssh + tar |
-| `ssh_server_transfer --use-rsync` | **no** | rsync |
+| `ssh_server_transfer --use-rsync` | yes | rsync |
 | Audit trail (`--audit-log`) + rotation | yes | stdlib |
 | `ssh_config_manager list --format` | yes | stdlib |
 | Privilege escalation (`--sudo`) | yes | ssh + sudoers |
 | Log following (`--follow`/`--tail`) | yes | ssh |
-| OpenSSH `ControlMaster` reuse | **no** | POSIX socket |
-| `ssh-copy-id` (not required by ssh-core) | **no** | ssh-copy-id |
+| OpenSSH `ControlMaster` reuse | yes | POSIX socket |
+| `ssh-copy-id` (not required by ssh-core) | yes | ssh-copy-id |
 
 ## By platform
 

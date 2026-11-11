@@ -26,9 +26,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from .ssh_core.helpers import SCRIPTS, load_script  # noqa: E402
-from .ssh_core.compat import temp_dir  # noqa: E402
-
 from lib.pubkey import (  # noqa: E402
     DEFAULT_KEY,
     MARK_ALREADY,
@@ -46,6 +43,9 @@ from lib.pubkey import (  # noqa: E402
     resolve_key_path,
     sh_quote,
 )
+
+from .ssh_core.compat import temp_dir  # noqa: E402
+from .ssh_core.helpers import SCRIPTS, load_script  # noqa: E402
 
 PUBKEY_TEXT = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEY test@host"
 PRIVATE_HEADER = "-----BEGIN " + "OPENSSH PRIVATE KEY-----"

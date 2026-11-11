@@ -16,9 +16,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 import live_support  # noqa: E402
+import pytest
 from live_support import require_live_ssh  # noqa: E402
 
 pytestmark = pytest.mark.live_ssh

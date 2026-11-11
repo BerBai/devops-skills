@@ -52,7 +52,7 @@ failures (100-129) and keeps a private range for its own taxonomy:
 | Range | Owner |
 |---|---|
 | 0-9, 124 | shared (`ok`, `internal`, `invalid_arguments`, `dependency_missing`, `not_found`, `already_exists`, `config_missing`, `parse_error`, `permission`, `verify_failed`, `timeout`) |
-| 40-41 | `log-aggregator` (`partial_fetch` 41 = at least one source could not be read; `fetcher_failed` is an accepted alias of the same class) |
+| 40-49 | `log-aggregator` (`source_spec_invalid` 40, `partial_fetch` 41, `clock_skew_failed` 42, `normalize_failed` 43, `no_sources_resolved` 44; correlate adds 90-92) |
 | 100-129 | ssh-core transport + tunnel |
 | 140-146 | `deploy_pubkey`, `iac-state` module validation |
 | 150-158 | `cicd-debug` |
@@ -74,7 +74,7 @@ Three rules make that true across plugin boundaries:
 2. **Partial reads fail.** One unreadable source, one failed fetcher, one host
    that really failed: the run is `success: false` with
    `failure_class: "partial_fetch"` (log-aggregator, exit 41) or
-   `partial_failure` (ssh_cluster), and the data that *was* collected is still
+   `partial_failure` (`ssh_cluster`), and the data that *was* collected is still
    in `data`. A host that a platform check or a `--health-check` deliberately
    skipped is not a failure; it is reported under `data.skipped_hosts` next to
    `data.ok_hosts` / `data.failed_hosts`, and the run stays `success: true`.

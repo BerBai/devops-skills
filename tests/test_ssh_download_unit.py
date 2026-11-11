@@ -26,6 +26,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from lib import exit_codes  # noqa: E402
+
 from tests.ssh_core.helpers import load_script  # noqa: E402
 
 EXIT_OK = 0

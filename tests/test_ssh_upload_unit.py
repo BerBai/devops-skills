@@ -29,10 +29,10 @@ UPLOAD = SCRIPTS / "ssh_upload.py"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tests.ssh_core.helpers import load_script  # noqa: E402
-
 import lib.transfer as transfer  # noqa: E402
 from lib import exit_codes  # noqa: E402
+
+from tests.ssh_core.helpers import load_script  # noqa: E402
 
 EXIT_OK = 0
 EXIT_INVALID_ARGUMENTS = exit_codes.EXIT_INVALID_ARGUMENTS

@@ -9,6 +9,9 @@
 ```
 devops-skills/
 ├── .claude-plugin/marketplace.json   # marketplace 入口 —— 列出所有 plugin
+├── .github/workflows/ci.yml          # Testing 一节所述的四个 job
+├── docs/                             # 架构 + 离线安装 + ADR
+├── scripts/                          # 离线包构建/安装、文档校验、CLI 参考生成
 ├── plugins/
 │   ├── ssh-core/                     # 传输层
 │   │   ├── .claude-plugin/plugin.json
@@ -28,6 +31,8 @@ devops-skills/
 
 每个 plugin **自我封闭** —— 它的 `skills/<name>/scripts/` 只在有明确文档说明的情况下才跨边界。诊断 plugin（`remote-debug` / `k8s-debug` / `docker-quick` / `log-aggregator` / `iac-state` / `cicd-debug`）依赖 `ssh-core` 提供远端命令执行，但**不**直接 import 其 Python 模块；而是 shell out 调用用户已安装的 `ssh-core` CLI。`ssh-guarded` 同样如此。
 
+`docs/` 与 `scripts/` 下的内容不会随 plugin 安装发给用户：marketplace 只复制 `plugins/<name>/skills/<name>/`。分层图见 [`docs/architecture.md`](./docs/architecture.md)，离线路径见 [`docs/offline-install.md`](./docs/offline-install.md)。
+
 ## Skill 编写约定
 
 1. **`SKILL.md` 服务于分诊，不是深度。** 决策树、硬性检查点、一段话的命令速查。其余内容下沉到 `references/`。
@@ -36,21 +41,24 @@ devops-skills/
 4. **JSON 输出契约。** 每个脚本必须支持 `--json` 并输出 `{"success": bool, "exit_code": int, "stdout": "...", "stderr": "...", "data": {...}}`。这是让 Claude Code 能链式调用而无需解析自然语言的关键。
 5. **`subprocess.run(list, ...)`，永不传 shell 字符串。** 不要例外，哪怕输入"可信"。测试用例里专门塞了 `;`、`&&` 和 `` ` ``。
 6. **skill 输出不要 emoji**（除非用户显式要求）。Skill markdown 同样保持无 emoji。
+7. **文档示例只能展示已发布行为。** `SKILL.md` 与 `references/*.md` 不得把 deferred、未实现或未来版本的 flag 当作正面示例。若某个 flag 在运行时打印 "deferred to vX.Y"，它必须带明确的「尚未实现」标注才能出现在文档里。路径同理：在受支持的发行版上不存在的路径（如 systemd-only 的 Debian 12+ / RHEL 9+ / Ubuntu 22.04+ 上的 `/var/log/syslog`）必须标注或替换。
 
 ## 状态
 
-按已接受的 rollout 口径，V1 已完成：
+按已接受的 rollout 口径，V1 CLI surface 已实现，所有 plugin 版本统一为
+`1.0.0`。`v0.2.0`（2026-05-21）是首个公开 **scaffold**；`v1.0.0` 打在本次发布上。版本真源规则见
+[`CHANGELOG.md`](./CHANGELOG.md)。
 
-- 8 个 plugin 的 V1 CLI surface 均已发布。
+- 8 个 plugin 的 V1 CLI surface 均已实现。
 - 每个公开脚本都支持 `--help`；每个运行型脚本都支持 JSON 输出契约。
 - 已发布脚本具备 unit 覆盖；依赖环境的 integration 测试保持 skip-safe。
-- `ssh-core` 已跟踪独立版 **1.5.0**（ADR-004、ADR-005）。它是本 marketplace 的「远程连接子功能」：传输、认证、会话、隧道、传输文件、`~/.ssh/config` CRUD，以及 `selfcheck.py` / `doctor.py` 能力探针。其他 plugin 只通过 `ssh_execute.py` shell out，不 import 它。
+- `ssh-core` **1.0.0** 包含独立版 **1.5.0** 功能集（[ADR-004](./docs/adr/ADR-004-ssh-core-1.5.0-sync.md)、[ADR-005](./docs/adr/ADR-005-ssh-core-boundary.md)）。它是本 marketplace 的「远程连接子功能」：传输、认证、会话、隧道、传输文件、`~/.ssh/config` CRUD，以及 `selfcheck.py` / `doctor.py` 能力探针。其他 plugin 只通过 `ssh_execute.py` shell out，不 import 它。
 
 Plugin 能力清单：
 
 | Plugin | 已发布 |
 |---|---|
-| `ssh-core` | `ssh_execute`、`ssh_session`、`ssh_slice`、`ssh_cluster`、`ssh_tunnel`、`ssh_server_transfer`、`ssh_config_manager`、`ssh_upload`、`ssh_download`、`deploy_pubkey`、`ssh_daemon`、`selfcheck`、`doctor`、`audit`（1.5.0），以及 `run.cmd` / `run.sh` 启动器。 |
+| `ssh-core` | `ssh_execute`、`ssh_session`、`ssh_slice`、`ssh_cluster`、`ssh_tunnel`、`ssh_server_transfer`、`ssh_config_manager`、`ssh_upload`、`ssh_download`、`deploy_pubkey`、`ssh_daemon`、`selfcheck`、`doctor`、`audit`（1.0.0，独立功能集 1.5.0），以及 `run.cmd` / `run.sh` 启动器。 |
 | `ssh-guarded` | request drafters、`run_request`、`exec_detached`、`scan_software`、`redact_check`、`gc_artifacts`。 |
 | `remote-debug` | `diagnose_host`、`tail_log`、`port_check`、`compare_across_hosts` —— 均支持 `local`；`diagnose_host` 有 Windows 探针族（`--target-os`），`tail_log` 支持流式 `--follow`，`port_check` 支持 `--udp`。 |
 | `k8s-debug` | `check_namespace`、`diagnose_pod`、`cluster_health`、`helm_status`（pending release 会列出卡住的 pod）。 |
@@ -63,7 +71,7 @@ Plugin 能力清单：
 
 优先推进能解锁多个后续能力的传输层基础工作：
 
-1. `ssh-core`：保持插件树与独立版发布字节一致（当前 1.5.0），每次同步后重跑插件测试。
+1. `ssh-core`：保持插件树与独立版发布字节一致（独立功能集当前 1.5.0；分发版本 1.0.0），每次同步后重跑插件测试。
 2. `ssh_server_transfer.py`：在更多主机类型上验证 named-OpenSSH/tar/rsync 模式。
 3. `ssh_tunnel.py`：连接复用决策之后重新评估 Windows 支持（`--idle-timeout` 已在 1.4.0 落地）。
 4. 脱敏强化：默认 catalog 导出、可选 regex timeout 防护。
@@ -79,10 +87,9 @@ uv sync --all-extras
 
 这会创建 `.venv/`，并装好 `pytest`、`ruff`、`mypy` —— 也就是下面测试和 lint 章节假定能直接在 `PATH` 里找到的工具。
 
-> **`uv.lock` 已过期。** 它仍是 1.0 之前的元数据（`>=3.10`、无 extras），
-> 而 `pyproject.toml` 已降到 3.8 floor 并把运行时依赖拆成 extras。
-> 重建它需要联网和能解析全部矩阵的 `uv`，所以按计划整体重建而不是手工改：
-> 执行 `uv lock && uv sync --all-extras`，把结果与 `pyproject.toml` 一起提交。
+`uv.lock` 由工具生成，不手工编辑。依赖变更后执行
+`uv lock && uv sync --all-extras`，把结果与 `pyproject.toml` 一起提交；当前
+lock 已按 `>=3.8` floor 及 `sftp` / `yaml` / `hcl` / `dev` extras 解析。
 
 ## 测试
 
@@ -90,12 +97,19 @@ uv sync --all-extras
 pytest tests/
 ```
 
-CI 在 Linux 上跑三个 job（`.github/workflows/ci.yml`），覆盖四条检查：
+CI 在 Linux 上跑四个 job（`.github/workflows/ci.yml`）。三个代码 job 覆盖四条检查：
 
 1. JSON-lint 每个 `marketplace.json` 和 `plugin.json`
 2. 检查每个 `SKILL.md` 是否含 `## When to use` 与流程小节（`## Workflow` 或 `## Decision tree`）—— 由 `tests/test_manifests.py` 强制
 3. 对每个公开脚本 smoke 测 `--help`（私有 `_*.py` 辅助模块豁免）
 4. 断言各 plugin 内的内嵌辅助文件与模板一致 —— 由 `tests/test_manifests.py::test_vendored_locator_matches_template` 与 `::test_vendored_version_helper_matches_template` 强制
+
+`docs` job 另加六道门禁：相对链接与标题锚点
+（`scripts/check_docs_links.py --require-index`）、中英结构 parity
+（`scripts/check_docs_parity.py`）、ssh-core 生成式 CLI 参考 + 8 个 plugin 的
+文档脚本清单（`scripts/gen_cli_reference.py --check --all`）、白名单
+help/version/本地示例（`--examples`）、`.markdownlint.jsonc` 下的
+`markdownlint-cli`，以及带已提交 `.vale.ini` 词表的 `vale`。
 
 ## 内嵌文件
 

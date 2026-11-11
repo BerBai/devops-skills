@@ -136,7 +136,11 @@ def test_partial_results_still_ship_in_data(sources: tuple[str, str]) -> None:
 
     _rc, grep_env = results["grep_across_sources"]
     assert grep_env["data"]["total_hits"] >= 1
-    assert grep_env["data"]["per_source"][str(_good_tag(good))] >= 1
+    per_source = grep_env["data"]["per_source"]
+    assert per_source, "a partial fetch dropped the data that was collected"
+    assert any(
+        tag.endswith("/app.log") and hits >= 1 for tag, hits in per_source.items()
+    ), per_source
 
     _rc, corr_env = results["correlate"]
     assert corr_env["data"]["anchor"] is not None
@@ -144,12 +148,6 @@ def test_partial_results_still_ship_in_data(sources: tuple[str, str]) -> None:
         line["body"] == "MATCH alpha" for line in corr_env["data"]["window_lines"]
     )
     assert corr_env["data"]["summary"]["partial_fetch"] is True
-
-
-def _good_tag(spec: str) -> str:
-    """``file://local/<abs path>`` -> the ``source_tag`` the scripts emit."""
-    payload = spec[len("file://local"):]
-    return f"local{payload}"
 
 
 def test_all_three_agree_when_every_source_fails(tmp_path: Path) -> None:

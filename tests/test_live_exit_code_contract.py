@@ -30,7 +30,6 @@ import ast
 from pathlib import Path
 
 import pytest
-
 from lib import exit_codes as codes
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

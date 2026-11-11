@@ -53,8 +53,8 @@ for _k in list(_SAVED_LIB_MODULES):
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 import request_command as _rc_mod  # noqa: E402
-from lib import state  # noqa: E402
 from lib import request_artifact as _ra  # noqa: E402
+from lib import state  # noqa: E402
 
 request_command = _rc_mod
 

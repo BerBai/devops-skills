@@ -22,8 +22,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import msys_safe_env
 from . import _ssh_core_locator as _locator
+from . import msys_safe_env
 
 # ---------------------------------------------------------------------------
 # SSH_EXECUTE_PATH resolution

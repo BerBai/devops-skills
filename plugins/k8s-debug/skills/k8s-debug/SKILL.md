@@ -1,6 +1,6 @@
 ---
 name: k8s-debug
-description: Kubernetes diagnostic playbook. Use when the user reports Pod/Deployment/Service/Namespace issues — CrashLoopBackOff, OOMKilled, ImagePullBackOff, Pending pods, failed Helm releases, broken Ingress, or unhealthy nodes. Read-only diagnosis via kubectl/helm; remote hosts go through ssh-core.
+description: "Kubernetes diagnostic playbook. Use when the user reports Pod/Deployment/Service/Namespace issues — CrashLoopBackOff, OOMKilled, ImagePullBackOff, Pending pods, failed Helm releases, broken Ingress, or unhealthy nodes. Read-only diagnosis via kubectl/helm; remote hosts go through ssh-core."
 ---
 
 # k8s-debug

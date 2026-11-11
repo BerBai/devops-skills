@@ -1,6 +1,6 @@
 ---
 name: docker-quick
-description: Docker / container diagnostic playbook. Use when the user reports container issues — Exited 137, OOM, restart loops, image bloat, layer cache misses, Compose service unhealthy, port already in use, mount failures. Read-only inspect via docker/podman/compose; remote hosts go through ssh-core.
+description: "Docker / container diagnostic playbook. Use when the user reports container issues — Exited 137, OOM, restart loops, image bloat, layer cache misses, Compose service unhealthy, port already in use, mount failures. Read-only inspect via docker/podman/compose; remote hosts go through ssh-core."
 ---
 
 # docker-quick

@@ -63,10 +63,13 @@ from lib import (  # noqa: E402
     json_result,
     msys_safe_env,
 )
-from lib.auth import AUTH_CHOICES, DEFAULT_PASSWORD_ENV  # noqa: E402
-from lib.auth import auth_options  # noqa: E402
-from lib.auth import resolve as resolve_auth  # noqa: E402
 from lib.askpass import askpass_env  # noqa: E402
+from lib.auth import (  # noqa: E402
+    AUTH_CHOICES,
+    DEFAULT_PASSWORD_ENV,
+    auth_options,  # noqa: E402
+)
+from lib.auth import resolve as resolve_auth  # noqa: E402
 from lib.cli import SSHArgumentParser, guarded_main, handle_version  # noqa: E402
 from lib.exit_codes import (  # noqa: E402
     EXIT_AUTH,

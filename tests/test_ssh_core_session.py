@@ -13,8 +13,6 @@ the state machine, including the paths that raise.
 """
 
 from __future__ import annotations
-from .ssh_core.compat import temp_dir  # noqa: E402
-from .ssh_core.helpers import SCRIPTS, load_script  # noqa: E402
 
 import os
 import re
@@ -24,6 +22,9 @@ import time
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from .ssh_core.compat import temp_dir  # noqa: E402
+from .ssh_core.helpers import SCRIPTS, load_script  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 

@@ -184,7 +184,7 @@ def load_pubkey(path: str | Path, *, source: str = "explicit") -> Pubkey:
             head = handle.read(PUBKEY_PEEK_BYTES)
     except OSError as exc:
         raise PubkeyError(
-            "key_file_missing", "public key unreadable: {} ({})".format(resolved, exc)
+            "key_file_missing", f"public key unreadable: {resolved} ({exc})"
         )
     text = head.decode("utf-8", errors="replace")
     # Judge the first *key* line, not the raw head: a `.pub` file whose first
@@ -193,17 +193,15 @@ def load_pubkey(path: str | Path, *, source: str = "explicit") -> Pubkey:
     if not looks_like_pubkey_text(_first_key_line(text) or text):
         raise PubkeyError(
             "key_file_missing",
-            "{} doesn't look like an OpenSSH public key (a private key was "
-            "passed?). Point --key at the .pub file.".format(resolved),
+            f"{resolved} doesn't look like an OpenSSH public key (a private key was "
+            "passed?). Point --key at the .pub file.",
         )
     line = _first_key_line(resolved.read_text(encoding="utf-8", errors="replace"))
     parts = line.split()
     if len(parts) < 2:
         raise PubkeyError(
             "key_file_missing",
-            "{} has an incomplete public key line (expected 'type base64 [comment]')".format(
-                resolved
-            ),
+            f"{resolved} has an incomplete public key line (expected 'type base64 [comment]')",
         )
     return Pubkey(
         path=resolved,

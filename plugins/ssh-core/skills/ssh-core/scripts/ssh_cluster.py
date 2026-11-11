@@ -333,7 +333,7 @@ def _run_one(
     password_env: str = "SSH_PASSWORD",
     accept_new_hostkey: bool = False,
     ssh_config: str | None = None,
-    retry: "RetryPolicy | None" = None,
+    retry: RetryPolicy | None = None,
     stdin_file: str | None = None,
     extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -506,7 +506,7 @@ def _health_check(
     connect_timeout: int,
     max_workers: int,
     ssh_options: list[str] | None = None,
-    auth: "AuthOptions | None" = None,
+    auth: AuthOptions | None = None,
     ssh_config: str | None = None,
     *,
     command: str = DEFAULT_HEALTH_CHECK_COMMAND,
@@ -568,7 +568,7 @@ def _probe_host(
     command: str,
     connect_timeout: int,
     ssh_options: list[str] | None,
-    auth: "AuthOptions",
+    auth: AuthOptions,
     ssh_config: str | None,
     probes: list[ProbeSpec],
     probe_timeout: float,
@@ -623,9 +623,9 @@ def _broadcast_serial(
     connect_timeout: int,
     fail_fast: bool,
     ssh_options: list[str] | None = None,
-    auth: "AuthOptions | None" = None,
+    auth: AuthOptions | None = None,
     ssh_config: str | None = None,
-    retry: "RetryPolicy | None" = None,
+    retry: RetryPolicy | None = None,
     stdin_file: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Sequential broadcast. Preserves alias order. Used when
@@ -663,9 +663,9 @@ def _broadcast_parallel(
     max_workers: int,
     fail_fast: bool,
     ssh_options: list[str] | None = None,
-    auth: "AuthOptions | None" = None,
+    auth: AuthOptions | None = None,
     ssh_config: str | None = None,
-    retry: "RetryPolicy | None" = None,
+    retry: RetryPolicy | None = None,
     stdin_file: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Concurrent broadcast via ThreadPoolExecutor.
@@ -735,9 +735,9 @@ def _broadcast(
     max_workers: int,
     fail_fast: bool,
     ssh_options: list[str] | None = None,
-    auth: "AuthOptions | None" = None,
+    auth: AuthOptions | None = None,
     ssh_config: str | None = None,
-    retry: "RetryPolicy | None" = None,
+    retry: RetryPolicy | None = None,
     stdin_file: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     if max_workers <= 1 or len(aliases) <= 1:

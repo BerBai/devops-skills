@@ -1,6 +1,6 @@
 ---
 name: iac-state
-description: Terraform / OpenTofu state diagnostic playbook. Use when the user reports IaC issues — locked state, state drift, missing resources, plan diverges from reality, module validation failures, or unexpected destroy operations. Read-only: inspects state, detects drift, validates modules.
+description: "Terraform / OpenTofu state diagnostic playbook. Use when the user reports IaC issues — locked state, state drift, missing resources, plan diverges from reality, module validation failures, or unexpected destroy operations. Read-only: inspects state, detects drift, validates modules."
 ---
 
 # iac-state

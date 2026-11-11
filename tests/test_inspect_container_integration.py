@@ -25,9 +25,8 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
-import pytest
-
 import live_support  # noqa: E402
+import pytest
 from live_support import require_live_ssh  # noqa: E402
 
 pytestmark = pytest.mark.live_ssh

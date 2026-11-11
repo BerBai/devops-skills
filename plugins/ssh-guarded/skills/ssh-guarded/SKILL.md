@@ -1,6 +1,6 @@
 ---
 name: ssh-guarded
-description: Safety-first SSH operations on top of ssh-core. Use when working on production servers, customer environments, or any context where every write must be auditable. Implements request→review→execute two-phase writes, redacted output by default, workdir-sandboxed file operations, and detached long-running jobs.
+description: "Safety-first SSH operations on top of ssh-core. Use when working on production servers, customer environments, or any context where every write must be auditable. Implements request→review→execute two-phase writes, redacted output by default, workdir-sandboxed file operations, and detached long-running jobs."
 ---
 
 # ssh-guarded

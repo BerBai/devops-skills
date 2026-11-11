@@ -10,8 +10,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from .ssh_core.helpers import SCRIPTS  # noqa: E402
 from lib import exit_codes  # noqa: E402
+
+from .ssh_core.helpers import SCRIPTS  # noqa: E402
 
 SCRIPTS_WITH_ARGV_ERRORS = [
     "deploy_pubkey.py",

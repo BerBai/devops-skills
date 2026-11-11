@@ -802,7 +802,7 @@ def _yaml_inventory(hosts: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _first_match_hosts(doc: "ConfigDocument") -> list[dict[str, Any]]:
+def _first_match_hosts(doc: ConfigDocument) -> list[dict[str, Any]]:
     """The ``ssh -G``-per-alias view: first matching block wins per alias.
 
     Distinct from ``list``'s raw-blocks view because OpenSSH resolves an alias
@@ -824,7 +824,7 @@ def _first_match_hosts(doc: "ConfigDocument") -> list[dict[str, Any]]:
     return [seen[alias] for alias in sorted(seen)]
 
 
-def _ssh_config_export(doc: "ConfigDocument", hosts: list[dict[str, Any]]) -> str:
+def _ssh_config_export(doc: ConfigDocument, hosts: list[dict[str, Any]]) -> str:
     """A clean ``ssh_config`` rendering: Host blocks only, no metadata comments.
 
     Hosts are re-emitted from their effective values, so the result is a valid
@@ -865,7 +865,7 @@ def _ssh_config_export(doc: "ConfigDocument", hosts: list[dict[str, Any]]) -> st
 
 def _render_list_output(
     fmt: str,
-    doc: "ConfigDocument",
+    doc: ConfigDocument,
     hosts: list[dict[str, Any]],
 ) -> tuple[str, dict[str, Any] | None]:
     """Render ``list`` in the requested format; returns (stdout, extra_data).
@@ -1163,7 +1163,7 @@ def _write_with_guards(
     args: argparse.Namespace,
     config_path: Path,
     action: str,
-    mutate: "Callable[[ConfigDocument], dict[str, Any] | None]",
+    mutate: Callable[[ConfigDocument], dict[str, Any] | None],
 ) -> dict[str, Any]:
     """Lock → re-read → mutate → render → validate → atomically replace.
 

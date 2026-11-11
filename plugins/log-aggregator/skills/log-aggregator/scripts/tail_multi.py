@@ -74,18 +74,23 @@ from typing import Any
 
 # Make ``lib`` importable when run directly: ``python tail_multi.py ...``.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _version import add_version_flag, handle_version
 from lib import (  # noqa: E402
     clock_skew,
-    envelope as envelope_lib,
     fetchers,
     filters,
     source_spec,
     time_norm,
 )
-from lib.fetchers import DEFAULT_LINES, RawLine  # noqa: E402
-from lib.fetchers import FetcherError  # noqa: E402,F401  (re-exported for callers/tests)
+from lib import (
+    envelope as envelope_lib,
+)
+from lib.fetchers import (  # noqa: E402
+    DEFAULT_LINES,
+    FetcherError,  # noqa: E402,F401  (re-exported for callers/tests)
+    RawLine,
+)
 from lib.source_spec import ResolvedSource, SpecError  # noqa: E402
-from _version import add_version_flag, handle_version
 
 # ---------------------------------------------------------------------------
 # Constants

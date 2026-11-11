@@ -28,13 +28,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 import live_support  # noqa: E402
-from live_support import require_live_ssh  # noqa: E402
+import pytest
 
 # ``lib`` is pinned to ssh-core's own package by tests/conftest.py.
 from lib import exit_codes as _codes  # noqa: E402
+from live_support import require_live_ssh  # noqa: E402
 
 pytestmark = pytest.mark.live_ssh
 

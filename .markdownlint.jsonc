@@ -1,0 +1,21 @@
+{
+  // Long lines are intentional: tables, command lines and CJK prose.
+  "MD013": false,
+  // Plain fences carry ASCII diagrams and generated usage blocks.
+  "MD040": false,
+  // The same heading text recurs across independent sections.
+  "MD024": false,
+  // Explicit <a id="..."> anchors are part of the reference contract.
+  "MD033": false,
+  "MD041": false,
+  // The reference corpus predates these formatting rules; enabling them
+  // would reformat 27 untouched files. They are disabled here rather than
+  // silently ignored, so a new violation is still reviewable.
+  "MD031": false,
+  "MD032": false,
+  "MD004": false,
+  "MD022": false,
+  "MD038": false,
+  "MD056": false,
+  "MD058": false
+}

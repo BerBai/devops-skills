@@ -71,8 +71,8 @@ from pathlib import Path
 from typing import Iterator
 
 from . import (
-    BoundedCapture,
     CHILD_TEXT_KWARGS,
+    BoundedCapture,
     drain_stream,
     msys_safe_env,
     write_text_lf,

@@ -1,6 +1,6 @@
 ---
 name: cicd-debug
-description: CI/CD pipeline diagnostic playbook for GitHub Actions and GitLab CI. Use when the user reports pipeline failures — failing jobs, stuck queues, missing secrets, runner registration issues, cache misses, matrix explosion, flaky tests, slow builds. Read-only: analyzes pipeline runs, runner status, secret scopes; does NOT trigger reruns or modify workflows.
+description: "CI/CD pipeline diagnostic playbook for GitHub Actions and GitLab CI. Use when the user reports pipeline failures — failing jobs, stuck queues, missing secrets, runner registration issues, cache misses, matrix explosion, flaky tests, slow builds. Read-only: analyzes pipeline runs, runner status, secret scopes; does NOT trigger reruns or modify workflows."
 ---
 
 # cicd-debug

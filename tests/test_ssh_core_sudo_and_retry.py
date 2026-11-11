@@ -8,7 +8,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from .ssh_core.helpers import load_script  # noqa: E402
 from lib import sudo  # noqa: E402
 from lib.retry import (  # noqa: E402
     MAX_TOTAL_SLEEP,
@@ -17,6 +16,8 @@ from lib.retry import (  # noqa: E402
     policy_from_args,
     retrying,
 )
+
+from .ssh_core.helpers import load_script  # noqa: E402
 
 
 class SudoWrapping(unittest.TestCase):

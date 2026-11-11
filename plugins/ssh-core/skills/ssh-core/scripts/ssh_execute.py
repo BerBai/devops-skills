@@ -125,7 +125,7 @@ import sys
 import tempfile
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 # Keep the tree free of __pycache__/*.pyc: a plain `python3 <script>` would
@@ -1093,8 +1093,18 @@ def _drain(
 
 
 def _shell_name(token: str) -> str:
-    """Basename of ``token`` without a Windows ``.exe`` suffix (SSH-26)."""
-    name = Path(token).name.lower()
+    """Basename of ``token`` without a Windows ``.exe`` suffix (SSH-26).
+
+    Windows path semantics are applied whenever the token contains a backslash
+    or a drive prefix, even on POSIX. The guard is a *reporting* helper for a
+    command the caller may run on Windows; parsing ``C:\\...`` with
+    ``Path`` on Linux would keep the whole string as the basename and miss the
+    wrapper (the regression this branch fixes).
+    """
+    if "\\" in token or (len(token) >= 2 and token[1] == ":"):
+        name = PureWindowsPath(token).name.lower()
+    else:
+        name = Path(token).name.lower()
     if name.endswith(".exe"):
         name = name[:-4]
     return name
@@ -2517,7 +2527,7 @@ def _strip_batch_transcript(stderr: str) -> str:
         if stripped.startswith(
             (
                 _MARK, _MARK_END, _MARK_STDERR, _MARK_STDERR_END,
-                f"cat: /tmp/ssh-core-batch", f"cat: ${_BATCH_TMP_VAR}",
+                "cat: /tmp/ssh-core-batch", f"cat: ${_BATCH_TMP_VAR}",
             )
         ):
             continue

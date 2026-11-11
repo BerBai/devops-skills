@@ -36,7 +36,7 @@ from pathlib import Path
 from . import CHILD_TEXT_KWARGS, msys_safe_env
 
 _SSH_G_TIMEOUT = 10
-_CACHE: dict[tuple[str, str | None], "HostFacts"] = {}
+_CACHE: dict[tuple[str, str | None], HostFacts] = {}
 
 # ``[user@]host[:port]`` — the shapes we accept on the command line.
 _TARGET_RE = re.compile(

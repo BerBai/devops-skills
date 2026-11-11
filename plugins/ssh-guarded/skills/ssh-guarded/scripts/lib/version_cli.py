@@ -6,7 +6,7 @@ through the vendored ``scripts/_version.py`` helper every plugin ships — see
 envelope around it, so ``--version --json`` has the same six keys as every
 other output of this plugin (GAP-005)::
 
-    {"success": true, "exit_code": 0, "stdout": "run_request.py (ssh-guarded 0.2.0)\\n",
+    {"success": true, "exit_code": 0, "stdout": "run_request.py (ssh-guarded 1.0.0)\\n",
      "stderr": "", "data": {"prog": ..., "plugin": ..., "version": ...}, "error": null}
 
 Call :func:`handle_version` as the *first* statement of ``main`` so it answers

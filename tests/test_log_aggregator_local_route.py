@@ -61,7 +61,7 @@ for _k in list(sys.modules):
         del sys.modules[_k]
 
 
-def _source(tmp_path: Path, text: str) -> tuple["source_spec.ResolvedSource", Path]:
+def _source(tmp_path: Path, text: str) -> tuple[source_spec.ResolvedSource, Path]:
     """Build the ``file://local/<path>`` spec an operator would type."""
     target = tmp_path / "app.log"
     target.write_text(text, encoding="utf-8")

@@ -275,7 +275,11 @@ class TestPortProbe:
         env = _local_exec.tcp_probe("127.0.0.1", _closed_port(), 5.0)
         assert port_check._classify_status(env) == "refused"
 
-    def test_unresolvable_host_is_a_host_error(self) -> None:
+    def test_unresolvable_host_is_a_host_error(self, monkeypatch) -> None:
+        def _unresolvable(*args, **kwargs):
+            raise socket.gaierror(-2, "Name or service not known")
+
+        monkeypatch.setattr(_local_exec.socket, "getaddrinfo", _unresolvable)
         env = _local_exec.tcp_probe("no-such-host.invalid", 80, 1.0)
         assert env["success"] is False
         assert env["data"]["failure_class"] == "local_host_error"
@@ -289,7 +293,11 @@ class TestPortProbe:
             "open-or-filtered", "refused",
         }
 
-    def test_udp_problem_never_raises(self) -> None:
+    def test_udp_problem_never_raises(self, monkeypatch) -> None:
+        def _unresolvable(*args, **kwargs):
+            raise socket.gaierror(-2, "Name or service not known")
+
+        monkeypatch.setattr(_local_exec.socket, "getaddrinfo", _unresolvable)
         env = _local_exec.udp_probe("no-such-host.invalid", 53, 0.4)
         assert env["success"] is False
         assert env["data"]["failure_class"] == "local_host_error"

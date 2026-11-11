@@ -69,8 +69,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ruff
-      - name: ruff
-        run: ruff check .
+      - name: ruff ratchet (380-finding baseline; must not increase)
+        # A raw `ruff check .` is still red (the backlog is tracked in
+        # tools/ruff-baseline.json). The ratchet fails on any increase and
+        # passes when the count drops.
+        run: python tools/check_ruff_baseline.py
 
   floor:
     # Guard the declared Python floor: syntax that parses on 3.12 but not on
@@ -84,3 +87,39 @@ jobs:
           python-version: "3.12"
       - name: Refuse 3.9+/3.10+ only constructs in the plugin tree
         run: python tools/check_python_floor.py
+
+  docs:
+    # The documentation is part of the product surface: a broken link, a drifted
+    # zh-CN translation or a hand-copied flag table is a defect. The Python
+    # gates are stdlib-only; markdownlint uses the runner's Node via npx.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Relative links and heading anchors
+        run: python scripts/check_docs_links.py --require-index
+      - name: EN / zh-CN structural parity
+        run: python scripts/check_docs_parity.py
+      - name: Generated CLI reference and documented script inventory
+        run: python scripts/gen_cli_reference.py --check --all
+      - name: Whitelisted doc examples (help/version/local probes)
+        run: python scripts/gen_cli_reference.py --examples
+      - name: Markdown structure (project rule set)
+        # Rules that only reformat the existing 27-file reference corpus are
+        # disabled in .markdownlint.jsonc; the remaining rules still gate the
+        # documents this change touches and every future one.
+        run: >-
+          npx --yes markdownlint-cli@0.44.0 --config .markdownlint.jsonc
+          "README.md" "README.zh-CN.md" "CONTRIBUTING.md" "CONTRIBUTING.zh-CN.md"
+          "CHANGELOG.md" "SECURITY.md" "CLAIM-LEDGER.md" "docs/**/*.md"
+          "plugins/*/skills/*/SKILL.md" "plugins/*/skills/*/references/*.md"
+      - name: Vale (project vocabulary)
+        # The vocabulary is committed under .vale/styles; the packaged Vale
+        # binary is pinned so a new release cannot silently change the gate.
+        run: >-
+          npx --yes --package @vvago/vale@3.25.1 vale --config=.vale.ini
+          README.md README.zh-CN.md CONTRIBUTING.md CONTRIBUTING.zh-CN.md
+          CHANGELOG.md SECURITY.md CLAIM-LEDGER.md docs
+          "plugins/*/skills/*/SKILL.md" "plugins/*/skills/*/references/*.md"

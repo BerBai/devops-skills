@@ -28,14 +28,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 import live_support  # noqa: E402
-from live_support import require_live_ssh  # noqa: E402
+import pytest
 
 # ``lib`` is pinned to ssh-core's own package by tests/conftest.py, so the
 # probe-level exit code comes from the shipped table instead of a literal.
 from lib import exit_codes as _codes  # noqa: E402
+from live_support import require_live_ssh  # noqa: E402
 
 pytestmark = pytest.mark.live_ssh
 

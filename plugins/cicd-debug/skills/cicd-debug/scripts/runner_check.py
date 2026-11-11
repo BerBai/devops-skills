@@ -51,7 +51,9 @@ _LIB_SPEC.loader.exec_module(_LIB)
 emit = _LIB.emit
 json_result = _LIB.json_result
 
+from _version import add_version_flag, handle_version
 from lib_cicd import (  # type: ignore[import-not-found]
+    LOCAL_HOST,
     ApiUnexpectedError,
     AuthError,
     BadArgsError,
@@ -62,12 +64,10 @@ from lib_cicd import (  # type: ignore[import-not-found]
     ProviderUnavailable,
     QueuedRun,
     RunnerData,
-    resolve_provider,
-    LOCAL_HOST,
     preflight_provider,
+    resolve_provider,
     split_host_argv,
 )
-from _version import add_version_flag, handle_version
 
 DEFAULT_POOL_CAP = 5000
 DEFAULT_QUEUE_CAP = 200

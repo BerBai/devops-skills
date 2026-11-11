@@ -9,10 +9,10 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from .ssh_core.helpers import load_script  # noqa: E402
-from .ssh_core.compat import temp_dir, write_text  # noqa: E402
-
 import lib.transfer as transfer  # noqa: E402
+
+from .ssh_core.compat import temp_dir, write_text  # noqa: E402
+from .ssh_core.helpers import load_script  # noqa: E402
 
 deploy = load_script("deploy_pubkey")
 

@@ -293,7 +293,7 @@ def _state_path(alias: str, port: int, tunnel_type: str = "local") -> Path:
     return _state_dir() / f"{digest}.json"
 
 
-def _listener_port(entry: "_StateEntry") -> int:
+def _listener_port(entry: _StateEntry) -> int:
     return entry.remote_port if entry.tunnel_type == "remote" else entry.local_port
 
 

@@ -1,6 +1,6 @@
 ---
 name: ssh-core
-description: SSH transport primitives — command execution (key and password auth), interactive network-device sessions, cluster broadcast, port-forward tunnels (-L/-R/-D), SFTP/scp/tar file transfer, a reusable session daemon, and `~/.ssh/config` CRUD. Use whenever the task touches ssh/scp/rsync, a remote host alias, user@host, an IP (192.168.x.x, 10.0.x.x), 跳板机/jumphost/bastion, or a switch/router/firewall CLI. Skip for localhost-only operations.
+description: "SSH transport primitives — command execution (key and password auth), interactive network-device sessions, cluster broadcast, port-forward tunnels (-L/-R/-D), SFTP/scp/tar file transfer, a reusable session daemon, and `~/.ssh/config` CRUD. Use whenever the task touches ssh/scp/rsync, a remote host alias, user@host, an IP (192.168.x.x, 10.0.x.x), 跳板机/jumphost/bastion, or a switch/router/firewall CLI. Skip for localhost-only operations."
 disable-model-invocation: false
 ---
 
@@ -113,6 +113,7 @@ Hard requirements and what each buys you:
 ## When to use
 
 Trigger this skill when the user asks to:
+
 - Run a command on a remote host (`ssh prod-web-01 'systemctl status nginx'`)
 - Configure a network device (Huawei VRP, H3C Comware, Cisco IOS) — see
   `ssh_session.py` below; this needs an interactive session, not exec
@@ -124,6 +125,7 @@ Trigger this skill when the user asks to:
 - Manage `~/.ssh/config` entries (including rolling a change back)
 
 Skip when:
+
 - The work is purely local (no host alias, no user@, no IP)
 - The user wants a formal request → review → execute approval flow. No such
   companion skill is published; if that is required, say so explicitly rather
@@ -594,19 +596,15 @@ cannot be split after the fact.
 
 `references/troubleshooting.md` covers the common failures: `Permission denied (publickey)`, `Permission denied (keyboard-interactive,password)` (→ password auth), host-key drift, the four algorithm-negotiation messages an old device produces in turn (`no matching key exchange method` / `host key type` / `cipher` / `MAC`, → `-o`), a device that echoes its output and then disconnects (not an auth failure), `ProxyJump` chain broken, `IdentityFile` permissions, Windows path mangling, `deploy_pubkey` verification failures, transfer integrity mismatches, `sudo_required`, and `--follow` that never returns. Read it before guessing; `references/recipes.md` has copy-paste diagnostic commands for systemd, docker and Kubernetes.
 
-Exit codes are one table (`lib/exit_codes.py`): 0 ok, 1 internal, 2 argv, 3
-dependency, 4 not found (including a bare alias ssh could not resolve), 5
-exists, 6 config missing (a `--ssh-config` path that does not exist), 7 parse,
-8 permission, 9 verify failed, 124 timeout, 100 auth, 101 host key, 102 network,
-103 kex, 104 remote error, 105 password required, 106 no tty, 107 invalid
-option, 108 unsupported target, 109 confirmation required (`--delete` without
-`--yes`), 110 prompt timeout, 111 connection-reused only, 112 sudo required,
-113 sudo auth failed, 114 askpass unavailable (no writable scratch directory),
-115 user required (password auth with no determinable login user), 120-129
-tunnel, 140-142 deploy, 160-168 transfer (166 = the transport cannot honour the
-requested mode, 168 = the destination already exists and `--overwrite` was not
-given), 180 config wildcard (181 = ambiguous alias), 200-202 daemon,
-220-221 audit tooling.
+Exit codes and failure classes are one table (`scripts/lib/exit_codes.py`).
+The complete, generated list — every class, its code and its aliases, plus the
+full per-script option tables — is
+[`references/cli-reference.md`](references/cli-reference.md). The short version:
+0 ok, 1 internal, 2 argv, 3 dependency, 4 not found, 5 exists, 6 config missing,
+7 parse, 8 permission, 9 verify failed, 124 timeout, 100-115 exec/session,
+120-129 tunnel, 140-142 deploy, 160-168 transfer, 180-181 config, 200-202 daemon,
+220-221 audit. `255` is OpenSSH's own client-failure code and is passed through
+unchanged, not re-mapped.
 
 ## Development
 
@@ -622,7 +620,10 @@ python scripts/doctor.py --host <alias>     # + real login / transfer probes
 python scripts/ssh_execute.py --version     # every script answers this
 ```
 
-Every script is stdlib-only Python 3.8+ and imports nothing outside
-`scripts/lib/`. To change behaviour, edit the script and re-run
-`python scripts/doctor.py`; to prove the change against a host, use the
-`doctor.py --require ...` gate (exit 9 when a capability regressed).
+Every script runs on Python 3.8+ and imports only the standard library plus
+`scripts/lib/` (and, on the SFTP path, the optional `paramiko` extra). `paramiko`
+is installed with `pip install 'paramiko>=3.0,<4'`; the transfer scripts degrade
+to scp/tar/rsync without it, and say so in `data.transport`. To change
+behaviour, edit the script and re-run `python scripts/doctor.py`; to prove the
+change against a host, use the `doctor.py --require ...` gate (exit 9 when a
+capability regressed).

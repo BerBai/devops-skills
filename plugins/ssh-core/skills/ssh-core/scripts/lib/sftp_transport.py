@@ -372,7 +372,7 @@ class SftpSession:
         assert self.sftp is not None
         try:
             self.sftp.utime(remote_path, times)
-        except (OSError, IOError, NotImplementedError):
+        except (OSError, NotImplementedError):
             return False
         return True
 
@@ -827,7 +827,7 @@ def _apply_preserve(
     # --chmod already has its own explicit path for callers who care.
     try:
         session.chmod(remote, stat_mod.S_IMODE(info.st_mode))
-    except (OSError, IOError, NotImplementedError):
+    except (OSError, NotImplementedError):
         return True, (
             "ssh-core: --preserve: mtime preserved, but permission bits were "
             "refused by the remote server."

@@ -45,18 +45,21 @@ Nothing under `docs/` or `scripts/` is shipped to a user who installs a plugin: 
 
 ## Status
 
-V1 is complete under the accepted rollout criterion:
+The V1 CLI surface is implemented and every plugin is versioned `1.0.0`. The
+`v0.2.0` (2026-05-21) is the first public **scaffold**; `v1.0.0` tags this
+release.
+The version-source rule is recorded in [`CHANGELOG.md`](./CHANGELOG.md).
 
 - All eight plugins have shipped their V1 CLI surfaces.
 - Every public script accepts `--help`; every operational script supports the JSON output contract.
 - Shipped scripts have unit coverage, and environment-dependent integration tests are skip-safe.
-- `ssh-core` tracks the standalone tree at **1.5.0** (ADR-004, ADR-005). It is the marketplace's remote-connection sub-function: transport, auth, sessions, tunnels, transfers, `~/.ssh/config` CRUD, plus `selfcheck.py` / `doctor.py` capability probes. Other plugins shell out through `ssh_execute.py` and never import it (ADR-005).
+- `ssh-core` **1.0.0** contains the standalone **1.5.0** feature set ([ADR-004](./docs/adr/ADR-004-ssh-core-1.5.0-sync.md), [ADR-005](./docs/adr/ADR-005-ssh-core-boundary.md)). It is the marketplace's remote-connection sub-function: transport, auth, sessions, tunnels, transfers, `~/.ssh/config` CRUD, plus `selfcheck.py` / `doctor.py` capability probes. Other plugins shell out through `ssh_execute.py` and never import it (ADR-005).
 
 Plugin surface inventory:
 
 | Plugin | Shipped |
 |---|---|
-| `ssh-core` | `ssh_execute`, `ssh_session`, `ssh_slice`, `ssh_cluster`, `ssh_tunnel`, `ssh_server_transfer`, `ssh_config_manager`, `ssh_upload`, `ssh_download`, `deploy_pubkey`, `ssh_daemon`, `selfcheck`, `doctor`, and `audit` at 1.5.0, plus the `run.cmd` / `run.sh` launchers. |
+| `ssh-core` | `ssh_execute`, `ssh_session`, `ssh_slice`, `ssh_cluster`, `ssh_tunnel`, `ssh_server_transfer`, `ssh_config_manager`, `ssh_upload`, `ssh_download`, `deploy_pubkey`, `ssh_daemon`, `selfcheck`, `doctor`, and `audit` at 1.0.0 (standalone feature set 1.5.0), plus the `run.cmd` / `run.sh` launchers. |
 | `ssh-guarded` | request drafters, `run_request`, `exec_detached`, `scan_software`, `redact_check`, and `gc_artifacts`. |
 | `remote-debug` | `diagnose_host`, `tail_log`, `port_check`, and `compare_across_hosts` — all honour `local`; `diagnose_host` has a Windows probe family (`--target-os`), `tail_log` streams (`--follow`), `port_check` probes UDP (`--udp`). |
 | `k8s-debug` | `check_namespace`, `diagnose_pod`, `cluster_health`, and `helm_status` (pending releases list their stuck pods). |
@@ -69,7 +72,7 @@ Plugin surface inventory:
 
 Prioritize foundational transport work before plugin-specific enhancements:
 
-1. `ssh-core`: keep the plugin tree byte-identical to the standalone release (currently 1.5.0) and re-run the plugin suite after every sync.
+1. `ssh-core`: keep the plugin tree byte-identical to the standalone release (feature set currently 1.5.0; distribution version 1.0.0) and re-run the plugin suite after every sync.
 2. `ssh_server_transfer.py`: validate named-OpenSSH/tar/rsync modes across additional host families.
 3. `ssh_tunnel.py`: Windows support, revisited after the connection-reuse decision (`--idle-timeout` shipped in 1.4.0).
 4. Redaction hardening: default catalog export and optional regex timeout protection.
@@ -85,12 +88,10 @@ uv sync --all-extras
 
 This creates `.venv/` with `pytest`, `ruff`, and `mypy` installed — the tools the test and lint sections below assume are on `PATH`.
 
-> **`uv.lock` is stale.** It still records the pre-1.0 metadata (`>=3.10`, no
-> extras) from before the tree moved to the 3.8 floor and split its runtime
-> dependencies into extras. Rebuilding it needs network access and a `uv` that
-> resolves all four matrix legs, so it is regenerated deliberately rather than
-> hand-edited: run `uv lock && uv sync --all-extras` and commit the result
-> together with `pyproject.toml`.
+`uv.lock` is generated, not hand-edited. It is regenerated with
+`uv lock && uv sync --all-extras` and committed together with
+`pyproject.toml`; the checked-in lock resolves the `>=3.8` floor and the
+optional `sftp` / `yaml` / `hcl` / `dev` extras.
 
 ## Testing
 
@@ -98,11 +99,21 @@ This creates `.venv/` with `pytest`, `ruff`, and `mypy` installed — the tools 
 pytest tests/
 ```
 
-CI runs three jobs on Linux (`.github/workflows/ci.yml`), covering four checks:
+CI runs four jobs on Linux (`.github/workflows/ci.yml`). The three code jobs
+cover four checks:
+
 1. JSON-lint every `marketplace.json` and `plugin.json`.
 2. Lint every `SKILL.md` for `## When to use` plus a flow section (`## Workflow` or `## Decision tree`) — enforced by `tests/test_manifests.py`.
 3. Smoke-test each public script with `--help` (private `_*.py` helpers are exempt).
 4. Assert the vendored helpers match their templates — enforced by `tests/test_manifests.py::test_vendored_locator_matches_template` and `::test_vendored_version_helper_matches_template`.
+
+The `docs` job adds six more gates: relative links and heading anchors
+(`scripts/check_docs_links.py --require-index`), EN/zh-CN structure parity
+(`scripts/check_docs_parity.py`), the generated ssh-core CLI reference plus the
+documented-script inventory for all eight plugins
+(`scripts/gen_cli_reference.py --check --all`), the whitelisted help/version/
+local examples (`--examples`), `markdownlint-cli` under
+`.markdownlint.jsonc`, and `vale` with the committed `.vale.ini` vocabulary.
 
 ## Vendored files
 

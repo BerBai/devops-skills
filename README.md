@@ -44,7 +44,7 @@ Install any subset. `ssh-core` is the only hard dependency for the others (used 
 - **`subprocess.run(list, ...)`, never shell strings.** No exceptions.
 - **JSON output contract.** Every script supports `--json` and emits `{success, exit_code, stdout, stderr, data}`. Chains compose without natural-language parsing. `success` means the action completed, never merely "the request was dispatched".
 - **`--version` everywhere.** Every public script answers `--version` / `-V` with `<script> (<plugin> <x.y.z>)`, sourced from the plugin's `plugin.json`, so "which build is installed" is one flag away.
-- **One `partial_fetch` rule.** Any source or host that could not be read makes the run fail (`success: false` + a non-zero exit code) while the data that *was* collected is still returned under `data` — never a silent empty result.
+- **One partial-fetch rule.** A source that could not be read makes the run fail (`success: false` + a non-zero exit code) while the data that *was* collected is still returned under `data` — never a silent empty result. A host deliberately skipped by a platform check or `--health-check` is not a failure: it is listed in `data.skipped_hosts` and the run stays `success: true`.
 
 ## Where ssh-core lives
 
@@ -57,9 +57,26 @@ Diagnostic plugins do not guess: each one ships its own `scripts/_ssh_core_locat
 
 Set the first variable when you install the plugins into unrelated directories, and the error message tells you exactly what was looked for.
 
+## Documentation
+
+- [`docs/README.md`](./docs/README.md) — index and the commands CI actually runs
+- [`docs/architecture.md`](./docs/architecture.md) — layer map, failure classes, state locations
+- [`docs/offline-install.md`](./docs/offline-install.md) — air-gapped bundle and installer
+- [`CHANGELOG.md`](./CHANGELOG.md) — release history and the version-source rule
+- [`CLAIM-LEDGER.md`](./CLAIM-LEDGER.md) — every load-bearing claim with its evidence
+- [`SECURITY.md`](./SECURITY.md) — supported versions, reporting, credential model
+
 ## Status
 
-`v1.0` shipped all 8 plugin surfaces. `ssh-core` now tracks the standalone tree at `1.5.0` (ADR-004, ADR-005), adding `doctor.py` capability probes, `ssh_slice.py` windowed log reads, the `run.cmd`/`run.sh` launchers, `--output-file`, `--script-file`, `--allow-exit`, and the `user_required` failure class. Other plugins still communicate with it only through CLI + JSON.
+All eight plugin surfaces are implemented and versioned `1.0.0`. `ssh-core`
+`1.0.0` contains the standalone 1.5.0 feature set
+([ADR-004](./docs/adr/ADR-004-ssh-core-1.5.0-sync.md),
+[ADR-005](./docs/adr/ADR-005-ssh-core-boundary.md)): `doctor.py` capability
+probes, `ssh_slice.py` windowed log reads, the `run.cmd`/`run.sh` launchers,
+`--output-file`, `--script-file`, `--allow-exit`, and the `user_required`
+failure class. Other plugins still communicate with it only through CLI + JSON.
+Tags: `v0.2.0` (2026-05-21) is the first public **scaffold**; `v1.0.0` tags
+this release. See [`CHANGELOG.md`](./CHANGELOG.md) for the version-source rule.
 
 See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the V1.1 roadmap.
 

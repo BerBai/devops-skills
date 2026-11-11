@@ -174,7 +174,7 @@ class FollowStreamsOutput(unittest.TestCase):
     def test_tail_is_translated_into_a_remote_tail(self) -> None:
         args = _args(tail=25)
         argv = self.module._build_remote_argv(
-            "h", f"journalctl -fu nginx | tail -n 25 -f", 8, None,
+            "h", "journalctl -fu nginx | tail -n 25 -f", 8, None,
         )
         self.assertIn("journalctl -fu nginx | tail -n 25 -f", argv)
 

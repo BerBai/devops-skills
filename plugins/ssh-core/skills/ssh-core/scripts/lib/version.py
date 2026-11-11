@@ -6,6 +6,15 @@ Bump this one constant with ``python tools/bump-version.py X.Y.Z`` and the
 packaging metadata plus the CLI surface stay in lockstep — the test suite fails
 if any other file drifts.
 
+Distribution identity
+---------------------
+This checkout is the devops-skills marketplace release, and the marketplace
+versions all eight plugins with the same release number. ``__version__`` is
+therefore ``1.0.0`` even though the standalone ssh-core tree had already
+reached 1.5.0 before that alignment. The 1.0.0-1.5.0 entries below are the
+standalone feature history, not marketplace releases; the current distribution
+is the 1.0.0 row in ``CHANGELOG.md``.
+
 History
 -------
 0.2.0   scaffolding (stubs, no pty, no tests)
@@ -47,7 +56,7 @@ History
 
 from __future__ import annotations
 
-__version__ = "1.5.0"
+__version__ = "1.0.0"
 
 #: Human-readable one-liner used by ``--version`` and the README badge.
 VERSION_LINE = f"ssh-core {__version__}"

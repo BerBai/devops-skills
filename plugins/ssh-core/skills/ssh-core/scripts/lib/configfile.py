@@ -59,7 +59,7 @@ class ConfigLock:
         self.timeout = timeout
         self._fh = None
 
-    def __enter__(self) -> "ConfigLock":
+    def __enter__(self) -> ConfigLock:
         self.acquire()
         return self
 

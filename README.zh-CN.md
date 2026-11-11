@@ -44,7 +44,7 @@
 - **`subprocess.run(list, ...)`，永不传 shell 字符串**。无例外。
 - **JSON 输出契约**。每个脚本支持 `--json` 并输出 `{success, exit_code, stdout, stderr, data}`，能链式组合无需自然语言解析。`success` 表示动作已完成，而非"请求已派发"。
 - **每个脚本都有 `--version`**。所有公开脚本都支持 `--version` / `-V`，输出来自该插件 `plugin.json` 的 `<script> (<plugin> <x.y.z>)`，"装的是哪一版"一条命令即可确认。
-- **统一的 `partial_fetch` 语义**。任何一个源/主机读不到，整次调用即判失败（`success: false` + 非 0 退出码），但已取到的数据仍放在 `data` 里返回 —— 绝不伪装成空结果的"成功"。
+- **统一的 partial-fetch 语义**。任何一个源读不到，整次调用即判失败（`success: false` + 非 0 退出码），但已取到的数据仍放在 `data` 里返回 —— 绝不伪装成空结果的"成功"。被平台检查或 `--health-check` 主动跳过的主机不算失败：它列在 `data.skipped_hosts`，整次调用仍是 `success: true`。
 
 ## ssh-core 在哪里
 
@@ -57,9 +57,24 @@
 
 把插件装到互不相邻的目录时，设置第一个变量即可；报错信息会告诉你它找过哪些路径。
 
+## 文档
+
+- [`docs/README.md`](./docs/README.md) —— 索引，以及 CI 实际会跑的本地命令
+- [`docs/architecture.md`](./docs/architecture.md) —— 分层图、失败类、状态文件位置
+- [`docs/offline-install.md`](./docs/offline-install.md) —— 离线包与安装器
+- [`CHANGELOG.md`](./CHANGELOG.md) —— 发布历史与版本真源规则
+- [`CLAIM-LEDGER.md`](./CLAIM-LEDGER.md) —— 每条承重断言及其证据
+- [`SECURITY.md`](./SECURITY.md) —— 支持版本、报告方式、凭据模型
+
 ## 状态
 
-`v1.0` 已发布 8 个 plugin surface。`ssh-core` 现在跟踪独立版 `1.5.0`（ADR-004、ADR-005），新增 `doctor.py` 能力探针、`ssh_slice.py` 窗口读日志、`run.cmd`/`run.sh` 启动器、`--output-file`、`--script-file`、`--allow-exit` 与 `user_required` 失败类。其他 plugin 仍只通过 CLI + JSON 与它交互。
+8 个 plugin surface 均已实现，版本统一为 `1.0.0`。`ssh-core` `1.0.0`
+包含独立版 1.5.0 功能集（[ADR-004](./docs/adr/ADR-004-ssh-core-1.5.0-sync.md)、
+[ADR-005](./docs/adr/ADR-005-ssh-core-boundary.md)）：`doctor.py` 能力探针、
+`ssh_slice.py` 窗口读日志、`run.cmd`/`run.sh` 启动器、`--output-file`、
+`--script-file`、`--allow-exit` 与 `user_required` 失败类。其他 plugin 仍只通过
+CLI + JSON 与它交互。Tags：`v0.2.0`（2026-05-21）是首个公开 **scaffold** 版本；`v1.0.0` 打在
+本次发布上。版本真源规则见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
 路线图见 [`CONTRIBUTING.zh-CN.md`](./CONTRIBUTING.zh-CN.md)。
 

@@ -1,11 +1,23 @@
 {
   "name": "iac-state",
-  "version": "0.2.0",
-  "description": "Terraform / OpenTofu state diagnostic playbook. Use when the user reports IaC issues — locked state, state drift, missing resources, plan diverges from reality, module validation failures, or unexpected destroy operations. Read-only: inspects state, detects drift, validates modules. Does NOT run plan/apply/destroy/import — those writes go through ssh-guarded or human-driven workflows.",
+  "version": "1.0.0",
+  "description": "Terraform / OpenTofu state diagnostic playbook. Use when the user reports IaC issues \u2014 locked state, state drift, missing resources, plan diverges from reality, module validation failures, or unexpected destroy operations. Read-only: inspects state, detects drift, validates modules. Does NOT run plan/apply/destroy/import \u2014 those writes go through ssh-guarded or human-driven workflows.",
   "author": {
     "name": "devops-skills contributors"
   },
   "license": "MIT",
   "homepage": "https://github.com/BerBai/devops-skills",
-  "keywords": ["terraform", "opentofu", "tofu", "iac", "state", "drift", "plan", "module", "lock", "基础设施", "漂移"]
+  "keywords": [
+    "terraform",
+    "opentofu",
+    "tofu",
+    "iac",
+    "state",
+    "drift",
+    "plan",
+    "module",
+    "lock",
+    "\u57fa\u7840\u8bbe\u65bd",
+    "\u6f02\u79fb"
+  ]
 }

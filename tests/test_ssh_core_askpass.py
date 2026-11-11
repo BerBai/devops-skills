@@ -11,7 +11,6 @@ with CRLF for cmd.exe, `.sh` with an LF shebang everywhere else).
 """
 
 from __future__ import annotations
-from .ssh_core.compat import temp_dir  # noqa: E402
 
 import os
 import stat
@@ -20,6 +19,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from .ssh_core.compat import temp_dir  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 

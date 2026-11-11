@@ -10,7 +10,7 @@ marketplace could not answer it.
 handles every script:
 
     $ diagnose_host.py --version
-    diagnose_host.py (remote-debug 0.2.0)
+    diagnose_host.py (remote-debug 1.0.0)
     $ diagnose_host.py --version --json
     {"success": true, "exit_code": 0, "stdout": "...", "stderr": "",
      "data": {"prog": "...", "version": "0.2.0", "plugin": "remote-debug"}}

@@ -11,8 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from .ssh_core.helpers import SCRIPTS, load_script  # noqa: E402
 from .ssh_core.compat import temp_dir  # noqa: E402
+from .ssh_core.helpers import SCRIPTS, load_script  # noqa: E402
 
 cfgmgr = load_script("ssh_config_manager")
 

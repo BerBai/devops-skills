@@ -21,9 +21,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from .ssh_core.helpers import SCRIPTS  # noqa: E402
-from .ssh_core.compat import temp_dir  # noqa: E402
-
 from lib.configfile import (  # noqa: E402
     LOCK_TIMEOUT_S,
     ConfigLock,
@@ -35,6 +32,9 @@ from lib.configfile import (  # noqa: E402
     next_backup_path,
     restore_backup,
 )
+
+from .ssh_core.compat import temp_dir  # noqa: E402
+from .ssh_core.helpers import SCRIPTS  # noqa: E402
 
 sys.path.insert(0, str(SCRIPTS))
 from lib.ssh_config import AdoptOutcome, adopt_key_auth, chmod_private  # noqa: E402

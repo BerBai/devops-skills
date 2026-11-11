@@ -1,11 +1,22 @@
 {
   "name": "ssh-guarded",
-  "version": "0.2.0",
-  "description": "Safety-first SSH operations on top of ssh-core. Use when working on production servers, customer environments, or any context where every write must be auditable. Implements request→review→execute two-phase writes, redacted output by default, workdir-sandboxed file operations, and detached long-running jobs. Skip for quick scratch work on personal machines.",
+  "version": "1.0.0",
+  "description": "Safety-first SSH operations on top of ssh-core. Use when working on production servers, customer environments, or any context where every write must be auditable. Implements request\u2192review\u2192execute two-phase writes, redacted output by default, workdir-sandboxed file operations, and detached long-running jobs. Skip for quick scratch work on personal machines.",
   "author": {
     "name": "devops-skills contributors"
   },
   "license": "MIT",
   "homepage": "https://github.com/BerBai/devops-skills",
-  "keywords": ["ssh", "audit", "safety", "production", "compliance", "redact", "sandbox", "request-execute", "审计", "生产环境"]
+  "keywords": [
+    "ssh",
+    "audit",
+    "safety",
+    "production",
+    "compliance",
+    "redact",
+    "sandbox",
+    "request-execute",
+    "\u5ba1\u8ba1",
+    "\u751f\u4ea7\u73af\u5883"
+  ]
 }

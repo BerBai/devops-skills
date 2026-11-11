@@ -35,15 +35,14 @@ import tempfile
 import time
 from pathlib import Path
 
-import pytest
-
 import live_support  # noqa: E402
-from live_support import require_live_ssh  # noqa: E402
+import pytest
 
 # Read from the shipped table instead of copying a number: 1.4.0 renumbered the
 # tunnel block from 36-39 to 126-129, which silently invalidated the literal.
 # ``lib`` is pinned to ssh-core's own package by tests/conftest.py.
 from lib import exit_codes as _codes  # noqa: E402
+from live_support import require_live_ssh  # noqa: E402
 
 pytestmark = [pytest.mark.live_ssh, pytest.mark.needs_posix]
 

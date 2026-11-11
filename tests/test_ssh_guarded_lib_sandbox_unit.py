@@ -103,10 +103,9 @@ def test_resolve_project_id_hard_fail_when_all_missing(tmp_path: Path) -> None:
     def fake_check_output(argv: list[str], **kw: Any) -> str:
         raise subprocess.CalledProcessError(returncode=128, cmd=argv)
 
-    with (
-        patch.object(subprocess, "check_output", side_effect=fake_check_output),
-        pytest.raises(ArtifactError) as exc_info,
-    ):
+    with patch.object(
+        subprocess, "check_output", side_effect=fake_check_output
+    ), pytest.raises(ArtifactError) as exc_info:
         sandbox.resolve_project_id(_ns(), env={}, cwd=tmp_path)
     assert exc_info.value.failure_class == "project_id_unresolved"
     assert exc_info.value.exit_code == 1

@@ -1,6 +1,6 @@
 ---
 name: remote-debug
-description: Cross-device debugging playbook. Use when the user reports a problem on a remote machine — slow service, high load, disk full, port unreachable, mystery OOM, log noise — and you need to figure out what's wrong. Provides symptom→root-cause decision trees, Linux/network diagnostics, incident response workflow, and runbook templates.
+description: "Cross-device debugging playbook. Use when the user reports a problem on a remote machine — slow service, high load, disk full, port unreachable, mystery OOM, log noise — and you need to figure out what's wrong. Provides symptom→root-cause decision trees, Linux/network diagnostics, incident response workflow, and runbook templates."
 ---
 
 # remote-debug
