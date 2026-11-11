@@ -537,6 +537,20 @@ class DoctorFullProfileEndToEnd(unittest.TestCase):
             )
         return proc.returncode, payload, stderr
 
+    def _unready_plugin(self) -> str:
+        """Pick a plugin this machine really cannot run, or skip.
+
+        The end-to-end test must not assume ``kubectl`` is absent: CI images
+        and developer boxes differ. The contract under test is "a plugin that
+        is not ready makes --require exit 9", not "this box lacks k8s".
+        """
+        _code, payload, _err = self._run("--profile", "full")
+        rows = payload["data"]["plugin_readiness"].get("local", [])
+        for row in rows:
+            if not row.get("ready"):
+                return str(row["plugin"])
+        self.skipTest("all eight plugin backends are ready on this host")
+
     def test_full_profile_reports_capabilities(self) -> None:
         code, payload, _err = self._run("--profile", "full")
         self.assertIn(code, (0, 9))
@@ -580,16 +594,18 @@ class DoctorFullProfileEndToEnd(unittest.TestCase):
         self.assertEqual(payload["data"]["missing_requirements"], [])
 
     def test_require_a_degraded_plugin_exits_9(self) -> None:
-        args = ["--profile", "full", "--require", "k8s-debug"]
-        code, payload, _err = self._run(*args)
+        plugin = self._unready_plugin()
+        code, payload, _err = self._run("--profile", "full", "--require", plugin)
         self.assertEqual(code, 9)
-        self.assertIn("k8s-debug", payload["data"]["missing_requirements"])
+        self.assertIn(plugin, payload["data"]["missing_requirements"])
 
     def test_require_a_plugin_prefix_matches_the_family(self) -> None:
         """``--require k8s`` gates on ``k8s-debug``, like ``--require exec``."""
-        code, payload, _err = self._run("--profile", "full", "--require", "k8s")
+        plugin = self._unready_plugin()
+        prefix = plugin.split("-", 1)[0]
+        code, payload, _err = self._run("--profile", "full", "--require", prefix)
         self.assertEqual(code, 9)
-        self.assertIn("k8s", payload["data"]["missing_requirements"])
+        self.assertIn(prefix, payload["data"]["missing_requirements"])
 
     def test_require_an_unknown_name_is_refused(self) -> None:
         code, payload, _err = self._run("--profile", "full", "--require", "nope")

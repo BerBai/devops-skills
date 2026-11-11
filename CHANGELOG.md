@@ -109,6 +109,11 @@ version. The `v1.0.0` tag is cut from this release commit.
   behaviour" rule and the `docs/` + `scripts/` tree lines; restored.
 - `ssh-guarded/references/workdir-sandbox.md` contained a literal NUL byte in a
   table example; it is now the escaped text `\0`, so the file is plain UTF-8.
+- CI portability: the test job runs on `ubuntu-22.04` (3.8 is absent from the
+  ubuntu-26.04 image), ruff is pinned to `0.15.13` so the ratchet baseline is
+  deterministic, the Vale step lets the shell expand its globs, and the
+  `doctor --profile full` end-to-end tests now pick a genuinely unready plugin
+  instead of assuming `k8s-debug` is degraded on every machine.
 
 ### Removed
 

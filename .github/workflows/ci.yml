@@ -11,7 +11,9 @@ on:
 # the unit suite. `live_*` tests need a real host and stay opt-in.
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # 3.8 is not available on the ubuntu-26.04 image that ubuntu-latest now
+    # resolves to; 22.04 still ships the 3.8 toolcache entry.
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
@@ -68,7 +70,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ruff
+      - run: pip install ruff==0.15.13
       - name: ruff ratchet (380-finding baseline; must not increase)
         # A raw `ruff check .` is still red (the backlog is tracked in
         # tools/ruff-baseline.json). The ratchet fails on any increase and
@@ -122,4 +124,4 @@ jobs:
           npx --yes --package @vvago/vale@3.25.1 vale --config=.vale.ini
           README.md README.zh-CN.md CONTRIBUTING.md CONTRIBUTING.zh-CN.md
           CHANGELOG.md SECURITY.md CLAIM-LEDGER.md docs
-          "plugins/*/skills/*/SKILL.md" "plugins/*/skills/*/references/*.md"
+          plugins/*/skills/*/SKILL.md plugins/*/skills/*/references/*.md
