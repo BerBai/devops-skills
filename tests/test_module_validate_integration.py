@@ -70,5 +70,10 @@ def test_module_validate_broken_module_json(tmp_path: Path) -> None:
         check=False,
     )
     env = json.loads(proc.stdout)
+    if (
+        proc.returncode == 3  # noqa: PLR2004 - dependency_missing code
+        and env.get("data", {}).get("failure_class") == "dependency_missing"
+    ):
+        pytest.skip("python-hcl2 is not installed on this interpreter (supported on 3.8)")
     assert proc.returncode in {0, 143}
     assert env["success"] in {True, False}

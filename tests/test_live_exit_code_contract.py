@@ -250,7 +250,8 @@ def test_asserted_exit_code_literals_are_registered() -> None:
     registered = _registered_codes()
     offenders: list[str] = []
     for path in _live_module_paths():
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Compare):
                 continue
@@ -258,7 +259,8 @@ def test_asserted_exit_code_literals_are_registered() -> None:
             if isinstance(left, ast.Name):
                 label = left.id
             elif isinstance(left, ast.Subscript):
-                label = ast.unparse(left)
+                # ast.unparse() is 3.9+; the marketplace floor is 3.8.
+                label = ast.get_source_segment(source, left) or ""
             else:
                 continue
             if label in ALLOWED_LITERAL_NAMES:
