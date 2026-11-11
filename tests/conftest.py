@@ -70,8 +70,17 @@ def pytest_collection_modifyitems(config, items):
     live_reason = None
     live_checked = False
 
+    marker_expr = getattr(config.option, "markexpr", "") or ""
     for item in items:
         keywords = item.keywords
+        if "live_k8s" in keywords and "live_k8s" not in marker_expr:
+            item.add_marker(
+                pytest.mark.skip(
+                    reason="live_k8s tests need a kind cluster; run with "
+                    "`pytest -m live_k8s`"
+                )
+            )
+            continue
         if "live_ssh" in keywords:
             if not live_checked:
                 live_reason = live_support.live_skip_reason()

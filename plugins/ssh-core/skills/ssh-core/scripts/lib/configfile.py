@@ -198,7 +198,11 @@ def list_backups(path: Path) -> list[Path]:
     candidates = [
         p for p in path.parent.glob(f"{path.name}{_BACKUP_SUFFIX}.*") if p.name.startswith(prefix)
     ]
-    return sorted(candidates, key=lambda p: p.stat().st_mtime if p.exists() else 0)
+    # The filename carries ``<epoch-ms>-<pid>-<counter>``. mtime is not a
+    # reliable order: copy2 preserves the *source* mtime, so three backups of
+    # the same read-then-write cycle can share it and sorted() would fall back
+    # to the filesystem's arbitrary glob order.
+    return sorted(candidates, key=lambda p: p.name)
 
 
 def latest_backup(path: Path) -> Path | None:

@@ -114,6 +114,12 @@ version. The `v1.0.0` tag is cut from this release commit.
   deterministic, the Vale step lets the shell expand its globs, and the
   `doctor --profile full` end-to-end tests now pick a genuinely unready plugin
   instead of assuming `k8s-debug` is degraded on every machine.
+- `list_backups()` sorts by the backup filename (`epoch-ms-pid-counter`), not
+  mtime: `copy2` preserves the source mtime, so equal-mtime backups had an
+  arbitrary glob order and `restore latest` could restore the wrong generation.
+- `live_k8s` tests are skipped unless selected with `pytest -m live_k8s`; they
+  no longer try to provision a kind cluster on a runner that merely has
+  docker/kind installed.
 
 ### Removed
 
