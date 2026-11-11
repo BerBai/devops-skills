@@ -14,6 +14,7 @@ install walkthroughs) lives here so it cannot be mistaken for skill content.
 | [`offline-install.md`](offline-install.md) | Air-gapped install with `scripts/build_offline_bundle.sh` + `scripts/install_offline_linux.sh` |
 | [`architecture.md`](architecture.md) | How the eight plugins compose, the ssh-core boundary, "success", and runtime state |
 | [`prd/v1.0.0-post-release-hardening.md`](prd/v1.0.0-post-release-hardening.md) | Post-1.0.0 hardening PRD: lint baseline, four red tests, ADR recovery, Vale scope |
+| [`prd/v1.0.0-external-verification.md`](prd/v1.0.0-external-verification.md) | External-environment verification matrix: SSH, Docker, K8s, IaC, CI, Windows, password auth, offline install |
 
 ADRs: [`ADR-001`](adr/ADR-001-ssh-execute.md), [`ADR-002`](adr/ADR-002-ssh-config-manager.md), [`ADR-003`](adr/ADR-003-sftp-transport.md), [`ADR-004`](adr/ADR-004-ssh-core-1.5.0-sync.md), [`ADR-005`](adr/ADR-005-ssh-core-boundary.md), [`ADR-006`](adr/ADR-006-python-38-floor.md).
 
@@ -47,7 +48,7 @@ documentation gate:
 | `test` | `pytest tests/ -q` | green: `2009 passed, 151 skipped` (macOS 15 / Python 3.11) |
 | `lint` | `python tools/check_ruff_baseline.py` | green: `380/380` findings; raw `ruff check .` still reports 380 |
 | `floor` | `python tools/check_python_floor.py` | green: `scanned 216 files; 0 problem(s)` |
-| `docs` | `python scripts/check_docs_links.py --require-index && python scripts/check_docs_parity.py && python scripts/gen_cli_reference.py --check --all && python scripts/gen_cli_reference.py --examples` + markdownlint + Vale | green: three `OK` lines, `26 run, 462 skipped`, 0 markdownlint, 0 Vale |
+| `docs` | `python scripts/check_docs_links.py --require-index && python scripts/check_docs_parity.py && python scripts/gen_cli_reference.py --check --all && python scripts/gen_cli_reference.py --examples` + markdownlint + Vale | green: three `OK` lines, `27 run, 482 skipped`, 0 markdownlint, 0 Vale |
 
 The `docs` job also runs `markdownlint-cli --config .markdownlint.jsonc` and
 `vale --config .vale.ini` (pinned `@vvago/vale@3.25.1`) over the same file set. The four former test failures are now deterministic

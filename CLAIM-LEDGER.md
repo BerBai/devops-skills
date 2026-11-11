@@ -38,12 +38,18 @@ text that was deleted.
 | 7 | `docs/offline-install.md` | How-to | air-gapped bundle/install | only via CONTRIBUTING |
 | 8-15 | 8 × `plugins/*/skills/*/SKILL.md` | How-to + reference | skill entry points | yes (marketplace/index) |
 | 16-42 | 27 × `plugins/*/skills/*/references/*.md` | Reference + explanation | progressive disclosure | partially (relative links from SKILL) |
-| 43 | `docs/adr/ADR-004-ssh-core-1.5.0-sync.md` | Explanation / decision | new in this change | yes (README + docs/README) |
-| 44 | `docs/adr/ADR-005-ssh-core-boundary.md` | Explanation / decision | new in this change | yes (README + docs/README) |
-| 45 | `plugins/ssh-core/skills/ssh-core/references/cli-reference.md` | Reference | generated CLI/exit/failure tables | yes (SKILL.md) |
-| 46 | `CHANGELOG.md` | Reference | release history + version-source rule | yes (README) |
-| 47 | `SECURITY.md` | Reference | supported versions, reporting, credential model | yes (README) |
-| 48 | `CLAIM-LEDGER.md` | Evidence | this file | yes (README) |
+| 43 | `docs/adr/ADR-001-ssh-execute.md` | Explanation / decision | recovered from the deleted Trellis blob | yes (docs/README) |
+| 44 | `docs/adr/ADR-002-ssh-config-manager.md` | Explanation / decision | recovered from the deleted Trellis blob | yes (docs/README) |
+| 45 | `docs/adr/ADR-003-sftp-transport.md` | Explanation / decision | recovered from the deleted Trellis blob | yes (docs/README) |
+| 46 | `docs/adr/ADR-004-ssh-core-1.5.0-sync.md` | Explanation / decision | reconstructed 1.5.0 sync record | yes (docs/README) |
+| 47 | `docs/adr/ADR-005-ssh-core-boundary.md` | Explanation / decision | reconstructed boundary record | yes (docs/README) |
+| 48 | `docs/adr/ADR-006-python-38-floor.md` | Explanation / decision | reconstructed Python floor record | yes (docs/README) |
+| 49 | `plugins/ssh-core/skills/ssh-core/references/cli-reference.md` | Reference | generated CLI/exit/failure tables | yes (SKILL.md) |
+| 50 | `CHANGELOG.md` | Reference | release history + version-source rule | yes (README) |
+| 51 | `SECURITY.md` | Reference | supported versions, reporting, credential model | yes (README) |
+| 52 | `CLAIM-LEDGER.md` | Evidence | this file | yes (README) |
+| 53 | `docs/prd/v1.0.0-post-release-hardening.md` | Planning | post-1.0.0 hardening PRD | yes (docs/README) |
+| 54 | `docs/prd/v1.0.0-external-verification.md` | Planning | external-environment verification matrix | yes (docs/README) |
 
 The 27 references are the original 27; `cli-reference.md` is the 28th and is
 generated. `workdir-sandbox.md` was not plain text at the start of this pass: it
@@ -253,7 +259,7 @@ new `docs/**/*.md` page is orphaned.
 | C116 | `pyproject.toml:8`; `ci.yml:18` | ADR-006 (Python floor) exists | file | `docs/adr/ADR-006-python-38-floor.md` (reconstructed from `pyproject.toml`, CI matrix, `tools/check_python_floor.py`) | verified |
 | C117 | `docs/README.md:48` | The lint gate is a ratchet, not a raw `ruff check .` | code + transcript | `tools/check_ruff_baseline.py`; baseline 380; §E.3 | verified |
 | C118 | `docs/README.md:18` | ADR-001/002/003 were recovered verbatim from `1a6eade^` and ADR-006 was reconstructed | git + file | `git show 1a6eade^:.trellis/spec/backend/adr-00{1,2,3}-*.md`; `docs/adr/ADR-006-python-38-floor.md` | verified |
-| C119 | `docs/README.md:52-53` | Vale is 0 on all 53 markdown files | code + transcript | `.vale.ini`; `.vale/styles/config/vocabularies/devops/accept.txt`; §E.4 | verified |
+| C119 | `docs/README.md:52-53` | Vale is 0 on all 54 markdown files | code + transcript | `.vale.ini`; `.vale/styles/config/vocabularies/devops/accept.txt`; §E.4 | verified |
 
 ---
 
@@ -380,7 +386,7 @@ $ .venv/bin/python -m pytest tests/test_manifests.py -q -o addopts=''
 
 ```text
 $ python scripts/check_docs_links.py --require-index
-checked 53 files, 67 relative links
+checked 54 files, 68 relative links
 external links: 8 unique (checked: False)
 links: OK (0 broken, 0 bad anchors, 0 orphans)
 
@@ -394,7 +400,7 @@ ssh-core CLI reference: OK (45621 bytes)
 CLI inventory: OK (8 plugins, ssh-core reference current)
 
 $ python scripts/gen_cli_reference.py --examples
-examples: 26 run (all exit 0), 462 skipped with a reason
+examples: 27 run (all exit 0), 482 skipped with a reason
 
 $ npx --yes markdownlint-cli@0.44.0 --config .markdownlint.jsonc \
     "README.md" "README.zh-CN.md" "CONTRIBUTING.md" "CONTRIBUTING.zh-CN.md" \
@@ -406,13 +412,13 @@ $ npx --yes --package @vvago/vale@3.25.1 vale --config=.vale.ini \
     README.md README.zh-CN.md CONTRIBUTING.md CONTRIBUTING.zh-CN.md \
     CHANGELOG.md SECURITY.md CLAIM-LEDGER.md docs \
     "plugins/*/skills/*/SKILL.md" "plugins/*/skills/*/references/*.md"
-✔ 0 errors, 0 warnings and 0 suggestions in 53 files.
+✔ 0 errors, 0 warnings and 0 suggestions in 54 files.
 ```
 
 `markdownlint` is green under the committed `.markdownlint.jsonc` rule set
-(0 findings across 53 markdown files). The default rule set is not used because
+(0 findings across 54 markdown files). The default rule set is not used because
 it would require reformatting the 27 untouched reference files; the disabled
-rules are named in the config, not hidden. Vale is green on all 53 markdown files under the committed `.vale.ini`
+rules are named in the config, not hidden. Vale is green on all 54 markdown files under the committed `.vale.ini`
 vocabulary; the 8 `SKILL.md` descriptions are quoted so Vale can parse their
 frontmatter, and the technical identifiers are in the reviewed vocabulary.
 
@@ -451,9 +457,9 @@ that it is false.
 | `gen_cli_reference.py --check --all` | green (ssh-core page current; 8-plugin inventory) |
 | `sync_vendored.py --check` | green (14 copies) |
 | `tools/check_python_floor.py` | green (216 files, 0 problems) |
-| `markdownlint-cli` (project rule set) | green (0 findings, 53 files) |
-| `vale` (53 markdown files) | green (0 errors, 0 warnings, 0 suggestions) |
-| `gen_cli_reference.py --examples` | green (26 run, 462 annotated skips) |
+| `markdownlint-cli` (project rule set) | green (0 findings, 54 files) |
+| `vale` (54 markdown files) | green (0 errors, 0 warnings, 0 suggestions) |
+| `gen_cli_reference.py --examples` | green (27 run, 482 annotated skips) |
 | `pytest tests/test_manifests.py` | green (128 passed) |
 | `pytest tests/ -q` | green (2009 passed, 151 skipped) |
 | `ruff check .` raw | red by design (380), ratchet green |

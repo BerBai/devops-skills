@@ -31,7 +31,10 @@ standalone 1.5.0 feature set under the unified distribution version `1.0.0`
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- `docs/prd/v1.0.0-external-verification.md` — the external-environment
+  verification matrix for the capabilities CI can only logic-test.
 
 ## [1.0.0] - 2026-11-11
 
